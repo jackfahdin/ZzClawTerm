@@ -2,9 +2,105 @@
 #![cfg(windows)]
 
 use std::time::{Duration, Instant};
-
 use zzclawterm_terminal::TerminalCore;
 use zzclawterm_transport::{LocalSessionConfig, SessionEvent, SessionManager};
+
+#[test]
+#[ignore = "requires a working Windows ConPTY and CMD"]
+fn external_local_directory_with_chinese_and_spaces_is_used_without_a_startup_command() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("中文 directory with spaces");
+    std::fs::create_dir(&directory).unwrap();
+    let manager = SessionManager::new();
+    let session = manager
+        .create_local_session(LocalSessionConfig {
+            shell_path: Some("cmd.exe".into()),
+            shell_args: vec!["/D".into(), "/Q".into()],
+            working_dir: Some(directory.clone()),
+            cols: 240,
+            ..Default::default()
+        })
+        .unwrap();
+    let mut terminal = TerminalCore::new(240, 24);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut matched = false;
+    while Instant::now() < deadline && !matched {
+        for event in manager.drain_events(64).unwrap().events {
+            if let SessionEvent::Output { data, .. } = event {
+                terminal.advance(&data);
+                for reply in terminal.take_effects().pty_write {
+                    manager.write_raw(&session.id, &reply).unwrap();
+                }
+            }
+        }
+        matched = terminal
+            .lines()
+            .iter()
+            .any(|line| line.contains(directory.to_str().unwrap()));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    manager.close(&session.id).unwrap();
+    assert!(
+        matched,
+        "CMD prompt must show the requested working directory"
+    );
+    assert!(manager.list_sessions().unwrap().is_empty());
+}
+
+#[test]
+#[ignore = "requires a working Windows ConPTY and CMD"]
+fn conpty_long_output_retains_soft_wraps_and_hard_newlines_for_logical_display() {
+    let directory = tempfile::tempdir().unwrap();
+    let long_line = format!("ZZCLAWTERM_WRAP_BEGIN_{}_END", "0123456789".repeat(20));
+    let hard_line = "ZZCLAWTERM_HARD_BREAK";
+    let manager = SessionManager::new();
+    let session = manager
+        .create_local_session(LocalSessionConfig {
+            shell_path: Some("cmd.exe".into()),
+            shell_args: vec![
+                "/D".into(),
+                "/Q".into(),
+                "/K".into(),
+                format!("echo {long_line}&echo {hard_line}"),
+            ],
+            working_dir: Some(directory.path().into()),
+            cols: 32,
+            rows: 12,
+            ..Default::default()
+        })
+        .unwrap();
+    let mut terminal = TerminalCore::new(32, 12);
+    terminal.set_logical_line_snapshots(true);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut matched = false;
+    while Instant::now() < deadline && !matched {
+        for event in manager.drain_events(64).unwrap().events {
+            if let SessionEvent::Output { data, .. } = event {
+                terminal.advance(&data);
+                for reply in terminal.take_effects().pty_write {
+                    manager.write_raw(&session.id, &reply).unwrap();
+                }
+            }
+        }
+        matched = terminal
+            .all_text()
+            .is_some_and(|text| text.contains(&format!("{long_line}\n{hard_line}")));
+        if !matched {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    manager.close(&session.id).unwrap();
+    assert!(
+        matched,
+        "ConPTY must retain the soft/hard break distinction"
+    );
+    let snapshot = terminal.snapshot();
+    let index = snapshot.logical_lines.as_ref().expect("logical display");
+    assert!(index.logical_rows() < index.physical_rows());
+    assert!(snapshot.rows().iter().any(|row| row.wraps_to_next));
+    assert_eq!((terminal.cols(), terminal.rows()), (32, 12));
+    assert!(manager.list_sessions().unwrap().is_empty());
+}
 
 fn observe(args: &[&str], input: Option<&[u8]>) -> (bool, bool) {
     let manager = SessionManager::new();
@@ -106,63 +202,6 @@ fn native_posix_startup_preserves_rc_prompts_hooks_and_cleanup() {
         result.status.success(),
         "isolated startup checks: {}",
         String::from_utf8_lossy(&result.stderr)
-    );
-}
-
-#[test]
-#[ignore = "set ZZCLAWTERM_TEST_POSIX_SHELL to the Git Bash executable"]
-fn git_bash_reports_cwd_through_conpty() {
-    let shell = std::env::var("ZZCLAWTERM_TEST_POSIX_SHELL").expect("Git Bash executable");
-    let directory = tempfile::tempdir().unwrap();
-    let manager = SessionManager::new();
-    let session = manager
-        .create_local_session(LocalSessionConfig {
-            shell_path: Some(shell),
-            shell_args: vec!["--noprofile".into(), "--norc".into(), "-i".into()],
-            working_dir: Some(directory.path().into()),
-            ..Default::default()
-        })
-        .unwrap();
-    let mut terminal = TerminalCore::new(80, 24);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut matched = false;
-    let mut cwd_count = 0;
-    let mut mapped_count = 0;
-    let mut output_bytes = 0;
-    let mut error_seen = false;
-    while Instant::now() < deadline && !matched {
-        for event in manager.drain_events(64).unwrap().events {
-            match event {
-                SessionEvent::Output { data, .. } => {
-                    output_bytes += data.len();
-                    error_seen |= String::from_utf8_lossy(&data).contains("not found");
-                    terminal.advance(&data);
-                    for reply in terminal.take_effects().pty_write {
-                        let _ = manager.write_raw(&session.id, &reply);
-                    }
-                }
-                SessionEvent::CwdChanged { cwd, .. } => {
-                    cwd_count += 1;
-                    let style = manager.local_shell_path_style(&session.id).unwrap();
-                    let mapped = zzclawterm_transport::local_shell_cwd_to_browser_path(style, &cwd);
-                    mapped_count += usize::from(mapped.is_some());
-                    matched = mapped.is_some_and(|mapped| {
-                        zzclawterm_transport::file_browser_path_eq(
-                            zzclawterm_transport::FileBrowserBackendKind::Local,
-                            &mapped,
-                            &directory.path().to_string_lossy(),
-                        )
-                    });
-                }
-                _ => {}
-            }
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    manager.close(&session.id).unwrap();
-    assert!(
-        matched,
-        "Git Bash cwd must resolve to the actual Windows directory: cwd_count={cwd_count}, mapped_count={mapped_count}, output_bytes={output_bytes}, error_seen={error_seen}"
     );
 }
 

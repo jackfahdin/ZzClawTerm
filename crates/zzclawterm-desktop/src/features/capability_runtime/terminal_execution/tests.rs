@@ -1,17 +1,16 @@
-use gpui::AppContext as _;
-use std::time::Duration;
-
-use serde_json::Value;
-use tokio::sync::oneshot;
-use tokio_util::sync::CancellationToken;
-use zzclawterm_mcp_protocol::{RpcError, TerminalExecuteResult};
-use zzclawterm_terminal::agent_capture::AgentOutputCaptureProcessor;
-
 use super::{
     TerminalExecutionPolicy, TerminalExecutionRequest, TerminalExecutionState,
     external_mcp_terminal_policy,
 };
 use crate::features::terminal::ai_execution::{TerminalExecutionEvent, TerminalExecutionStatus};
+use gpui::AppContext as _;
+use serde_json::Value;
+use std::time::Duration;
+use zzclawterm_mcp_protocol::{RpcError, TerminalExecuteResult};
+use zzclawterm_terminal::agent_capture::AgentOutputCaptureProcessor;
+
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 #[test]
 fn external_mcp_terminal_display_mode_only_changes_regular_presentation() {
@@ -100,10 +99,10 @@ fn start_execution_recording(
     app: &crate::features::ZzClawTermApp,
     session_id: &str,
     path: &std::path::Path,
-    mode: zzclawterm_transport::RecordingMode,
+    mode: zzclawterm_recording::recording::RecordingMode,
     include_input: bool,
 ) {
-    use zzclawterm_transport::{
+    use zzclawterm_recording::recording::{
         ExistingFileBehavior, RecordingContext, RecordingProfile, RecordingRotationPolicy,
     };
     app.recording
@@ -151,7 +150,9 @@ fn automatic_execution_records_logical_commands_and_streamed_output_without_chan
     use std::net::TcpListener;
     use zzclawterm_core::agent_capture::build_agent_capture_command;
     use zzclawterm_core::models::connection::AiExecutionProfile;
-    use zzclawterm_transport::{RecordingMode, SessionEvent, TelnetSessionConfig};
+    use zzclawterm_recording::recording::RecordingMode;
+    use zzclawterm_transport::{SessionEvent, TelnetSessionConfig};
+
     cx.executor().allow_parking();
     let directory = TestConfigDir::new("zzclawterm-execution-recording");
     let app = app_with_visible_local_session(cx, directory.path(), "fixture");
@@ -390,9 +391,11 @@ fn shared_entry_routes_native_codex_claude_and_external_calls_on_a_hidden_termin
     use crate::features::capability_runtime::{CapabilityCaller, CapabilityRequest};
     use crate::features::test_support::app_with_visible_local_session;
     use crate::test_support::TestConfigDir;
+    use zzclawterm_core::models::connection::AiExecutionProfile;
+
     use gpui::AppContext as _;
     use serde_json::json;
-    use zzclawterm_core::{AiExecutionProfile, AiPermissionMode, CapabilityScope};
+    use zzclawterm_core::{AiPermissionMode, CapabilityScope};
     use zzclawterm_transport::LocalSessionConfig;
     cx.executor().allow_parking();
     let directory = TestConfigDir::new("zzclawterm-shared-terminal-execution");
@@ -415,7 +418,7 @@ fn shared_entry_routes_native_codex_claude_and_external_calls_on_a_hidden_termin
             app,
             &session.id,
             &directory.path().join("execution.log"),
-            zzclawterm_transport::RecordingMode::Transcript,
+            zzclawterm_recording::recording::RecordingMode::Transcript,
             true,
         );
     });
@@ -1108,14 +1111,17 @@ fn raw_failures_keep_partial_output_and_release_occupancy() {
 
 #[gpui::test]
 fn raw_session_events_survive_full_degraded_ui_tail(cx: &mut gpui::TestAppContext) {
-    // The frame worker and session bridge wake this test from real threads.
-    cx.executor().allow_parking();
     use crate::features::test_support::app_with_visible_local_session;
-    use crate::models::TERMINAL_UI_OUTPUT_TAIL_CAP;
     use crate::test_support::TestConfigDir;
     use std::time::Instant;
-    use zzclawterm_core::raw_cli_capture::{RawCliCapture, RawCliEnd};
+    use zzclawterm_core::raw_cli_capture::RawCliCapture;
+    use zzclawterm_core::raw_cli_capture::RawCliEnd;
     use zzclawterm_transport::SessionEvent;
+    // The frame worker and session bridge wake this test from real threads.
+    cx.executor().allow_parking();
+
+    use crate::models::TERMINAL_UI_OUTPUT_TAIL_CAP;
+
     let directory = TestConfigDir::new("zzclawterm-raw-session-events");
     let app = app_with_visible_local_session(cx, directory.path(), "raw");
     cx.update_entity(&app, |app, cx| {
@@ -1165,8 +1171,9 @@ fn network_session_profile_and_background_policy_are_shared(cx: &mut gpui::TestA
     use crate::features::test_support::app_with_visible_local_session;
     use crate::models::SessionLaunchConfig;
     use crate::test_support::TestConfigDir;
-    use zzclawterm_core::AiExecutionProfile;
+    use zzclawterm_core::models::connection::AiExecutionProfile;
     use zzclawterm_transport::{SshSessionConfig, SshSessionProfile};
+
     let directory = TestConfigDir::new("zzclawterm-network-policy");
     let app = app_with_visible_local_session(cx, directory.path(), "ssh");
     cx.update_entity(&app, |app, cx| {

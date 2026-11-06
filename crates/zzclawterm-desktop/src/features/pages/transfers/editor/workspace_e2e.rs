@@ -1,14 +1,10 @@
-use std::env;
-use std::fs;
-use std::sync::Arc;
-
-use zzclawterm_transport::{
-    RemoteFileBackendKind, RemoteFilePath, RemoteFileService, SftpAttributeUpdate,
-    SftpTransferControl, SftpTransferOptions, SshHostKey, SshHostKeyDecision, SshHostKeyVerifier,
-    SshSessionConfig,
-};
-
 use super::workspace::{external_edit_path, prepare_external_edit_workspace};
+use std::sync::Arc;
+use std::{env, fs};
+use zzclawterm_files::remote_file::{RemoteFileBackendKind, RemoteFileService};
+use zzclawterm_files::sftp::{RemoteFilePath, SftpAttributeUpdate, SftpTransferControl};
+use zzclawterm_files::sftp_transfer_types::SftpTransferOptions;
+use zzclawterm_transport::{SshHostKey, SshHostKeyDecision, SshHostKeyVerifier, SshSessionConfig};
 
 struct AcceptDisposableServerKey;
 

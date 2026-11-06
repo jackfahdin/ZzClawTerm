@@ -1,16 +1,15 @@
-use rust_i18n::t;
-
-use gpui::Context;
-use zzclawterm_core::{AiAction, AiContext};
-use zzclawterm_transport::{RecordingMode, RecordingStatus, SessionKind};
-use zzclawterm_ui::ZzClawMenuItem;
-
+use super::helpers::{available_translation_providers, search_engine_url};
 use crate::features::{
     ZzClawTermApp, icons::known_search_engine_icon, session::SerialUploadProtocol,
 };
 use crate::models::{AiPreparedRequest, NavItem, SettingsTab, TerminalSearchMode};
+use gpui::Context;
+use zzclawterm_core::{AiAction, AiContext};
+use zzclawterm_recording::recording::{RecordingMode, RecordingStatus};
+use zzclawterm_transport::SessionKind;
+use zzclawterm_ui::ZzClawMenuItem;
 
-use super::helpers::{available_translation_providers, search_engine_url};
+use rust_i18n::t;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn prepare_terminal_context_menu(&mut self, cx: &mut Context<Self>) {
@@ -331,7 +330,6 @@ impl ZzClawTermApp {
             vec![
                 ZzClawMenuItem::action(t!("recording.startTranscriptLog"))
                     .icon("icons/file/description.svg")
-                    .shortcut(shortcut)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.start_recording_for_session(
                             &transcript_session_id,
@@ -492,23 +490,20 @@ fn terminal_ai_prepared_request(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use zzclawterm_ui::ZzClawMenuItem;
-
+    use super::terminal_ai_prepared_request;
+    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
+    use crate::features::ZzClawTermApp;
+    use crate::features::test_support::app_with_visible_local_session;
+    use crate::features::translation::TranslationFeatureState;
     use gpui::{AppContext as _, TestAppContext};
+    use std::path::PathBuf;
     use zzclawterm_core::test_support::TestTempDir;
     use zzclawterm_core::{
         AiAction, AiContext, AiCustomActionConfig, AiSettings, AppRuntime, RuntimeMode,
         SearchEngineConfig, TranslationSettings, uuid,
     };
-    use zzclawterm_transport::{RecordingMode, RecordingStatus, RecordingStatusState};
-
-    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
-    use crate::features::ZzClawTermApp;
-    use crate::features::test_support::app_with_visible_local_session;
-    use crate::features::translation::TranslationFeatureState;
-
-    use super::terminal_ai_prepared_request;
+    use zzclawterm_recording::recording::{RecordingMode, RecordingStatus, RecordingStatusState};
+    use zzclawterm_ui::ZzClawMenuItem;
 
     fn unique_test_dir(label: &str) -> PathBuf {
         // A uuid rather than a clock reading: these tests run in parallel and
@@ -646,11 +641,6 @@ mod tests {
                 "Settings...",
             ]
         );
-        let recording_shortcut = if cfg!(target_os = "macos") {
-            "Cmd+Alt+R"
-        } else {
-            "Ctrl+Alt+R"
-        };
         assert_eq!(
             recording
                 .iter()
@@ -658,10 +648,7 @@ mod tests {
                 .map(|(_, icon, shortcut, _, _, _)| (icon, shortcut))
                 .collect::<Vec<_>>(),
             vec![
-                (
-                    Some("icons/file/description.svg".to_string()),
-                    Some(recording_shortcut.to_string())
-                ),
+                (Some("icons/file/description.svg".to_string()), None),
                 (Some("icons/session/record.svg".to_string()), None),
                 (None, None),
                 (Some("icons/file/description.svg".to_string()), None),

@@ -10,8 +10,13 @@ repository.workspace = true
 test-support = []
 
 [dependencies]
+nucleo-matcher.workspace = true
 csscolorparser = "0.7"
 aes-gcm.workspace = true
+aes.workspace = true
+cbc.workspace = true
+pbkdf2.workspace = true
+sha3.workspace = true
 argon2.workspace = true
 base64.workspace = true
 crypto_secretbox.workspace = true

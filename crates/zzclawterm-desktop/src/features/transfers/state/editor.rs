@@ -1,13 +1,18 @@
 //! Built-in remote-editor workspace, tab lifecycle and window tracking.
 
+use crate::models::{TransferEditorState, TransferEditorWorkspaceState};
 use gpui::FocusHandle;
-use zzclawterm_transport::{RemoteTextDocument, RemoteTextGeneration, RemoteTextWriteResult};
 #[cfg(test)]
-use zzclawterm_transport::{RemoteTextMetadata, RemoteTextRevision, SftpWriteTextResult};
+use zzclawterm_files::remote_file::RemoteTextMetadata;
+#[cfg(test)]
+use zzclawterm_files::remote_file::RemoteTextRevision;
+use zzclawterm_files::remote_file::{
+    RemoteTextDocument, RemoteTextGeneration, RemoteTextWriteResult,
+};
+#[cfg(test)]
+use zzclawterm_files::sftp::SftpWriteTextResult;
 use zzclawterm_ui::document_snapshot::ZzClawDocumentSnapshot;
 use zzclawterm_ui::{ChildWindowSlot, ZzClawWindowHandle};
-
-use crate::models::{TransferEditorState, TransferEditorWorkspaceState};
 
 #[cfg(test)]
 use super::{
@@ -44,7 +49,7 @@ impl TransferFeatureState {
             .as_mut()
             .and_then(|workspace| workspace.tabs.iter_mut().find(|tab| tab.id == id))
         {
-            tab.generation = zzclawterm_transport::RemoteTextGeneration::next();
+            tab.generation = zzclawterm_files::remote_file::RemoteTextGeneration::next();
             tab.loading = true;
             tab.reload_confirm = false;
             tab.error = None;

@@ -1,0 +1,27 @@
+{
+  "root": "ZzClawTerm-portable",
+  "marker": "zzclawterm-portable",
+  "data_placeholder": "data/.keep",
+  "program_files": [
+    "ZzClawTerm.exe",
+    "LICENSE",
+    "VERSION"
+  ],
+  "helper_files": [
+    "zzclawterm-rdp-helper.exe",
+    "zzclawterm-vnc-helper.exe",
+    "zzclawterm-mcp.exe"
+  ],
+  "support_files": ["conpty/LICENSE.txt"],
+  "conpty_files": {
+    "x86_64-pc-windows-msvc": [
+      "conpty/x64/conpty.dll",
+      "conpty/x64/x64/OpenConsole.exe",
+      "conpty/x64/arm64/OpenConsole.exe"
+    ],
+    "aarch64-pc-windows-msvc": [
+      "conpty/arm64/conpty.dll",
+      "conpty/arm64/arm64/OpenConsole.exe"
+    ]
+  }
+}

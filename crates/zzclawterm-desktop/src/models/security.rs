@@ -10,6 +10,10 @@ pub(crate) enum SecurityAuthTab {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SecurityUnlockAction {
     SavePasswordEditor(u64),
+    RevealConnectionPassword {
+        editor_generation: u64,
+        revision: u64,
+    },
     ViewPrivateKey(String),
     CopyPublicKey(String),
     RevealPassword(String),

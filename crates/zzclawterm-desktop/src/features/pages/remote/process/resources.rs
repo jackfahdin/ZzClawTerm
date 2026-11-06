@@ -16,6 +16,16 @@ pub(in crate::features::pages::remote) fn usage_color(
     }
 }
 
+pub(super) fn process_usage_color(palette: ThemePalette, ratio: f64) -> gpui::Hsla {
+    if ratio >= 0.9 {
+        rgb(palette.danger).into()
+    } else if ratio >= 0.7 {
+        rgb(palette.warning).into()
+    } else {
+        rgb(palette.text).into()
+    }
+}
+
 pub(in crate::features::pages::remote) fn compact_remote_svg_button(
     palette: ThemePalette,
     id: impl Into<String>,

@@ -24,6 +24,13 @@ case $zzclawterm_namespace in
         esac
         ;;
 esac
+# The bootstrap observes the actual guest shell and user, including WSL defaults.
+# Emission waits for installed command hooks; names are encoded only for framing.
+zzclawterm_program_b64=$(printf '%s' "$zzclawterm_shell" | base64 | tr -d '\r\n')
+zzclawterm_user=$(id -un)
+zzclawterm_user_b64=$(printf '%s' "$zzclawterm_user" | base64 | tr -d '\r\n')
+ZZCLAWTERM_LOCAL_IDENTITY=$zzclawterm_program_b64:$zzclawterm_user_b64
+export ZZCLAWTERM_LOCAL_IDENTITY
 ZZCLAWTERM_LOCAL_DIR=$zzclawterm_dir
 export ZZCLAWTERM_LOCAL_DIR
 
@@ -38,8 +45,14 @@ for __zzclawterm_index in "${!PROMPT_COMMAND[@]}"; do
     PROMPT_COMMAND[$__zzclawterm_index]=${PROMPT_COMMAND[$__zzclawterm_index]//"$__zzclawterm_loader"/:}
 done
 unset __zzclawterm_loader __zzclawterm_index
+__ZZCLAWTERM_BASH_FULL__
+__zzclawterm_install_prompt full || true
 __zzclawterm_local_cwd() {
     local ret=$?
+    if [ -n "${ZZCLAWTERM_BASH_HOOKS_READY:-}" ] && [ -n "${ZZCLAWTERM_LOCAL_IDENTITY:-}" ]; then
+        printf '\033]7777;ZzClawTermShell:%s\007' "$ZZCLAWTERM_LOCAL_IDENTITY"
+        unset ZZCLAWTERM_LOCAL_IDENTITY
+    fi
     local path=$PWD
     # MSYS mounts such as /tmp need not be drive-letter aliases. Emit the
     # actual Windows URI rather than guessing their host mapping.
@@ -59,14 +72,26 @@ else
 }__zzclawterm_local_cwd"
 fi
 export -n PROMPT_COMMAND
+# The loader already runs at the first prompt, after the user's rc file.
+# Complete SSH's deferred installer here so the first submitted command is observed.
+if [ -n "${ZZCLAWTERM_BASH_INSTALL_PENDING:-}" ]; then
+    eval "${__nya_bp_install_payload-:}"
+fi
 unset ZZCLAWTERM_LOCAL_DIR
 __zzclawterm_local_cwd
+if [ -n "${ZZCLAWTERM_BASH_HOOKS_READY:-}" ]; then __nya_bp_interactive_mode; fi
 ZZCLAWTERM_BASH_EOF
 
 cat > "$zzclawterm_dir/fish" <<'ZZCLAWTERM_FISH_EOF' || exec "$zzclawterm_shell" "$@"
+__ZZCLAWTERM_FISH_FULL__
 function __zzclawterm_local_cwd --on-event fish_prompt
+    if set -q ZZCLAWTERM_FISH_HOOKS_READY; and set -q ZZCLAWTERM_LOCAL_IDENTITY
+        printf '\033]7777;ZzClawTermShell:%s\007' "$ZZCLAWTERM_LOCAL_IDENTITY"
+        set -e ZZCLAWTERM_LOCAL_IDENTITY
+    end
     printf '\033]7;file://localhost%s\007' (string replace -a -- '%' '%25' $PWD)
 end
+__zzclawterm_install_prompt full
 set -e ZZCLAWTERM_LOCAL_DIR
 ZZCLAWTERM_FISH_EOF
 
@@ -109,7 +134,13 @@ else
     unset ZDOTDIR
 fi
 [[ ! -r "${ZDOTDIR:-$HOME}/.zshrc" ]] || source "${ZDOTDIR:-$HOME}/.zshrc"
+__ZZCLAWTERM_ZSH_FULL__
+__zzclawterm_install_prompt full || true
 __zzclawterm_local_cwd() {
+    if [[ -n ${ZZCLAWTERM_ZSH_HOOKS_READY:-} && -n ${ZZCLAWTERM_LOCAL_IDENTITY:-} ]]; then
+        printf '\033]7777;ZzClawTermShell:%s\007' "$ZZCLAWTERM_LOCAL_IDENTITY"
+        unset ZZCLAWTERM_LOCAL_IDENTITY
+    fi
     printf '\033]7;file://localhost%s\007' "${PWD//%/%25}"
 }
 autoload -Uz add-zsh-hook

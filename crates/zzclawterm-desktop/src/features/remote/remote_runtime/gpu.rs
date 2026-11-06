@@ -1,10 +1,8 @@
+use crate::features::{ZzClawTermApp, runtime_jobs::GpuJobResult, runtime_jobs::NpuJobResult};
 use futures::StreamExt as _;
 use gpui::Context;
-use zzclawterm_transport::{
-    RemoteGpuOverview, RemoteGpuService, RemoteNpuOverview, RemoteNpuService,
-};
-
-use crate::features::{ZzClawTermApp, runtime_jobs::GpuJobResult, runtime_jobs::NpuJobResult};
+use zzclawterm_remote_ops::ascend_npu::{RemoteNpuOverview, RemoteNpuService};
+use zzclawterm_remote_ops::gpu::{RemoteGpuOverview, RemoteGpuService};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn apply_gpu_search(&mut self, text: String, cx: &mut Context<Self>) {

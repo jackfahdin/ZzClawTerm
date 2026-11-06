@@ -23,7 +23,7 @@ use std::time::Instant;
 #[cfg(any(windows, test))]
 mod listeners;
 
-use super::MIT_MAGIC_COOKIE;
+use crate::x11::MIT_MAGIC_COOKIE;
 use zzclawterm_core::models::settings::x11::X11ServerOptions;
 
 /// Environment variable that overrides every other X server location.

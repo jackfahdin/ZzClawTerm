@@ -100,6 +100,31 @@ impl SettingsPanel {
                             }),
                         ),
                     ))
+                    .when(
+                        self.settings.summary().terminal_zebra_stripes_enabled,
+                        |this| {
+                            this.child(
+                                div()
+                                    .pl_4()
+                                    .debug_selector(|| "terminal-row-stripes-setting".into())
+                                    .child(settings_form_row(
+                                        palette,
+                                        t!("settings.zebraStripesByRow"),
+                                        Some(SharedString::from(t!(
+                                            "settings.zebraStripesByRowDesc"
+                                        ))),
+                                        settings_switch(
+                                            palette,
+                                            "terminal-zebra-stripes-by-row",
+                                            self.settings.summary().terminal_zebra_stripes_by_row,
+                                            cx.listener(|this, _, _, cx| {
+                                                this.toggle_terminal_zebra_stripes_by_row(cx);
+                                            }),
+                                        ),
+                                    )),
+                            )
+                        },
+                    )
                     .child(settings_form_row(
                         palette,
                         t!("settings.showWorkspacePadding"),
@@ -111,6 +136,39 @@ impl SettingsPanel {
                             cx.listener(|this, _, _, cx| {
                                 this.toggle_terminal_workspace_padding(cx);
                             }),
+                        ),
+                    ))
+                    .child(settings_form_row(
+                        palette,
+                        t!("settings.terminalWrapMode"),
+                        Some(SharedString::from(t!("settings.terminalWrapModeDesc"))),
+                        self.settings_select_control(
+                            "settings.terminal.wrap-mode",
+                            vec![
+                                ZzClawSelectOption::new(
+                                    "character",
+                                    t!("settings.terminalWrapCharacter"),
+                                ),
+                                ZzClawSelectOption::new("none", t!("settings.terminalWrapNone")),
+                            ],
+                            self.settings
+                                .summary()
+                                .terminal_wrap_mode
+                                .compat_value()
+                                .to_string(),
+                            false,
+                            cx,
+                        ),
+                    ))
+                    .child(settings_form_row(
+                        palette,
+                        t!("settings.showWrapMarkers"),
+                        Some(SharedString::from(t!("settings.showWrapMarkersDesc"))),
+                        settings_switch(
+                            palette,
+                            "terminal-wrap-markers",
+                            self.settings.summary().terminal_show_wrap_markers,
+                            cx.listener(|this, _, _, cx| this.toggle_terminal_wrap_markers(cx)),
                         ),
                     ))
                     .child(settings_form_row(
@@ -255,6 +313,24 @@ impl SettingsPanel {
                             .flex()
                             .flex_col()
                             .gap_2()
+                            .child(terminal_action_matcher_row(
+                                palette,
+                                TerminalActionMatcherPresentation {
+                                    id: "terminal-action-links-mac",
+                                    label: t!("settings.actionLinksMatcherMac"),
+                                    example: Cow::Borrowed("AA:BB:CC:DD:EE:FF"),
+                                    description: t!("settings.actionLinksMatcherMacDesc"),
+                                    checked: self
+                                        .settings
+                                        .summary()
+                                        .terminal_action_links_matchers
+                                        .mac,
+                                    enabled: action_links_enabled,
+                                },
+                                cx.listener(|this, _, _, cx| {
+                                    this.toggle_terminal_action_links_matcher("mac", cx);
+                                }),
+                            ))
                             .child(terminal_action_matcher_row(
                                 palette,
                                 TerminalActionMatcherPresentation {

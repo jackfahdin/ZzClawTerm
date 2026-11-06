@@ -5,7 +5,9 @@
 //! [`AppSettingsSummary`]; document keys, field names and defaults are
 //! unchanged.
 
+use redb::ReadableTableMetadata;
 use std::collections::HashMap;
+use zzclawterm_core::models::settings::TerminalWrapMode;
 use zzclawterm_core::models::window_decoration::WindowDecoration;
 use zzclawterm_core::models::window_material::{WindowMaterial, default_window_background_opacity};
 
@@ -244,6 +246,16 @@ impl ConnectionStore {
                 false,
             ),
             terminal_show_timestamps: json_bool(&value, &["terminal", "show_timestamps"], false),
+            terminal_wrap_mode: TerminalWrapMode::from_compat_value(
+                json_path(&value, &["terminal", "wrap_mode"])
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("character"),
+            ),
+            terminal_show_wrap_markers: json_bool(
+                &value,
+                &["terminal", "show_wrap_markers"],
+                false,
+            ),
             terminal_show_multi_line_paste_dialog: json_bool(
                 &value,
                 &["terminal", "show_multi_line_paste_dialog"],
@@ -265,6 +277,11 @@ impl ConnectionStore {
                 &["terminal", "zebra_stripes_enabled"],
                 true,
             ),
+            terminal_zebra_stripes_by_row: json_bool(
+                &value,
+                &["terminal", "zebra_stripes_by_row"],
+                false,
+            ),
             terminal_action_links_enabled: json_bool(
                 &value,
                 &["terminal", "action_links_enabled"],
@@ -274,6 +291,11 @@ impl ConnectionStore {
             search_custom_engines: load_search_engines(&value),
             ui_remote_stats_interval: json_u32(&value, &["ui", "remote_stats_interval"], 3)
                 .clamp(1, 60),
+            ui_remote_stats_show_users: json_bool(
+                &value,
+                &["ui", "remote_stats_show_users"],
+                false,
+            ),
             ui_gpu_monitor_interval: json_u32(&value, &["ui", "gpu_monitor_interval"], 3)
                 .clamp(3, 120),
             ui_ascend_npu_monitor_interval: json_u32(
@@ -629,6 +651,13 @@ impl ConnectionStore {
                     _ => 7,
                 }
             },
+            diagnostics_log_shard_bytes: zzclawterm_core::diagnostics::normalize_log_shard_bytes(
+                json_u64(
+                    &value,
+                    &["diagnostics", "shard_bytes"],
+                    zzclawterm_core::diagnostics::DEFAULT_LOG_SHARD_BYTES,
+                ),
+            ),
             startup_restore: json_bool(&value, &["general", "startup_restore"], false),
             startup_restore_window_layout: json_bool(
                 &value,
@@ -699,6 +728,14 @@ impl ConnectionStore {
             .map(|token| bootstrap.decrypt_settings_secret(&token))
             .transpose()?
             .map(Into::into);
+        if current_password.as_deref() != next_password {
+            let txn = self.db.begin_write()?;
+            if txn.open_table(super::cloud_sync_v4::REPLICAS)?.len()? > 0 {
+                return Err(StorageError::InvalidData(
+                    "Cloud Sync V3 requires publishing and verifying a new space before changing the master password".into(),
+                ));
+            }
+        }
         let rewrapped_master_key = self
             .load_master_key_token()?
             .map(|token| {
@@ -720,6 +757,11 @@ impl ConnectionStore {
         );
 
         let txn = self.db.begin_write()?;
+        if current_password.as_deref() != next_password
+            && txn.open_table(super::cloud_sync_v4::REPLICAS)?.len()? > 0
+        {
+            return Err(StorageError::CloudSyncLocalChanged);
+        }
         write_json_in_txn(&txn, SETTINGS_TABLE, SETTINGS_DEFAULT, &value)?;
         if let Some(token) = rewrapped_master_key.as_deref() {
             txn.open_table(META_TABLE)?.insert(META_MASTER_KEY, token)?;
@@ -1406,6 +1448,27 @@ impl ConnectionStore {
             &["terminal", "show_timestamps"],
             serde_json::Value::Bool(settings.terminal_show_timestamps),
         );
+        // Leave newer, unsupported values intact when their safe fallback has
+        // not been changed. An unrelated settings save must not downgrade them.
+        let raw_mode = json_path(&value, &["terminal", "wrap_mode"]);
+        let unsupported_mode =
+            raw_mode.is_some_and(|raw| !matches!(raw.as_str(), Some("character" | "none")));
+        if !unsupported_mode || settings.terminal_wrap_mode != TerminalWrapMode::Character {
+            set_nested_json_string(
+                &mut value,
+                &["terminal", "wrap_mode"],
+                settings.terminal_wrap_mode.compat_value().into(),
+            );
+        }
+        let unsupported_marker = json_path(&value, &["terminal", "show_wrap_markers"])
+            .is_some_and(|raw| !raw.is_boolean());
+        if !unsupported_marker || settings.terminal_show_wrap_markers {
+            set_nested_json_value(
+                &mut value,
+                &["terminal", "show_wrap_markers"],
+                settings.terminal_show_wrap_markers.into(),
+            );
+        }
         set_nested_json_value(
             &mut value,
             &["terminal", "show_multi_line_paste_dialog"],
@@ -1433,18 +1496,30 @@ impl ConnectionStore {
         );
         set_nested_json_value(
             &mut value,
-            &["terminal", "action_links_enabled"],
-            serde_json::Value::Bool(settings.terminal_action_links_enabled),
+            &["terminal", "zebra_stripes_by_row"],
+            serde_json::Value::Bool(settings.terminal_zebra_stripes_by_row),
         );
         set_nested_json_value(
             &mut value,
-            &["terminal", "action_links_matchers"],
-            serde_json::json!({
-                "ipv4": settings.terminal_action_links_matchers.ipv4,
-                "archive": settings.terminal_action_links_matchers.archive,
-                "host_port": settings.terminal_action_links_matchers.host_port,
-            }),
+            &["terminal", "action_links_enabled"],
+            serde_json::Value::Bool(settings.terminal_action_links_enabled),
         );
+        // Update only known keys so future matcher options survive older readers.
+        for (key, enabled) in [
+            ("mac", settings.terminal_action_links_matchers.mac),
+            ("ipv4", settings.terminal_action_links_matchers.ipv4),
+            ("archive", settings.terminal_action_links_matchers.archive),
+            (
+                "host_port",
+                settings.terminal_action_links_matchers.host_port,
+            ),
+        ] {
+            set_nested_json_value(
+                &mut value,
+                &["terminal", "action_links_matchers", key],
+                serde_json::Value::Bool(enabled),
+            );
+        }
         set_nested_json_value(
             &mut value,
             &["search", "custom_engines"],
@@ -1454,6 +1529,11 @@ impl ConnectionStore {
             &mut value,
             &["ui", "remote_stats_interval"],
             serde_json::Value::from(settings.ui_remote_stats_interval.clamp(1, 60)),
+        );
+        set_nested_json_value(
+            &mut value,
+            &["ui", "remote_stats_show_users"],
+            serde_json::Value::Bool(settings.ui_remote_stats_show_users),
         );
         set_nested_json_value(
             &mut value,
@@ -1653,6 +1733,13 @@ impl ConnectionStore {
             &mut value,
             &["diagnostics", "retention_days"],
             serde_json::Value::from(retention),
+        );
+        set_nested_json_value(
+            &mut value,
+            &["diagnostics", "shard_bytes"],
+            serde_json::Value::from(zzclawterm_core::diagnostics::normalize_log_shard_bytes(
+                settings.diagnostics_log_shard_bytes,
+            )),
         );
         self.save_settings_value(&value)?;
         self.load_app_settings_summary()
@@ -2163,6 +2250,10 @@ fn load_action_links_matchers(
         return defaults;
     };
     zzclawterm_core::ActionLinksMatcherSettings {
+        mac: obj
+            .get("mac")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(defaults.mac),
         ipv4: obj
             .get("ipv4")
             .and_then(|v| v.as_bool())

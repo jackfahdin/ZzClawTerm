@@ -130,6 +130,20 @@ impl ZzClawTermApp {
         S: Fn(&mut ZzClawTermApp, &mut Window, &mut Context<ZzClawTermApp>) -> bool + 'static,
         C: Fn(&mut ZzClawTermApp, &mut Context<ZzClawTermApp>) + 'static,
     {
+        self.open_tracked_form_dialog(spec, window, cx);
+    }
+
+    pub(in crate::features) fn open_tracked_form_dialog<R, S, C>(
+        &mut self,
+        spec: (String, f32, String, R, S, C),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ZzClawDialogHandle
+    where
+        R: Fn(&mut ZzClawTermApp, &mut Window, &mut Context<ZzClawTermApp>) -> AnyElement + 'static,
+        S: Fn(&mut ZzClawTermApp, &mut Window, &mut Context<ZzClawTermApp>) -> bool + 'static,
+        C: Fn(&mut ZzClawTermApp, &mut Context<ZzClawTermApp>) + 'static,
+    {
         let (title, width, action_label, render, on_submit, on_cancel) = spec;
         let cancel_label = t!("common.cancel").to_string();
         let app = cx.entity();
@@ -138,7 +152,7 @@ impl ZzClawTermApp {
         let on_submit = Rc::new(on_submit) as Rc<FormSubmitHandler>;
         let on_cancel = Rc::new(on_cancel) as Rc<AppDialogHandler>;
 
-        window.open_nya_dialog(cx, move |dialog, _, _| {
+        window.open_tracked_nya_dialog(cx, move |dialog, _, _| {
             let submit_app = app.clone();
             let cancel_app = app.clone();
             let on_submit = on_submit.clone();
@@ -156,7 +170,7 @@ impl ZzClawTermApp {
                 true
             })
             .into_dialog()
-        });
+        })
     }
 
     pub(in crate::features) fn open_guarded_form_dialog<R, S, C, B>(

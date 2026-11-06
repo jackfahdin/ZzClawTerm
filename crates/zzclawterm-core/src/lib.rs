@@ -2,6 +2,7 @@ pub mod activation;
 pub mod agent_capture;
 pub mod ai;
 pub mod app_identity;
+pub mod ascend_npu;
 pub mod assets;
 pub mod capabilities;
 pub mod character_encoding;
@@ -9,6 +10,7 @@ pub mod cloud_sync;
 pub mod command_draft;
 pub mod command_search;
 pub mod command_suggestion_suppression;
+pub mod completion;
 pub mod connection_route;
 pub mod credential_autofill;
 pub mod credentials_crypto;
@@ -17,10 +19,12 @@ pub mod document_edit;
 pub mod document_language;
 pub mod hex_document;
 pub mod keyword_highlight_presets;
+pub mod mac_address;
 pub mod models;
 pub mod natural_order;
 pub mod network_cli_prompt;
 pub mod note_export;
+pub mod packaging;
 pub mod plugins;
 pub mod portable_snapshot;
 pub mod raw_cli_capture;
@@ -29,6 +33,7 @@ pub mod runtime;
 pub mod secret;
 pub mod session_import;
 pub mod ssh_keys;
+pub mod sync_schema;
 pub mod terminal;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -188,8 +193,12 @@ pub use remote_preview::{
 pub use runtime::{AppRuntime, RuntimeMode};
 pub use secret::{SecretBytes, SecretString};
 pub use session_import::{
-    PreparedSessionConnection, PreparedSessionImport, SessionImportError, prepare_session_import,
-    prepare_ssh_config_import, prepare_termius_session_import,
+    PreparedSessionConnection, PreparedSessionImport, SessionImportError, WindtermAccountAction,
+    WindtermAccountDecision, WindtermAccountPreview, WindtermImportOutcome, WindtermImportReport,
+    WindtermMissingOneKey, WindtermOneKeyConfigState, WindtermPreview, WindtermUnlinkedReason,
+    WindtermUnlinkedSession, prepare_session_import, prepare_ssh_config_import,
+    prepare_termius_session_import, prepare_windterm_import_with_decisions,
+    prepare_windterm_preview,
 };
 pub use terminal::file_drop::{
     format_local_terminal_drop_input, quote_local_path, terminal_drop_overlay_copy,

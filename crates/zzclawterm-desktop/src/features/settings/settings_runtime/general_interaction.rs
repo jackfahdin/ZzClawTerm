@@ -185,6 +185,22 @@ impl ZzClawTermApp {
         self.save_diagnostics_settings(cx);
     }
 
+    pub(in crate::features) fn set_diagnostics_log_shard_bytes(
+        &mut self,
+        bytes: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.settings.set_diagnostics_log_shard_bytes(bytes) {
+            return;
+        }
+        // The log layer reads this atomically, so new shards honour the new
+        // budget without restarting the process.
+        zzclawterm_core::diagnostics::set_log_shard_bytes(
+            self.settings.summary().diagnostics_log_shard_bytes,
+        );
+        self.save_diagnostics_settings(cx);
+    }
+
     pub(in crate::features) fn save_diagnostics_settings(&mut self, cx: &mut Context<Self>) {
         if self.defer_settings_domain_persistence(SettingsPersistenceDomain::Diagnostics, cx) {
             return;
@@ -304,6 +320,8 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.settings.set_interaction_word_separators(text);
+        // Without this, a draft never marks the Interaction domain dirty: applying it
+        // writes nothing and cancelling it silently restores the old separators.
         self.save_interaction_settings(cx);
         cx.notify();
     }

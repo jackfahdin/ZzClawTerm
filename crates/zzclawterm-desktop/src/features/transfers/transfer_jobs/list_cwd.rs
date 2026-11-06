@@ -1,14 +1,12 @@
-use gpui::Context;
-use zzclawterm_transport::SftpFileEntry;
-
+use super::helpers::submit_transfer_blocking_job;
 use crate::features::ZzClawTermApp;
 use crate::models::{
     TransferBrowserChildrenMenuStatus, TransferBrowserNavigationSnapshot,
     TransferBrowserPathMenuKind, TransferBrowserPathMenuState, TransferJobEvent, TransferJobKind,
     TransferJobOutput, TransferJobResult, TransferJobState, TransferJobStatus,
 };
-
-use super::helpers::submit_transfer_blocking_job;
+use gpui::Context;
+use zzclawterm_files::sftp::SftpFileEntry;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn start_transfer_initial_directory_job(
@@ -54,7 +52,7 @@ impl ZzClawTermApp {
         });
         #[cfg(test)]
         if let Some(requests) = self.transfer.browser.directory_requests.as_mut() {
-            requests.push((id, zzclawterm_transport::RemoteFilePath::new("/")));
+            requests.push((id, zzclawterm_files::sftp::RemoteFilePath::new("/")));
             cx.notify();
             return;
         }

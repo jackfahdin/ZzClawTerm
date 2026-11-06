@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
 use crate::models::{
@@ -255,6 +256,7 @@ fn terminal_snapshot_with_newer_edge_row(
             total_rows: base.total_rows.saturating_add(1),
             display_offset: base.display_offset,
             images: base.images.clone(),
+            line_number_base: base.line_number_base,
         },
         rows,
     ))
@@ -316,6 +318,7 @@ fn terminal_snapshot_with_retained_scroll_window(
             total_rows: base.total_rows.saturating_add(newer_count),
             display_offset: base.display_offset,
             images,
+            line_number_base: base.line_number_base,
         },
         rows,
     ))
@@ -708,6 +711,13 @@ impl ZzClawTermApp {
         if session_id.is_empty() {
             return false;
         }
+        self.terminal
+            .view
+            .frame_pipeline
+            .set_logical_line_snapshots(
+                self.settings.summary().terminal_wrap_mode
+                    == zzclawterm_core::models::settings::TerminalWrapMode::None,
+            );
         let surface = self.ensure_terminal_surface(session_id, cx);
         let Some(view) = self.terminal.view.views.get(session_id) else {
             return false;
@@ -728,6 +738,9 @@ impl ZzClawTermApp {
         );
         let input_latency_active =
             terminal_input_latency_active(self.shell.last_terminal_input_at(), now);
+        // Echo over SSH can arrive after the short paint-priority window.
+        // Retain the input token so its cursor movement can still be revealed.
+        let horizontal_input_at = self.shell.last_terminal_input_at();
         let Some(snapshot) = terminal_paint_window_snapshot_for_view(
             Some(view),
             display_offset,
@@ -753,6 +766,8 @@ impl ZzClawTermApp {
         let show_line_numbers = self.settings.summary().terminal_show_line_numbers;
         let max_line_number_digits = view.max_line_number_digits;
         let show_timestamps = self.settings.summary().terminal_show_timestamps;
+        let wrap_mode = self.settings.summary().terminal_wrap_mode;
+        let show_wrap_markers = self.settings.summary().terminal_show_wrap_markers;
         let timestamp_format = self.settings.summary().terminal_timestamp_format.clone();
         let (cell_w, cell_h) = self
             .terminal
@@ -864,6 +879,8 @@ impl ZzClawTermApp {
                 show_line_numbers,
                 max_line_number_digits,
                 show_timestamps,
+                wrap_mode,
+                show_wrap_markers,
                 timestamp_format: timestamp_format.clone(),
                 is_active,
             });
@@ -901,6 +918,7 @@ impl ZzClawTermApp {
                 )
             };
             changed |= surface.set_input_keyword_highlights(input_highlights, input_rules_key);
+            changed |= surface.reveal_input_cursor(horizontal_input_at);
             let selection_changed = surface.set_selection_visual(terminal_selection);
             if frame_applied || paint_details_changed {
                 surface.schedule_keyword_highlights(
@@ -929,7 +947,8 @@ impl ZzClawTermApp {
     ) -> (bool, TerminalCursorBlinkBasis, String) {
         let is_active = self.session.active_id() == Some(session_id);
         let is_disconnected = self.session.is_disconnected(session_id);
-        let remote_cursor_visible = snapshot.cursor.visible
+        let remote_cursor_visible = !self.terminal.input.ime.is_active_for(Some(session_id))
+            && snapshot.cursor.visible
             && snapshot.cursor.shape != zzclawterm_terminal::CursorShape::Hidden
             && snapshot.cursor.row != usize::MAX;
         let blink_enabled = self.settings.summary().cursor_blink || snapshot.cursor.blinking;
@@ -1004,6 +1023,13 @@ impl ZzClawTermApp {
         let is_active = self.session.active_id() == Some(session_id);
         let paint_started_at = Instant::now();
         self.ensure_paint_theme_caches();
+        self.terminal
+            .view
+            .frame_pipeline
+            .set_logical_line_snapshots(
+                self.settings.summary().terminal_wrap_mode
+                    == zzclawterm_core::models::settings::TerminalWrapMode::None,
+            );
         let surface = self.ensure_terminal_surface(session_id, cx);
         // Read only the lightweight row/column pair for the active surface; no
         // snapshot is cloned, and inactive surfaces do not need this check.
@@ -1028,6 +1054,7 @@ impl ZzClawTermApp {
         let protocol_state = view.map(|v| v.protocol_state).unwrap_or_default();
         let target_line = view.and_then(|v| v.target_line);
         let zebra_stripes_enabled = self.settings.summary().terminal_zebra_stripes_enabled;
+        let zebra_stripes_by_row = self.settings.summary().terminal_zebra_stripes_by_row;
         let layout_cache = view
             .map(|v| v.render_cache.layout_cache.clone())
             .unwrap_or_else(|| {
@@ -1092,6 +1119,7 @@ impl ZzClawTermApp {
         );
         let input_latency_active =
             terminal_input_latency_active(self.shell.last_terminal_input_at(), paint_started_at);
+        let horizontal_input_at = self.shell.last_terminal_input_at();
         let render_pressure = render_output_pressure
             || burst > 0
             || mode == TerminalPerformanceMode::Overloaded
@@ -1178,6 +1206,8 @@ impl ZzClawTermApp {
         let show_line_numbers = self.settings.summary().terminal_show_line_numbers;
         let max_line_number_digits = view.map_or(1, |view| view.max_line_number_digits);
         let show_timestamps = self.settings.summary().terminal_show_timestamps;
+        let wrap_mode = self.settings.summary().terminal_wrap_mode;
+        let show_wrap_markers = self.settings.summary().terminal_show_wrap_markers;
         let timestamp_format = self.settings.summary().terminal_timestamp_format.clone();
         let (cell_w, cell_h) = self
             .terminal
@@ -1246,11 +1276,17 @@ impl ZzClawTermApp {
                     show_line_numbers,
                     max_line_number_digits,
                     show_timestamps,
+                    wrap_mode,
+                    show_wrap_markers,
                     timestamp_format: timestamp_format.clone(),
                     is_active,
                 });
                 changed |= surface.set_protocol_state(protocol_state);
-                changed |= surface.set_zebra_stripes(zebra_stripes_enabled, target_line);
+                changed |= surface.set_zebra_stripes(
+                    zebra_stripes_enabled,
+                    zebra_stripes_by_row,
+                    target_line,
+                );
                 changed |= surface.update_scroll_chrome_without_snapshot(&scroll_state);
                 if changed {
                     cx.notify();
@@ -1475,13 +1511,29 @@ impl ZzClawTermApp {
                 session_id,
                 &selected_occurrence_matches,
             );
+        let logical_index = (self.settings.summary().terminal_wrap_mode
+            == zzclawterm_core::models::settings::TerminalWrapMode::None)
+            .then_some(snapshot.logical_lines.as_ref())
+            .flatten();
+        let mut overview_hasher = std::collections::hash_map::DefaultHasher::new();
+        overview_marker_key.hash(&mut overview_hasher);
+        logical_index
+            .map(std::sync::Arc::as_ptr)
+            .hash(&mut overview_hasher);
+        let overview_marker_key = overview_hasher.finish();
         let overview_markers_dirty = surface.read(cx).overview_marker_key() != overview_marker_key;
         let (overview_markers, overview_total_rows) = if overview_markers_dirty {
-            let (markers, total_rows) = self
+            let (mut markers, mut total_rows) = self
                 .terminal_overview_markers_for_session_with_selected_matches(
                     session_id,
                     &selected_occurrence_matches,
                 );
+            if let Some(index) = logical_index {
+                for marker in &mut markers {
+                    marker.absolute_line = index.logical_row(marker.absolute_line);
+                }
+                total_rows = index.logical_rows();
+            }
             (Some(markers.into()), total_rows)
         } else {
             (None, 1)
@@ -1513,11 +1565,14 @@ impl ZzClawTermApp {
                 show_line_numbers,
                 max_line_number_digits,
                 show_timestamps,
+                wrap_mode,
+                show_wrap_markers,
                 timestamp_format,
                 is_active,
             });
             changed |= surface.set_protocol_state(protocol_state);
-            changed |= surface.set_zebra_stripes(zebra_stripes_enabled, target_line);
+            changed |=
+                surface.set_zebra_stripes(zebra_stripes_enabled, zebra_stripes_by_row, target_line);
             let had_pending_local_scroll_sync = surface.has_pending_local_scroll_sync();
             let frame_applied = surface.apply_frame_snapshot(
                 TerminalSurfaceFrameSnapshot::new(
@@ -1558,6 +1613,7 @@ impl ZzClawTermApp {
                 )
             };
             changed |= surface.set_input_keyword_highlights(input_highlights, input_rules_key);
+            changed |= surface.reveal_input_cursor(horizontal_input_at);
             let selection_changed = surface.set_selection_visual(terminal_selection);
             if frame_applied || paint_details_changed {
                 surface.schedule_keyword_highlights(
@@ -1622,6 +1678,13 @@ impl ZzClawTermApp {
             return;
         }
         let notify_started_at = Instant::now();
+        self.terminal
+            .view
+            .frame_pipeline
+            .set_logical_line_snapshots(
+                self.settings.summary().terminal_wrap_mode
+                    == zzclawterm_core::models::settings::TerminalWrapMode::None,
+            );
         let surface = self.ensure_terminal_surface(session_id, cx);
         let Some(view) = self.terminal.view.views.get(session_id) else {
             return;
@@ -1763,6 +1826,13 @@ impl ZzClawTermApp {
             return;
         }
         let notify_started_at = Instant::now();
+        self.terminal
+            .view
+            .frame_pipeline
+            .set_logical_line_snapshots(
+                self.settings.summary().terminal_wrap_mode
+                    == zzclawterm_core::models::settings::TerminalWrapMode::None,
+            );
         let surface = self.ensure_terminal_surface(session_id, cx);
         let Some(view) = self.terminal.view.views.get(session_id) else {
             return;

@@ -1,18 +1,22 @@
+mod approvals;
 mod history_and_streaming;
+mod pickers;
+mod text_selection;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::layout::AiPanelLayout;
 use super::{AiAgentStepPresentation, AiMentionCandidate, AiPanel, AiPanelSnapshot};
 use crate::features::ai::panel::transcript::{AiTranscriptRow, AiTranscriptUpdate};
 use crate::features::runtime_jobs::{AiAgentStepStatus, AiAgentStepView};
 use gpui::{
-    AppContext as _, Entity, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext,
-    VisualTestContext, div, px,
+    AppContext as _, Bounds, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    Pixels, Render, Styled as _, TestAppContext, VisualTestContext, div, px,
 };
 use zzclawterm_core::{
-    AgentCommandExecutionMode, AiCommandCard, AiMessage, AiMessageRole, AiMode, AiModelConfigItem,
-    AiModelSource, AiProviderKind, AiSettings, AppRuntime, RuntimeMode,
+    AgentCommandExecutionMode, AiAgentKind, AiCommandCard, AiMessage, AiMessageRole, AiMode,
+    AiModelConfigItem, AiModelSource, AiProviderKind, AiSettings, AppRuntime, RuntimeMode,
 };
 use zzclawterm_ui::ZzClawInputEvent;
 
@@ -275,6 +279,7 @@ fn ai_header_running_transition_notifies_root() {
                 launch.job_id,
                 launch.session_id,
                 Ok(AiChatJobOutput {
+                    metadata: None,
                     native_call: None,
                     mode: AiMode::Ask,
                     text: "done".to_string(),
@@ -353,6 +358,15 @@ fn ai_header_running_transition_notifies_root() {
             "selected model is part of the root header projection"
         );
         assert_eq!(model_after.model_label, "Model B");
+
+        app.ai
+            .set_chat_run_mode(AiMode::Ask, AiAgentKind::Zzclawterm);
+        let ask = app.ai_header_presentation();
+        app.ai
+            .set_chat_run_mode(AiMode::Agent, AiAgentKind::Zzclawterm);
+        let agent = app.ai_header_presentation();
+        assert_ne!(ask.mode_label, agent.mode_label);
+        assert!(agent.mode_label.contains("ZzClawTerm"));
     });
 }
 
@@ -466,35 +480,23 @@ fn prompt_subscription_refreshes_snapshot_before_next_paint() {
     });
 }
 
-#[test]
-fn message_menu_position_stays_inside_viewport() {
-    assert_eq!(
-        super::components::ai_message_menu_position(1240., 780., 128., 64., 1280., 800.),
-        (1144., 728., 784.)
-    );
-    assert_eq!(
-        super::components::ai_message_menu_position(240., 180., 128., 64., 200., 120.),
-        (64., 48., 104.)
-    );
-}
 struct CompactAiHost {
     panel: Entity<AiPanel>,
+    width: f32,
     height: f32,
 }
 
 impl Render for CompactAiHost {
     fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
         div()
-            .w(px(320.))
+            .debug_selector(|| "ai-compact-host".to_string())
+            .w(px(self.width))
             .h(px(self.height))
             .child(self.panel.clone())
     }
 }
 
-fn compact_host<'a>(
-    cx: &'a mut TestAppContext,
-    root: &Path,
-) -> (Entity<ZzClawTermApp>, &'a mut VisualTestContext) {
+fn compact_app(cx: &mut TestAppContext, root: &Path) -> Entity<ZzClawTermApp> {
     let app = app(cx, root);
     cx.update_entity(&app, |app, cx| {
         app.sync_component_theme(cx);
@@ -515,9 +517,26 @@ fn compact_host<'a>(
         app.ai.replace_settings_config(settings, false);
         app.flush_ai_panel_snapshot(cx);
     });
+    app
+}
+
+fn compact_host<'a>(
+    cx: &'a mut TestAppContext,
+    root: &Path,
+) -> (Entity<ZzClawTermApp>, &'a mut VisualTestContext) {
+    sized_host(cx, root, 320.)
+}
+
+fn sized_host<'a>(
+    cx: &'a mut TestAppContext,
+    root: &Path,
+    width: f32,
+) -> (Entity<ZzClawTermApp>, &'a mut VisualTestContext) {
+    let app = compact_app(cx, root);
     let panel = app.read_with(cx, |app, _| app.ai_panel.clone());
     let (_, vcx) = cx.add_window_view(move |_, _| CompactAiHost {
         panel,
+        width,
         height: 800.,
     });
     let vcx: &mut VisualTestContext = vcx;
@@ -567,22 +586,196 @@ fn narrow_ai_panel_centers_empty_state_and_keeps_compact_controls_inside_compose
     assert!((empty.center().y - viewport.center().y).abs() < px(16.));
     let composer = vcx.debug_bounds("ai-composer").unwrap();
     let prompt = vcx.debug_bounds("ai-prompt").unwrap();
-    let mode = vcx.debug_bounds("ai-mode-control").unwrap();
+    let mode = vcx.debug_bounds("ai-work-mode-toggle").unwrap();
     let model = vcx.debug_bounds("ai-model-control").unwrap();
     let send = vcx.debug_bounds("ai-send-control").unwrap();
     assert!(
-        composer.size.height <= px(122.),
-        "composer should have just a textarea and one control row"
+        prompt.size.height < px(48.),
+        "an empty prompt is a single auto-grow row, got {:?}",
+        prompt.size.height
     );
-    assert_eq!(prompt.size.height, px(64.));
+    assert!(
+        composer.size.height <= px(140.),
+        "compact composer is one prompt row and two control rows"
+    );
     for control in [mode, model, send] {
         assert!(control.top() >= prompt.bottom());
         assert!(control.left() >= composer.left());
         assert!(control.right() <= composer.right());
-        assert!((control.center().y - send.center().y).abs() <= px(2.));
     }
-    assert!(mode.right() <= model.left());
+    assert!(
+        mode.bottom() <= model.top(),
+        "compact tier puts the mode row above the model row"
+    );
+    assert!((model.center().y - send.center().y).abs() <= px(2.));
     assert!(model.right() <= send.left());
+}
+
+#[test]
+fn ai_prompt_grows_with_its_lines_up_to_six_rows() {
+    let root = TestConfigDir::new("zzclawterm-ai-prompt-grow");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let (app, vcx) = compact_host(&mut cx, root.path());
+    let prompt_height = |text: &str, vcx: &mut VisualTestContext| {
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| app.set_ai_prompt_draft(text.to_string(), cx));
+        });
+        compact_draw(&app, vcx);
+        vcx.debug_bounds("ai-prompt").unwrap().size.height
+    };
+    let one = prompt_height("one", vcx);
+    let three = prompt_height("1\n2\n3", vcx);
+    let six = prompt_height("1\n2\n3\n4\n5\n6", vcx);
+    let many = prompt_height(&vec!["line"; 20].join("\n"), vcx);
+    assert!(one < three && three < six, "{one:?} {three:?} {six:?}");
+    assert_eq!(six, many, "the prompt stops growing at six rows");
+}
+
+fn assert_inside(outer: Bounds<Pixels>, inner: Bounds<Pixels>, what: &str) {
+    assert!(
+        inner.left() >= outer.left() - px(0.5) && inner.right() <= outer.right() + px(0.5),
+        "{what} {inner:?} overflows {outer:?}"
+    );
+}
+
+#[test]
+fn narrowest_ai_panel_keeps_context_and_composer_controls_inside() {
+    let root = TestConfigDir::new("zzclawterm-ai-309");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let (app, vcx) = sized_host(&mut cx, root.path(), 309.);
+    vcx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.set_ai_run_mode(AiMode::Agent, AiAgentKind::Zzclawterm, cx);
+        });
+    });
+    compact_draw(&app, vcx);
+    assert_eq!(
+        app.read_with(vcx, |app, cx| app.ai_panel.read(cx).layout()),
+        AiPanelLayout::Compact
+    );
+    let host = vcx.debug_bounds("ai-compact-host").unwrap();
+    for id in [
+        "ai-context-bar",
+        "ai-composer",
+        "ai-work-mode-toggle",
+        "ai-agent-kind-control",
+        "ai-model-control",
+        "ai-execution-mode-chip",
+        "ai-send-control",
+    ] {
+        let bounds = vcx
+            .debug_bounds(id)
+            .unwrap_or_else(|| panic!("{id} should render in agent mode"));
+        assert_inside(host, bounds, id);
+    }
+}
+
+#[test]
+fn execution_mode_menu_opens_from_the_composer_inside_the_panel() {
+    let root = TestConfigDir::new("zzclawterm-ai-exec-menu");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let (app, vcx) = sized_host(&mut cx, root.path(), 309.);
+    vcx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.set_ai_run_mode(AiMode::Agent, AiAgentKind::Zzclawterm, cx);
+        });
+    });
+    compact_draw(&app, vcx);
+    let chip = vcx.debug_bounds("ai-execution-mode-chip").unwrap();
+    vcx.simulate_click(chip.center(), gpui::Modifiers::default());
+    compact_draw(&app, vcx);
+    let host = vcx.debug_bounds("ai-compact-host").unwrap();
+    let composer = vcx.debug_bounds("ai-composer").unwrap();
+    let menu = vcx
+        .debug_bounds("ai-execution-mode-menu")
+        .expect("clicking the chip opens the menu");
+    assert_inside(host, menu, "execution menu");
+    assert!(
+        menu.bottom() <= composer.top() + px(1.),
+        "the menu opens upward from the composer"
+    );
+
+    vcx.simulate_click(chip.center(), gpui::Modifiers::default());
+    compact_draw(&app, vcx);
+    assert!(
+        vcx.debug_bounds("ai-execution-mode-menu").is_none(),
+        "a second click on the chip closes the menu"
+    );
+}
+
+#[test]
+fn ask_then_agent_restores_the_previous_agent_runtime() {
+    let root = TestConfigDir::new("zzclawterm-ai-mode-memory");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let (app, vcx) = compact_host(&mut cx, root.path());
+    vcx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.ai.toggle_settings_codex_enabled();
+            app.set_ai_run_mode(AiMode::Agent, AiAgentKind::Codex, cx);
+        });
+    });
+    compact_draw(&app, vcx);
+    let ask = vcx.debug_bounds("ai-work-mode-ask").unwrap();
+    vcx.simulate_click(ask.center(), gpui::Modifiers::default());
+    compact_draw(&app, vcx);
+    assert_eq!(
+        app.read_with(vcx, |app, _| app.ai.chat_run_mode()),
+        AiMode::Ask
+    );
+    assert!(vcx.debug_bounds("ai-agent-kind-control").is_none());
+
+    let agent = vcx.debug_bounds("ai-work-mode-agent").unwrap();
+    vcx.simulate_click(agent.center(), gpui::Modifiers::default());
+    compact_draw(&app, vcx);
+    app.read_with(vcx, |app, _| {
+        assert_eq!(app.ai.chat_run_mode(), AiMode::Agent);
+        assert_eq!(app.ai.chat_agent_kind(), AiAgentKind::Codex);
+    });
+}
+
+#[test]
+fn enter_while_running_keeps_the_draft_and_starts_nothing() {
+    let root = TestConfigDir::new("zzclawterm-ai-enter-running");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let (app, vcx) = compact_host(&mut cx, root.path());
+    vcx.update(|_, cx| {
+        app.update(cx, |app, cx| {
+            app.ai
+                .begin_chat_request("first".to_string(), AiMode::Ask, None);
+            app.set_ai_prompt_draft("follow-up", cx);
+        });
+    });
+    compact_draw(&app, vcx);
+    let messages_before = app.read_with(vcx, |app, _| app.ai.chat_messages().len());
+    let prompt_input = vcx.update(|_, cx| {
+        app.read(cx)
+            .ai_panel
+            .read(cx)
+            .snapshot()
+            .expect("hosted panel has snapshot")
+            .prompt_input
+            .clone()
+    });
+    vcx.update(|_, cx| {
+        prompt_input.update(cx, |_, cx| {
+            cx.emit(ZzClawInputEvent::Submitted("follow-up".to_string()));
+        });
+    });
+    compact_draw(&app, vcx);
+    app.read_with(vcx, |app, _| {
+        assert!(app.ai.chat_or_agent_is_running());
+        assert_eq!(app.ai.chat_prompt_draft(), "follow-up");
+        assert_eq!(app.ai.chat_messages().len(), messages_before);
+    });
+    assert!(
+        vcx.debug_bounds("ai-run-stop").is_some(),
+        "a running request offers Stop in the composer"
+    );
 }
 
 #[test]
@@ -1015,8 +1208,8 @@ fn advancing_and_stopping_agent_refreshes_activity_in_retained_rows() {
 
 #[test]
 fn command_buttons_and_running_animation_match_execution_phase_in_a_narrow_panel() {
-    use crate::features::ai::presentation::{AiAgentStepKind, AiCommandPhase};
-
+    use crate::features::ai::presentation::AiAgentStepKind;
+    use crate::features::ai::presentation::AiCommandPhase;
     let root = TestConfigDir::new("zzclawterm-ai-command-controls");
     let mut cx = TestAppContext::single();
     let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -1180,7 +1373,16 @@ fn native_plan_stays_in_request_history_but_questions_remain_visible_and_focused
         })
     });
     compact_draw(&app, vcx);
-    assert!(vcx.debug_bounds("ai-native-run").is_some());
+    assert!(
+        vcx.debug_bounds("ai-native-run").is_none(),
+        "the plan lives in the activity card, not a separate native-run row"
+    );
+    let plan_selector: &'static str =
+        Box::leak(format!("ai-activity-plan-{user_id}").into_boxed_str());
+    assert!(
+        vcx.debug_bounds(plan_selector).is_some(),
+        "expanding the request shows the native plan in the activity card"
+    );
     vcx.update(|_, cx| app.update(cx, |app, cx| {
         app.ai.toggle_execution_group(user_id.clone());
         let call = AgentToolRegistry::parse(&[], r#"{"action":"request_user_input","arguments":{"questions":[{"id":"service","question":"Which service?"}]}}"#).unwrap();
@@ -1232,6 +1434,7 @@ fn execution_disclosures_accept_keyboard_and_mouse_without_following_a_long_scri
                     launch.job_id,
                     launch.session_id,
                     Ok(AiChatJobOutput {
+                        metadata: None,
                         native_call: None,
                         mode: AiMode::Agent,
                         text: "Inspect resources".into(),
@@ -1431,7 +1634,8 @@ fn request_disclosure_keeps_the_user_and_final_answer_visible_and_hides_commands
 #[test]
 fn execution_groups_do_not_merge_requests_or_promote_tool_narration_to_final_answers() {
     use crate::features::ai::panel::execution::AiExecutionGroup;
-    use crate::features::ai::presentation::{AiAgentStepKind, AiResponsePhase};
+    use crate::features::ai::presentation::AiAgentStepKind;
+    use crate::features::ai::presentation::AiResponsePhase;
     let root = TestConfigDir::new("zzclawterm-ai-request-boundaries");
     let mut cx = TestAppContext::single();
     let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -1481,8 +1685,8 @@ fn execution_groups_do_not_merge_requests_or_promote_tool_narration_to_final_ans
 
 #[test]
 fn tool_preparation_belongs_to_the_streaming_message_and_remeasures_it() {
-    use crate::features::ai::presentation::{AiAgentStepKind, AiResponsePhase};
-
+    use crate::features::ai::presentation::AiAgentStepKind;
+    use crate::features::ai::presentation::AiResponsePhase;
     let root = TestConfigDir::new("zzclawterm-ai-inline-progress");
     let mut cx = TestAppContext::single();
     let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);

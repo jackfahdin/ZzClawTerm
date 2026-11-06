@@ -28,6 +28,8 @@ impl ZzClawTermApp {
         settings: AppSettingsSummary,
         cx: &mut Context<Self>,
     ) {
+        let users_changed = self.settings.summary().ui_remote_stats_show_users
+            != settings.ui_remote_stats_show_users;
         let terminal_font_changed = {
             let current = self.settings.summary();
             current.terminal_font_family != settings.terminal_font_family
@@ -37,7 +39,16 @@ impl ZzClawTermApp {
                 || current.bold_default_foreground != settings.bold_default_foreground
         };
         crate::shortcuts::rebuild_keymap(&settings.keybindings, cx);
+        // Keep the runtime log layer aligned with persisted diagnostics
+        // settings, both on startup load and on every later save.
+        zzclawterm_core::diagnostics::apply_log_runtime_settings(
+            settings.diagnostics_log_shard_bytes,
+            settings.diagnostics_retention_days,
+        );
         self.settings.replace_summary(settings);
+        if users_changed {
+            self.remote_stats_users_setting_changed(cx);
+        }
         crate::window_chrome::request_window_decoration_refresh(cx);
         self.sync_remote_monitoring_inputs(cx);
         self.sync_transfer_internal_editor_font_input(cx);
@@ -211,6 +222,7 @@ impl ZzClawTermApp {
         self.flush_connection_panel_snapshot(cx);
         self.flush_transfer_panel_snapshot(cx);
         self.flush_ai_panel_snapshot(cx);
+        self.request_settings_panel_refresh(cx);
         self.refresh_visible_terminal_surfaces(cx);
         cx.notify();
     }

@@ -1,22 +1,19 @@
-use std::collections::{HashSet, VecDeque};
-use std::sync::Arc;
-
-use gpui::{
-    Context, Entity, FocusHandle, IntoElement, Render, Rgba, ScrollHandle, UniformListScrollHandle,
-    WeakEntity, Window,
-};
-use zzclawterm_core::TransferBrowserViewMode;
-use zzclawterm_transport::SftpFileEntry;
-use zzclawterm_ui::ZzClawInputState;
-
+use super::TransferBrowserAvailability;
 use crate::features::ZzClawTermApp;
 use crate::models::{
     TransferBrowserColumnResizeState, TransferBrowserColumnWidths, TransferBrowserSortColumn,
     TransferBrowserSortDirection, TransferJobRowSnapshot, TransferRenameState,
 };
 use crate::theme::ThemePalette;
-
-use super::TransferBrowserAvailability;
+use gpui::{
+    Context, Entity, FocusHandle, IntoElement, Render, Rgba, ScrollHandle, UniformListScrollHandle,
+    WeakEntity, Window,
+};
+use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
+use zzclawterm_core::TransferBrowserViewMode;
+use zzclawterm_files::sftp::SftpFileEntry;
+use zzclawterm_ui::ZzClawInputState;
 
 /// Colours the transfers panel needs that are not on the palette itself.
 ///
@@ -210,21 +207,19 @@ impl Render for TransferPanel {
 
 #[cfg(test)]
 mod tests {
+    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
     use crate::features::ZzClawTermApp;
-    use std::path::Path;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-
+    use crate::models::NavItem;
+    use crate::test_support::TestConfigDir;
     use gpui::{
         AppContext as _, ClickEvent, Entity, IntoElement, Modifiers, MouseButton, MouseClickEvent,
         MouseDownEvent, MouseUpEvent, ParentElement as _, Render, Styled as _, TestAppContext,
         VisualTestContext, div, px,
     };
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
     use zzclawterm_core::{AppRuntime, RuntimeMode};
-
-    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
-    use crate::models::NavItem;
-    use crate::test_support::TestConfigDir;
 
     fn app(cx: &mut TestAppContext, root: &Path) -> Entity<ZzClawTermApp> {
         // A uuid rather than a clock reading: these tests run in parallel and
@@ -393,9 +388,9 @@ mod tests {
                     assert_eq!(
                         app.session.active_file_browser_backend(),
                         Some(if remote {
-                            zzclawterm_transport::FileBrowserBackendKind::Remote
+                            zzclawterm_files::file_browser::FileBrowserBackendKind::Remote
                         } else {
-                            zzclawterm_transport::FileBrowserBackendKind::Local
+                            zzclawterm_files::file_browser::FileBrowserBackendKind::Local
                         })
                     );
                     app.flush_transfer_panel_snapshot(cx);
@@ -440,7 +435,7 @@ mod tests {
                         entries
                             .iter()
                             .take(2)
-                            .map(zzclawterm_transport::SftpFileEntry::identity_key)
+                            .map(zzclawterm_files::sftp::SftpFileEntry::identity_key)
                             .collect(),
                         Some(entries[0].identity_key()),
                     );
@@ -479,9 +474,9 @@ mod tests {
         let mut entries: Vec<_> = (0..2)
             .map(super::super::tests_support::browser_entry)
             .collect();
-        entries[1].file_type = zzclawterm_transport::SftpFileType::Directory;
-        let root = zzclawterm_transport::file_browser_root(
-            zzclawterm_transport::FileBrowserBackendKind::Local,
+        entries[1].file_type = zzclawterm_files::sftp::SftpFileType::Directory;
+        let root = zzclawterm_files::file_browser::file_browser_root(
+            zzclawterm_files::file_browser::FileBrowserBackendKind::Local,
             &test_dir.path().display().to_string(),
         );
         for entry in &mut entries {
@@ -493,16 +488,16 @@ mod tests {
                 settings.ui_file_explorer_view_mode =
                     zzclawterm_core::TransferBrowserViewMode::Tree;
                 app.settings.replace_summary(settings);
-                let path = zzclawterm_transport::RemoteFilePath::new(root);
+                let path = zzclawterm_files::sftp::RemoteFilePath::new(root);
                 app.transfer.seed_tree_listing(
                     "path-test",
-                    zzclawterm_transport::FileBrowserBackendKind::Local,
+                    zzclawterm_files::file_browser::FileBrowserBackendKind::Local,
                     path.clone(),
                     std::sync::Arc::new(entries.clone()),
                 );
                 app.transfer.reveal_tree_path(
                     "path-test",
-                    zzclawterm_transport::FileBrowserBackendKind::Local,
+                    zzclawterm_files::file_browser::FileBrowserBackendKind::Local,
                     path,
                 );
                 let rows = app.transfer.tree_presentation(Some("path-test"), true).rows;
@@ -793,7 +788,7 @@ mod tests {
         let entries = (0..80)
             .map(|index| {
                 let mut entry = super::super::tests_support::browser_entry(index);
-                entry.file_type = zzclawterm_transport::SftpFileType::Directory;
+                entry.file_type = zzclawterm_files::sftp::SftpFileType::Directory;
                 entry
             })
             .collect::<Vec<_>>();
@@ -835,11 +830,12 @@ mod tests {
                 Some("/remote")
             )
         });
-        vcx.simulate_event(gpui::ScrollWheelEvent {
+        vcx.simulate_event(gpui::ScrollEvent {
             position: viewport.center(),
             delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-10_000.))),
             modifiers: Modifiers::none(),
             touch_phase: gpui::TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
         });
         vcx.run_until_parked();
         vcx.update(|window, cx| {
@@ -1073,9 +1069,8 @@ mod tests {
 
     #[test]
     fn long_transfer_text_shrinks_without_displacing_status_when_panel_resizes() {
-        use std::path::PathBuf;
-
         use crate::models::{TransferJobKind, TransferJobRowSnapshot, TransferJobStatus};
+        use std::path::PathBuf;
 
         let test_dir = TestConfigDir::new("zzclawterm-transfer-queue-layout");
         let mut cx = TestAppContext::single();
@@ -1169,7 +1164,7 @@ mod tests {
     /// 不发送鼠标事件，也不刷新侧栏快照，覆盖启动竞态和原先的悬浮依赖。
     #[test]
     fn duplicate_prompts_open_globally_without_panel_interaction_and_drain_in_order() {
-        use zzclawterm_transport::{
+        use zzclawterm_files::sftp_transfer_types::{
             SftpDuplicateDecision, SftpDuplicateRequest, SftpTransferDirection,
         };
         use zzclawterm_ui::{ZzClawDialogWindowExt as _, zzclaw_root};
@@ -1307,6 +1302,104 @@ mod tests {
                 .remove(0)
                 .recv_timeout(Duration::from_secs(5))
                 .unwrap(),
+            SftpDuplicateDecision::Skip
+        );
+        vcx.update(|window, cx| {
+            assert!(!window.has_active_nya_dialog(cx));
+            assert!(app.read(cx).session.prompt_active_duplicate().is_none());
+        });
+    }
+
+    #[test]
+    fn duplicate_batch_menu_overwrites_queued_siblings_and_leaves_other_batches_asking() {
+        use crate::features::session::UploadBatchDuplicateResolver;
+        use zzclawterm_files::sftp_transfer_types::SftpDuplicateDecision;
+        use zzclawterm_files::sftp_transfer_types::SftpDuplicateRequest;
+        use zzclawterm_files::sftp_transfer_types::SftpTransferDirection;
+
+        use zzclawterm_ui::{ZzClawDialogWindowExt as _, zzclaw_root};
+
+        let test_dir = TestConfigDir::new("zzclawterm-transfer-duplicate-batch");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx, test_dir.path());
+        app.update(&mut cx, |app, cx| app.sync_component_theme(cx));
+        let host_app = app.clone();
+        let (_, vcx) = cx.add_window_view(move |window, cx| {
+            let host = cx.new(|_| AppHost { app: host_app });
+            zzclaw_root(host, window, cx)
+        });
+        let vcx: &mut VisualTestContext = vcx;
+        vcx.update(|window, cx| {
+            app.update(cx, |app, cx| app.start_prompt_activation_drain(window, cx))
+        });
+        vcx.run_until_parked();
+        let broker = vcx.update(|_, cx| app.read(cx).session.prompt_duplicate_broker());
+        let batch = UploadBatchDuplicateResolver::new(broker.clone());
+        let request = |name: &str| SftpDuplicateRequest {
+            direction: SftpTransferDirection::Upload,
+            source_path: format!("/local/{name}"),
+            target_path: format!("/remote/{name}"),
+            is_directory: true,
+        };
+        let first = batch.enqueue_for_test(request("first"));
+        let sibling = batch.enqueue_for_test(request("second"));
+        let unrelated = broker
+            .enqueue_decision_request_for_test(request("unrelated"))
+            .unwrap();
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        vcx.run_until_parked();
+        let trigger = vcx
+            .debug_bounds("duplicate-overwrite-menu")
+            .expect("batch menu visible");
+        vcx.simulate_click(trigger.center(), Modifiers::default());
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("down enter");
+        vcx.run_until_parked();
+        assert_eq!(
+            first.recv_timeout(Duration::from_secs(5)).unwrap(),
+            SftpDuplicateDecision::Overwrite
+        );
+        assert_eq!(
+            sibling.recv_timeout(Duration::from_secs(5)).unwrap(),
+            SftpDuplicateDecision::Overwrite
+        );
+        assert_eq!(
+            batch
+                .enqueue_for_test(request("future"))
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            SftpDuplicateDecision::Overwrite
+        );
+        vcx.update(|window, cx| {
+            assert!(window.has_active_nya_dialog(cx));
+            assert_eq!(
+                app.read(cx)
+                    .session
+                    .prompt_active_duplicate()
+                    .unwrap()
+                    .request
+                    .target_path,
+                "/remote/unrelated"
+            );
+            _ = window.draw(cx);
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("duplicate-overwrite-menu").is_none(),
+            "ordinary conflicts have no batch menu"
+        );
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            unrelated.recv_timeout(Duration::from_secs(5)).unwrap(),
             SftpDuplicateDecision::Skip
         );
         vcx.update(|window, cx| {

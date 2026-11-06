@@ -77,7 +77,7 @@ impl ZzClawTermApp {
                         t!("quickCommands.importZzClawTermJsonHint"),
                         cx.listener(|this, _, window, cx| {
                             this.select_quick_command_import_source(
-                                QuickCommandImportPathPromptKind::NyatermJson,
+                                QuickCommandImportPathPromptKind::ZzClawTermJson,
                                 window,
                                 cx,
                             );

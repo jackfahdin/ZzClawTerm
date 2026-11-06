@@ -8,6 +8,7 @@ mod command_suggestions;
 mod credential_autofill;
 mod editing_runtime;
 mod editing_state;
+mod ime_state;
 mod input_runtime;
 mod send_command_runtime;
 mod state;

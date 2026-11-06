@@ -10,18 +10,19 @@ use std::time::{Duration, Instant};
 use std::{cell::RefCell, rc::Rc};
 
 use gpui::{AnyView, Entity, Pixels, RenderImage, ScrollHandle, SharedString};
-use zzclawterm_ui::{ChildWindowSlot, ZzClawAppMenuBar, ZzClawWindowHandle};
+use zzclawterm_ui::{ZzClawAppMenuBar, ZzClawWindowHandle};
 
 use super::super::app_state::SettingsDraftSnapshot;
 use super::runtime_state::ShellRuntimeState;
 use crate::models::{
     ActivityBarContextMenuState, ActivityBarLayoutState, BottomPanelMode, BottomPanelResizeState,
-    HeaderStatusMode, HeaderStatusState, MainMode, NavItem, PanelOpenMode, PanelResizeSide,
-    PanelResizeState, PanelSide, PanelStackResizeState, RightFocus, SettingsTab, WorkspacePaneNode,
+    HeaderStatusMode, HeaderStatusState, NavItem, PanelOpenMode, PanelResizeSide, PanelResizeState,
+    PanelSide, PanelStackResizeState, RightFocus, SettingsTab, WorkspacePaneNode,
     WorkspaceSplitResizeState, WorkspaceSplitState,
 };
 
 pub(in crate::features) const RESIZE_HANDLE_HOVER_DELAY: Duration = Duration::from_millis(250);
+pub(super) const PANEL_STACK_MIN_HEIGHT: f32 = 48.;
 
 /// The tab-strip trigger that owns the currently open new-session menu.
 ///
@@ -129,10 +130,9 @@ pub(super) struct WallpaperCache {
     asset: Option<WallpaperAsset>,
 }
 
-/// Top-level page navigation and the settings-page/window lifecycle.
+/// Top-level page navigation and the settings-page lifecycle.
 pub(in crate::features) struct ShellNavigationState {
     pub(in crate::features) selected_nav: NavItem,
-    pub(in crate::features) main_mode: MainMode,
     pub(super) settings: ShellSettingsNavigationState,
 }
 
@@ -140,9 +140,6 @@ pub(super) struct ShellSettingsNavigationState {
     pub(super) active_tab: SettingsTab,
     pub(super) expanded_groups: HashSet<String>,
     pub(super) draft_snapshot: Option<SettingsDraftSnapshot>,
-    pub(super) window: ChildWindowSlot,
-    pub(super) previous_left_collapsed: Option<bool>,
-    pub(super) previous_right_collapsed: Option<bool>,
 }
 
 /// Side-panel selection, stack layout and resize interaction state.
@@ -176,6 +173,7 @@ pub(super) struct ShellChromeState {
     pub(super) activity_bar_layout: ActivityBarLayoutState,
     pub(super) activity_bar_context_menu: Option<ActivityBarContextMenuState>,
     pub(super) header_status: HeaderStatusState,
+    pub(super) header_status_menu_open: bool,
     pub(super) open_tabs_menu_open: bool,
     pub(super) new_session_menu_anchor: Option<NewSessionMenuAnchor>,
     pub(super) new_session_all_sessions_open: bool,
@@ -272,14 +270,10 @@ impl ShellFeatureState {
             },
             navigation: ShellNavigationState {
                 selected_nav: init.selected_nav,
-                main_mode: MainMode::Workspace,
                 settings: ShellSettingsNavigationState {
                     active_tab: SettingsTab::General,
                     expanded_groups: HashSet::from(["workspace".to_string()]),
                     draft_snapshot: None,
-                    window: ChildWindowSlot::default(),
-                    previous_left_collapsed: None,
-                    previous_right_collapsed: None,
                 },
             },
             panels: ShellPanelState {
@@ -308,6 +302,7 @@ impl ShellFeatureState {
                 activity_bar_layout: init.activity_bar_layout,
                 activity_bar_context_menu: None,
                 header_status: HeaderStatusState::default(),
+                header_status_menu_open: false,
                 open_tabs_menu_open: false,
                 new_session_menu_anchor: None,
                 new_session_all_sessions_open: false,
@@ -442,27 +437,12 @@ impl ShellFeatureState {
         self.navigation.selected_nav
     }
 
-    pub(in crate::features) fn main_mode(&self) -> MainMode {
-        self.navigation.main_mode
-    }
-
     pub(in crate::features) fn select_nav(&mut self, nav: NavItem) {
         self.navigation.selected_nav = nav;
     }
 
     pub(in crate::features) fn show_workspace(&mut self) {
         self.navigation.selected_nav = NavItem::Workspace;
-        self.navigation.main_mode = MainMode::Workspace;
-    }
-
-    pub(in crate::features) fn show_page(&mut self, nav: NavItem) {
-        self.navigation.selected_nav = nav;
-        self.navigation.main_mode = MainMode::Page;
-    }
-
-    pub(in crate::features) fn is_settings_page(&self) -> bool {
-        self.navigation.main_mode == MainMode::Page
-            && self.navigation.selected_nav == NavItem::Settings
     }
 
     pub(in crate::features) fn settings_active_tab(&self) -> SettingsTab {
@@ -514,75 +494,6 @@ impl ShellFeatureState {
 
     pub(in crate::features) fn clear_settings_draft_snapshot(&mut self) -> bool {
         self.navigation.settings.draft_snapshot.take().is_some()
-    }
-
-    pub(in crate::features) fn settings_window(&self) -> Option<ZzClawWindowHandle> {
-        self.navigation.settings.window.handle()
-    }
-
-    pub(in crate::features) fn settings_window_open_pending(&self) -> bool {
-        self.navigation.settings.window.is_pending()
-    }
-
-    pub(in crate::features) fn settings_window_is_open_or_pending(&self) -> bool {
-        self.navigation.settings.window.is_open_or_pending()
-    }
-
-    pub(in crate::features) fn settings_window_slot(&mut self) -> &mut ChildWindowSlot {
-        &mut self.navigation.settings.window
-    }
-
-    pub(in crate::features) fn begin_settings_window_open(&mut self) -> bool {
-        self.navigation.settings.window.begin_open()
-    }
-
-    pub(in crate::features) fn complete_settings_window_open(
-        &mut self,
-        handle: ZzClawWindowHandle,
-    ) {
-        self.navigation.settings.window.finish_open(handle);
-        self.navigation.settings.previous_left_collapsed = None;
-        self.navigation.settings.previous_right_collapsed = None;
-    }
-
-    pub(in crate::features) fn clear_settings_window(&mut self) {
-        self.navigation.settings.window.clear();
-    }
-
-    pub(in crate::features) fn cancel_settings_window_open(&mut self) {
-        self.navigation.settings.window.cancel_open();
-    }
-
-    pub(in crate::features) fn fail_settings_window_open(&mut self) {
-        self.navigation.settings.window.fail_open();
-        self.show_page(NavItem::Settings);
-        self.panels.left_collapsed = true;
-        self.panels.right_collapsed = true;
-    }
-
-    /// Clears settings-window ownership and restores the embedded-page panel state.
-    pub(in crate::features) fn finish_settings_navigation(&mut self) -> bool {
-        self.clear_settings_window();
-        if self.is_settings_page() {
-            self.navigation.main_mode = MainMode::Workspace;
-            self.panels.left_collapsed = self
-                .navigation
-                .settings
-                .previous_left_collapsed
-                .take()
-                .unwrap_or_else(|| self.panels.active_left.is_none());
-            self.panels.right_collapsed = self
-                .navigation
-                .settings
-                .previous_right_collapsed
-                .take()
-                .unwrap_or_else(|| self.panels.active_right.is_none());
-            true
-        } else {
-            self.navigation.settings.previous_left_collapsed = None;
-            self.navigation.settings.previous_right_collapsed = None;
-            false
-        }
     }
 
     pub(in crate::features) fn capture_renderer(&mut self, window: &gpui::Window) {
@@ -752,6 +663,15 @@ impl ShellFeatureState {
         self.chrome.open_tabs_menu_open
     }
 
+    #[cfg(windows)]
+    pub(in crate::features) fn header_status_menu_is_open(&self) -> bool {
+        self.chrome.header_status_menu_open
+    }
+
+    pub(in crate::features) fn set_header_status_menu_open(&mut self, open: bool) {
+        self.chrome.header_status_menu_open = open;
+    }
+
     pub(in crate::features) fn prepare_session_switch(&mut self) {
         self.chrome.prepare_session_switch();
     }
@@ -917,7 +837,13 @@ impl ShellFeatureState {
         &mut self,
         tab_root: &str,
     ) -> Option<WorkspacePaneNode> {
-        self.workspace.pane_roots.remove(tab_root)
+        let removed = self.workspace.pane_roots.remove(tab_root);
+        // Dropping a root orphans every leaf it owned; without a rebuild the
+        // stale owner keeps former leaves resolving to this tab root.
+        if removed.is_some() {
+            self.workspace.rebuild_tab_owners();
+        }
+        removed
     }
 
     pub(in crate::features) fn insert_workspace_pane_root(
@@ -1181,8 +1107,51 @@ impl ShellPanelState {
         above_id: String,
         below_id: String,
         start_y: Pixels,
-        container_height: f32,
-    ) {
+        panel_heights: &[(String, f32)],
+    ) -> bool {
+        self.stack_resize = None;
+        if !f32::from(start_y).is_finite() || above_id == below_id {
+            return false;
+        }
+        let mut total_height = 0_f64;
+        let mut total_weight = 0_f64;
+        for (id, height) in panel_heights {
+            if !height.is_finite() || *height <= 0. {
+                return false;
+            }
+            total_height += f64::from(*height);
+            total_weight += f64::from(self.stack_weight(id));
+        }
+        let height_for = |id: &str| {
+            panel_heights
+                .iter()
+                .find(|(panel_id, _)| panel_id == id)
+                .map(|(_, height)| f64::from(*height))
+        };
+        let (Some(above_height), Some(below_height)) =
+            (height_for(&above_id), height_for(&below_id))
+        else {
+            return false;
+        };
+        // Flex may have clamped historical weights to the minimum height.
+        // Rebase every visible weight on its measured size so starting a drag
+        // neither jumps the divider nor redistributes unrelated panels.
+        let weights: Vec<(String, f32)> = panel_heights
+            .iter()
+            .map(|(id, height)| {
+                (
+                    id.clone(),
+                    (f64::from(*height) / total_height * total_weight) as f32,
+                )
+            })
+            .collect();
+        if weights
+            .iter()
+            .any(|(_, weight)| !weight.is_finite() || *weight <= 0.)
+        {
+            return false;
+        }
+        self.stack_sizes.extend(weights);
         self.stack_resize = Some(PanelStackResizeState {
             side,
             above_weight: self.stack_weight(&above_id),
@@ -1190,24 +1159,42 @@ impl ShellPanelState {
             above_id,
             below_id,
             start_y,
-            container_height: container_height.max(1.),
+            pair_height: above_height + below_height,
         });
+        true
     }
 
     pub(in crate::features) fn update_stack_resize(&mut self, current_y: Pixels) -> bool {
         let Some(state) = self.stack_resize.as_ref() else {
             return false;
         };
-        let delta_px = f32::from(current_y - state.start_y);
-        let pair = state.above_weight + state.below_weight;
-        if pair <= 0. || state.container_height <= 0. {
+        // Calculate in f64 so finite f32 pointer coordinates and weights cannot
+        // overflow during subtraction, summation or conversion to pixels.
+        let delta_px = f64::from(f32::from(current_y)) - f64::from(f32::from(state.start_y));
+        let pair = f64::from(state.above_weight) + f64::from(state.below_weight);
+        if !delta_px.is_finite()
+            || !pair.is_finite()
+            || pair <= 0.
+            || !state.pair_height.is_finite()
+            || state.pair_height <= 0.
+        {
             return false;
         }
-        let px_per_weight = state.container_height / pair;
-        let min_weight = (48. / px_per_weight).min(pair / 2.).max(0.05);
-        let next_above =
-            (state.above_weight + delta_px / px_per_weight).clamp(min_weight, pair - min_weight);
-        let next_below = pair - next_above;
+        let px_per_weight = state.pair_height / pair;
+        // No absolute weight floor: legacy settings can contain a pair whose
+        // entire weight is smaller than 0.05. The bounds must stay ordered.
+        let min_weight = (f64::from(PANEL_STACK_MIN_HEIGHT) / px_per_weight).min(pair / 2.);
+        let next_above = (f64::from(state.above_weight) + delta_px / px_per_weight)
+            .clamp(min_weight, pair - min_weight);
+        let next_below = (pair - next_above) as f32;
+        let next_above = next_above as f32;
+        if !next_above.is_finite()
+            || next_above <= 0.
+            || !next_below.is_finite()
+            || next_below <= 0.
+        {
+            return false;
+        }
         self.stack_sizes.insert(state.above_id.clone(), next_above);
         self.stack_sizes.insert(state.below_id.clone(), next_below);
         true
@@ -1318,9 +1305,9 @@ mod tests {
 
     use gpui::{RenderImage, SharedString, px};
 
-    use super::{NewSessionMenuAnchor, ShellFeatureInit, ShellFeatureState};
+    use super::{NewSessionMenuAnchor, ShellFeatureInit, ShellFeatureState, ShellPanelState};
     use crate::models::{
-        ActivityBarLayoutState, BottomPanelMode, MainMode, NavItem, PanelResizeSide, PanelSide,
+        ActivityBarLayoutState, BottomPanelMode, NavItem, PanelResizeSide, PanelSide,
         WorkspacePaneNode, WorkspaceSplitDirection,
     };
 
@@ -1348,6 +1335,24 @@ mod tests {
             right_panel_width: 320.,
             activity_bar_layout: ActivityBarLayoutState::default(),
         }
+    }
+
+    fn start_stack_resize(
+        panels: &mut ShellPanelState,
+        above: &str,
+        below: &str,
+        heights: &[(&str, f32)],
+    ) -> bool {
+        panels.start_stack_resize(
+            PanelSide::Left,
+            above.to_string(),
+            below.to_string(),
+            px(100.),
+            &heights
+                .iter()
+                .map(|(id, height)| ((*id).to_string(), *height))
+                .collect::<Vec<_>>(),
+        )
     }
 
     #[test]
@@ -1521,19 +1526,210 @@ mod tests {
         let mut shell = shell(BottomPanelMode::Hidden);
         shell.panels.stack_sizes.insert("above".to_string(), 2.);
         shell.panels.stack_sizes.insert("below".to_string(), 1.);
-        shell.panels.start_stack_resize(
-            PanelSide::Left,
-            "above".to_string(),
-            "below".to_string(),
-            px(100.),
-            300.,
-        );
+        assert!(start_stack_resize(
+            &mut shell.panels,
+            "above",
+            "below",
+            &[("above", 200.), ("below", 100.)],
+        ));
 
         assert!(shell.panels.update_stack_resize(px(150.)));
+        assert!((shell.panels.stack_sizes["above"] - 2.5).abs() < f32::EPSILON);
         let total = shell.panels.stack_sizes["above"] + shell.panels.stack_sizes["below"];
         assert!((total - 3.).abs() < f32::EPSILON);
         assert!(shell.panels.finish_stack_resize());
         assert!(!shell.panels.finish_stack_resize());
+    }
+
+    #[test]
+    fn panel_stack_resize_accepts_small_restored_weights_and_uses_measured_height() {
+        // These are the decoded values of legacy ui_panel_stack_sizes entries
+        // 20 and 30; neither the persistence units nor their meaning changes.
+        let mut shell = ShellFeatureState::new(ShellFeatureInit {
+            panel_stack_sizes: HashMap::from([
+                ("above".to_string(), 20_f32 / 1000.),
+                ("below".to_string(), 30_f32 / 1000.),
+            ]),
+            ..shell_init(BottomPanelMode::Hidden)
+        });
+        assert!(start_stack_resize(
+            &mut shell.panels,
+            "above",
+            "below",
+            &[("above", 360.), ("below", 540.)],
+        ));
+
+        assert!(shell.panels.update_stack_resize(px(190.)));
+        assert!((shell.panels.stack_sizes["above"] - 0.025).abs() < 1e-8);
+        assert!((shell.panels.stack_sizes["below"] - 0.025).abs() < 1e-8);
+    }
+
+    #[test]
+    fn panel_stack_resize_extreme_drags_keep_both_panels_at_least_48_pixels() {
+        let mut shell = shell(BottomPanelMode::Hidden);
+        shell.panels.stack_sizes =
+            HashMap::from([("above".to_string(), 0.02), ("below".to_string(), 0.03)]);
+        assert!(start_stack_resize(
+            &mut shell.panels,
+            "above",
+            "below",
+            &[("above", 120.), ("below", 180.)],
+        ));
+
+        for (pointer, above_height) in [(-f32::MAX, 48.), (f32::MAX, 252.)] {
+            assert!(shell.panels.update_stack_resize(px(pointer)));
+            let above = shell.panels.stack_sizes["above"];
+            let below = shell.panels.stack_sizes["below"];
+            assert!((above + below - 0.05).abs() < 1e-8);
+            assert!((above / (above + below) * 300. - above_height).abs() < 1e-4);
+            assert!(above > 0. && below > 0.);
+        }
+    }
+
+    #[test]
+    fn panel_stack_resize_uses_adjacent_pair_height_after_repeated_three_panel_drags() {
+        let mut shell = shell(BottomPanelMode::Hidden);
+        for (above, below, heights, pointer, expected) in [
+            (
+                "a",
+                "b",
+                [("a", 300.), ("b", 300.), ("c", 300.)],
+                190.,
+                [1.3, 0.7, 1.],
+            ),
+            (
+                "b",
+                "c",
+                [("a", 390.), ("b", 210.), ("c", 300.)],
+                -20.,
+                [1.3, 0.3, 1.4],
+            ),
+            (
+                "a",
+                "b",
+                [("a", 390.), ("b", 90.), ("c", 420.)],
+                220.,
+                [1.44, 0.16, 1.4],
+            ),
+        ] {
+            assert!(start_stack_resize(
+                &mut shell.panels,
+                above,
+                below,
+                &heights
+            ));
+            assert!(shell.panels.update_stack_resize(px(pointer)));
+            for (id, weight) in ["a", "b", "c"].into_iter().zip(expected) {
+                assert!((shell.panels.stack_sizes[id] - weight).abs() < 1e-6);
+            }
+            assert!(shell.panels.finish_stack_resize());
+        }
+    }
+
+    #[test]
+    fn panel_stack_resize_rebases_minimum_clamped_layout_without_moving_other_panels() {
+        let mut shell = shell(BottomPanelMode::Hidden);
+        shell.panels.stack_sizes = HashMap::from([
+            ("a".to_string(), 0.001),
+            ("b".to_string(), 1.),
+            ("c".to_string(), 1.),
+        ]);
+        let heights = [("a", 48.), ("b", 276.), ("c", 276.)];
+        assert!(start_stack_resize(&mut shell.panels, "a", "b", &heights));
+        let total: f32 = shell.panels.stack_sizes.values().sum();
+        for (id, height) in heights {
+            assert!((shell.panels.stack_sizes[id] / total * 600. - height).abs() < 1e-4);
+        }
+        let other_weight = shell.panels.stack_sizes["c"];
+        assert!(shell.panels.update_stack_resize(px(160.)));
+        assert_eq!(shell.panels.stack_sizes["c"], other_weight);
+        assert!((shell.panels.stack_sizes["a"] / total * 600. - 108.).abs() < 1e-4);
+    }
+
+    #[test]
+    fn panel_stack_resize_cannot_shrink_panels_when_container_has_no_spare_height() {
+        let mut shell = shell(BottomPanelMode::Hidden);
+        assert!(start_stack_resize(
+            &mut shell.panels,
+            "above",
+            "below",
+            &[("above", 48.), ("below", 48.)],
+        ));
+        for pointer in [-f32::MAX, f32::MAX] {
+            assert!(shell.panels.update_stack_resize(px(pointer)));
+            assert_eq!(shell.panels.stack_sizes["above"], 1.);
+            assert_eq!(shell.panels.stack_sizes["below"], 1.);
+        }
+    }
+
+    #[test]
+    fn panel_stack_resize_rejects_invalid_geometry_without_changing_weights() {
+        let mut shell = shell(BottomPanelMode::Hidden);
+        for height in [0., -1., f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(!start_stack_resize(
+                &mut shell.panels,
+                "above",
+                "below",
+                &[("above", height), ("below", 100.)],
+            ));
+            assert!(shell.panels.stack_resize.is_none());
+            assert!(shell.panels.stack_sizes.is_empty());
+        }
+        assert!(!start_stack_resize(
+            &mut shell.panels,
+            "above",
+            "below",
+            &[]
+        ));
+        assert!(!start_stack_resize(
+            &mut shell.panels,
+            "above",
+            "below",
+            &[("above", 100.)],
+        ));
+    }
+
+    #[test]
+    fn panel_stack_resize_ignores_non_finite_pointer_coordinates() {
+        let mut shell = shell(BottomPanelMode::Hidden);
+        let heights = [("above", 100.), ("below", 100.)];
+        assert!(start_stack_resize(
+            &mut shell.panels,
+            "above",
+            "below",
+            &heights
+        ));
+        let before = shell.panels.stack_sizes.clone();
+        for pointer in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(!shell.panels.update_stack_resize(px(pointer)));
+            assert_eq!(shell.panels.stack_sizes, before);
+        }
+        assert!(!shell.panels.start_stack_resize(
+            PanelSide::Right,
+            "above".to_string(),
+            "below".to_string(),
+            px(f32::NAN),
+            &[("above".to_string(), 100.), ("below".to_string(), 100.)],
+        ));
+    }
+
+    #[test]
+    fn panel_stack_resize_handles_weights_whose_sum_exceeds_f32_range() {
+        let mut shell = shell(BottomPanelMode::Hidden);
+        shell.panels.stack_sizes = HashMap::from([
+            ("above".to_string(), f32::MAX),
+            ("below".to_string(), f32::MAX),
+        ]);
+        assert!(start_stack_resize(
+            &mut shell.panels,
+            "above",
+            "below",
+            &[("above", 100.), ("below", 100.)],
+        ));
+        assert!(shell.panels.update_stack_resize(px(100.)));
+        let before = shell.panels.stack_sizes.clone();
+        assert!(!shell.panels.update_stack_resize(px(f32::MAX)));
+        assert_eq!(shell.panels.stack_sizes, before);
     }
 
     #[test]
@@ -1627,23 +1823,6 @@ mod tests {
         assert_eq!(shell.last_connect_failure_name(), None);
         assert_eq!(shell.last_connect_failure_error(), None);
         assert!(!shell.clear_last_connect_failure());
-    }
-
-    #[test]
-    fn finishing_embedded_settings_restores_navigation_and_panel_state() {
-        let mut shell = shell(BottomPanelMode::Hidden);
-        shell.show_page(NavItem::Settings);
-        shell.navigation.settings.previous_left_collapsed = Some(false);
-        shell.navigation.settings.previous_right_collapsed = Some(true);
-        shell.panels.left_collapsed = true;
-        shell.panels.right_collapsed = false;
-
-        assert!(shell.finish_settings_navigation());
-        assert_eq!(shell.main_mode(), MainMode::Workspace);
-        assert!(!shell.panels.left_collapsed);
-        assert!(shell.panels.right_collapsed);
-        assert_eq!(shell.navigation.settings.previous_left_collapsed, None);
-        assert_eq!(shell.navigation.settings.previous_right_collapsed, None);
     }
 
     #[test]

@@ -8,3 +8,4 @@ use policy::{TabActionMenuGroup, TabActionPolicy, TabActionPolicyInput, TabSessi
 
 mod compact;
 mod overlay;
+mod start;

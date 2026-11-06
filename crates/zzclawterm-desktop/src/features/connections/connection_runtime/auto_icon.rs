@@ -4,12 +4,11 @@
 //! consumes them. Only ever fills in a blank or refreshes a previous
 //! auto-detection — a hand-picked icon clears the flag and is never touched.
 
+use crate::features::{ZzClawTermApp, icons::infer_connection_icon_key_from_remote_system};
 use gpui::Context;
 use zzclawterm_core::ConnectionType;
+use zzclawterm_remote_ops::stats::SystemInfo;
 use zzclawterm_store::StoreDomain;
-use zzclawterm_transport::SystemInfo;
-
-use crate::features::{ZzClawTermApp, icons::infer_connection_icon_key_from_remote_system};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn connection_icon_probe_needed(&self) -> bool {

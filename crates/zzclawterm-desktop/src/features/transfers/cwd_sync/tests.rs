@@ -1,14 +1,4 @@
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
-
-use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
-use zzclawterm_core::TransferBrowserViewMode;
-use zzclawterm_transport::{
-    FileBrowserBackendKind, RemoteFilePath, SessionEvent, SftpCwdFollowMode, SftpFileEntry,
-    SftpFileType, SshSessionConfig,
-};
-
+use super::cwd_paths_equal;
 use crate::features::ZzClawTermApp;
 use crate::features::test_support::{app_with_visible_local_session, session_focus_test_window};
 use crate::models::{
@@ -16,8 +6,14 @@ use crate::models::{
     TransferJobKind, TransferJobOutput, TransferJobResult,
 };
 use crate::test_support::{TestAppCleanup, TestConfigDir};
-
-use super::cwd_paths_equal;
+use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+use zzclawterm_core::TransferBrowserViewMode;
+use zzclawterm_files::file_browser::FileBrowserBackendKind;
+use zzclawterm_files::sftp::{RemoteFilePath, SftpFileEntry, SftpFileType};
+use zzclawterm_transport::{SessionEvent, SftpCwdFollowMode, SshSessionConfig};
 
 const SESSION: &str = "cwd-session";
 

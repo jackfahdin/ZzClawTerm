@@ -1,8 +1,3 @@
-use std::time::{Duration, Instant};
-
-use gpui::Context;
-use zzclawterm_transport::SessionEvent;
-
 use crate::features::shell::event_pump::helpers::{
     SESSION_EVENT_DRAIN_SLOW_CHUNK, SessionEventDrainBudget, SessionEventDrainTimings,
     connect_settle_active, session_event_backlog_active, session_event_drain_budget,
@@ -12,6 +7,9 @@ use crate::features::shell::event_pump::helpers::{
 };
 use crate::features::{ZzClawTermApp, formatting::short_id};
 use crate::models::recording::ExecutionRecordingEvent;
+use gpui::Context;
+use std::time::{Duration, Instant};
+use zzclawterm_transport::SessionEvent;
 
 #[derive(Clone, Copy)]
 enum SessionOutputDrainStep {
@@ -209,6 +207,7 @@ impl ZzClawTermApp {
                 drained_events += 1;
                 match event {
                     SessionEvent::Output { session_id, data } => {
+                        self.ensure_sftp_session_view(&session_id, cx);
                         output_event_count += 1;
                         let chunk_input_bytes = data.len();
                         processed_output_bytes =
@@ -264,6 +263,16 @@ impl ZzClawTermApp {
                         );
                         self.apply_session_cwd(&session_id, cwd, cx);
                     }
+                    SessionEvent::CommandContext {
+                        session_id,
+                        context,
+                    } => {
+                        self.flush_pending_session_frame_outputs(
+                            &mut pending_frame_outputs,
+                            &mut drain_timings,
+                        );
+                        self.commands.set_command_context(session_id, context);
+                    }
                     SessionEvent::CommandAccepted {
                         session_id,
                         command,
@@ -272,12 +281,26 @@ impl ZzClawTermApp {
                             &mut pending_frame_outputs,
                             &mut drain_timings,
                         );
+                        self.commands.take_completion_confirmed(&session_id);
+                        let sensitive = self.commands.take_completion_sensitive(&session_id)
+                            || self.recording_input_is_sensitive(&session_id);
+                        if !zzclawterm_core::completion::privacy::command_may_be_learned(
+                            &command, sensitive,
+                        ) {
+                            continue;
+                        }
                         if !self
                             .session
                             .consume_directly_recorded_command_history(&session_id)
                         {
                             self.session.record_command_history(&session_id, &command);
-                            if !self.commands.queue_command_history(vec![command]) {
+                            let context = self.commands.command_context(&session_id).cloned();
+                            let queued = if let Some(context) = context {
+                                self.commands.observe_completion_command(context, command)
+                            } else {
+                                self.commands.queue_command_history(vec![command])
+                            };
+                            if !queued {
                                 self.settings.update_store_status(
                                     "command history worker is unavailable",
                                     false,
@@ -285,6 +308,14 @@ impl ZzClawTermApp {
                                 self.request_settings_panel_refresh(cx);
                             }
                         }
+                    }
+                    SessionEvent::TmuxState { session_id, state } => {
+                        self.flush_pending_session_frame_outputs(
+                            &mut pending_frame_outputs,
+                            &mut drain_timings,
+                        );
+                        root_chrome_dirty |=
+                            self.handle_session_tmux_state_event(session_id, *state, cx);
                     }
                     SessionEvent::Exited { session_id, reason } => {
                         self.flush_pending_session_frame_outputs(
@@ -825,7 +856,7 @@ mod recording_tests {
     use crate::features::test_support::app_with_visible_local_session;
     use gpui::{AppContext as _, TestAppContext};
     use zzclawterm_core::test_support::TestTempDir;
-    use zzclawterm_transport::{
+    use zzclawterm_recording::recording::{
         ExistingFileBehavior, RecordingContext, RecordingMode, RecordingProfile,
         RecordingRotationPolicy,
     };

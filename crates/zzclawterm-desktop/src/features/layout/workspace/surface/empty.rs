@@ -146,12 +146,16 @@ impl ZzClawTermApp {
     ) -> impl IntoElement {
         let palette = self.theme_palette();
         let request_id = self.session.active_failed_request_id().map(str::to_string);
+        let cancelled = request_id
+            .as_deref()
+            .is_some_and(|id| self.session.start_request_cancelled(id));
         let error = self
             .session
             .start_active_failed()
             .map(|failed| failed.error.clone())
             .or_else(|| self.shell.last_connect_failure_error().map(str::to_string))
             .unwrap_or_default();
+        let show_error = !cancelled || error != t!("terminal.connectionCancelled").as_ref();
 
         div()
             .debug_selector(|| "failed-workspace-state".into())
@@ -167,7 +171,11 @@ impl ZzClawTermApp {
                 svg()
                     .size(px(32.))
                     .path("icons/session/disconnect.svg")
-                    .text_color(rgb(palette.danger)),
+                    .text_color(rgb(if cancelled {
+                        palette.text_muted
+                    } else {
+                        palette.danger
+                    })),
             )
             .child(
                 div()
@@ -183,15 +191,21 @@ impl ZzClawTermApp {
                             .text_size(px(13.))
                             .font_weight(FontWeight(600.))
                             .text_color(rgb(palette.text))
-                            .child(t!("terminal.connectionFailed")),
+                            .child(if cancelled {
+                                t!("terminal.connectionCancelled")
+                            } else {
+                                t!("terminal.connectionFailed")
+                            }),
                     )
-                    .child(
-                        div()
-                            .max_w(px(320.))
-                            .text_size(px(11.))
-                            .text_color(rgb(palette.text_dimmed))
-                            .child(truncate_preview(&error, 160)),
-                    ),
+                    .when(show_error, |this| {
+                        this.child(
+                            div()
+                                .max_w(px(320.))
+                                .text_size(px(11.))
+                                .text_color(rgb(palette.text_dimmed))
+                                .child(truncate_preview(&error, 160)),
+                        )
+                    }),
             )
             .when_some(request_id, |this, request_id| {
                 this.child(

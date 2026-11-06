@@ -5,11 +5,13 @@ use super::tab_motion::{TabMotionElement, TabStripViewportElement};
 use crate::features::shell::session_tabs::{SessionStripTab, SessionStripTabId};
 
 use gpui::{
-    Anchor, ClickEvent, Context, FontWeight, IntoElement, MouseButton, ScrollDelta,
-    ScrollWheelEvent, SharedString, div, point, prelude::*, px, rgb, rgba, svg,
+    Anchor, ClickEvent, Context, FontWeight, IntoElement, MouseButton, ScrollDelta, ScrollEvent,
+    SharedString, div, point, prelude::*, px, rgb, rgba, svg,
 };
 use zzclawterm_core::truncate_preview;
-use zzclawterm_ui::{ZzClawHoverCard, ZzClawPopover, ZzClawPopoverAlign, ZzClawPopoverPlacement};
+use zzclawterm_ui::{
+    ZzClawCheckbox, ZzClawHoverCard, ZzClawPopover, ZzClawPopoverAlign, ZzClawPopoverPlacement,
+};
 
 use crate::features::ZzClawTermApp;
 use crate::features::icons::resolve_connection_icon;
@@ -90,12 +92,19 @@ impl ZzClawTermApp {
     ) -> impl IntoElement {
         let palette = self.theme_palette();
         let hover_bg = self.shell_surface_color(palette.hover);
+        let action_target = self
+            .session
+            .start_request_target(&request_id)
+            .expect("visible start has a placement");
+        let middle_target = action_target.clone();
+        let right_target = action_target.clone();
         let close_request_id = request_id.clone();
         let spinner_id = SharedString::from(format!("pending-session-spinner-{request_id}"));
         div()
             .id(SharedString::from(format!(
                 "pending-session-tab-{request_id}"
             )))
+            .debug_selector(|| format!("pending-session-tab-{request_id}"))
             .h_full()
             .min_w(px(SESSION_TAB_MIN_WIDTH))
             .max_w(px(SESSION_TAB_MAX_WIDTH))
@@ -172,6 +181,9 @@ impl ZzClawTermApp {
                     .id(SharedString::from(format!(
                         "pending-session-tab-close-{close_request_id}"
                     )))
+                    .debug_selector(|| format!("pending-session-tab-close-{close_request_id}"))
+                    .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                     .tooltip(|window, cx| {
                         zzclawterm_ui::ZzClawTooltip::new(t!("common.close").to_string())
                             .build(window, cx)
@@ -204,9 +216,21 @@ impl ZzClawTermApp {
                         this.close_pending_session_start(close_request_id.clone(), cx);
                     })),
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.select_pending_session_start(request_id.clone(), cx);
+            .on_click(cx.listener(move |this, event, window, cx| {
+                this.handle_tab_target_click(action_target.clone(), event, window, cx);
             }))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, event, window, cx| {
+                    this.handle_tab_target_mouse_down(middle_target.clone(), event, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event, window, cx| {
+                    this.handle_tab_target_mouse_down(right_target.clone(), event, window, cx);
+                }),
+            )
     }
 
     fn failed_session_tab(
@@ -227,8 +251,19 @@ impl ZzClawTermApp {
             unreachable!("failed tab requires a failed connection attempt");
         };
         let palette = self.theme_palette();
+        let action_target = self
+            .session
+            .start_request_target(&request_id)
+            .expect("visible start has a placement");
+        let middle_target = action_target.clone();
+        let right_target = action_target.clone();
         let close_request_id = request_id.clone();
-        let select_request_id = request_id.clone();
+        let cancelled = self.session.start_request_cancelled(&request_id);
+        let accent = if cancelled {
+            palette.text_muted
+        } else {
+            palette.danger
+        };
         let key = SessionStripTabId::Start(sequence).layout_key();
         let motion = self.shell.tab_strip_motion(group.clone());
         let width = motion.borrow().width(&key).unwrap_or(188.);
@@ -245,9 +280,9 @@ impl ZzClawTermApp {
             kind_icon: "icons/session/disconnect.svg",
             preview_background: palette.surface,
             preview_border: palette.border,
-            preview_text: palette.danger,
+            preview_text: accent,
             preview_text_muted: palette.text_muted,
-            preview_accent: palette.danger,
+            preview_accent: accent,
         };
         let app = cx.weak_entity();
         let tooltip_app = cx.weak_entity();
@@ -270,9 +305,9 @@ impl ZzClawTermApp {
             .border_color(rgb(palette.border))
             .when(!active, |this| this.border_b_1())
             .bg(if active {
-                rgba((palette.danger << 8) | 0x24)
+                rgba((accent << 8) | 0x24)
             } else {
-                rgba((palette.danger << 8) | 0x12)
+                rgba((accent << 8) | 0x12)
             })
             .cursor_move()
             .when(source, |this| {
@@ -289,7 +324,7 @@ impl ZzClawTermApp {
                     app.drop_on_session_start_tab(payload, &group, &drop_request_id, cx);
                 }),
             )
-            .hover(|this| this.bg(rgba((palette.danger << 8) | 0x24)))
+            .hover(|this| this.bg(rgba((accent << 8) | 0x24)))
             .when(active, |this| {
                 this.child(
                     div()
@@ -299,7 +334,7 @@ impl ZzClawTermApp {
                         .left_0()
                         .right_0()
                         .h(px(2.))
-                        .bg(rgb(palette.danger)),
+                        .bg(rgb(accent)),
                 )
             })
             .child(
@@ -312,7 +347,7 @@ impl ZzClawTermApp {
                         svg()
                             .size(px(12.))
                             .path("icons/session/disconnect.svg")
-                            .text_color(rgb(palette.danger)),
+                            .text_color(rgb(accent)),
                     ),
             )
             .child(
@@ -333,7 +368,7 @@ impl ZzClawTermApp {
                     } else {
                         FontWeight(500.)
                     })
-                    .text_color(rgb(palette.danger))
+                    .text_color(rgb(accent))
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
@@ -344,6 +379,9 @@ impl ZzClawTermApp {
                     .id(SharedString::from(format!(
                         "failed-session-tab-close-{close_request_id}"
                     )))
+                    .debug_selector(|| format!("failed-session-tab-close-{close_request_id}"))
+                    .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                     .tooltip(|window, cx| {
                         zzclawterm_ui::ZzClawTooltip::new(t!("common.close").to_string())
                             .build(window, cx)
@@ -358,7 +396,7 @@ impl ZzClawTermApp {
                     .rounded_sm()
                     .text_xs()
                     .text_color(rgb(palette.text_muted))
-                    .hover(|this| this.bg(rgb(palette.border)).text_color(rgb(palette.danger)))
+                    .hover(|this| this.bg(rgb(palette.border)).text_color(rgb(accent)))
                     .child(
                         svg()
                             .size(px(13.))
@@ -368,7 +406,7 @@ impl ZzClawTermApp {
                                 SharedString::from(format!(
                                     "failed-session-tab-close-group-{close_request_id}"
                                 )),
-                                |this| this.text_color(rgb(palette.danger)),
+                                |this| this.text_color(rgb(accent)),
                             ),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -386,9 +424,21 @@ impl ZzClawTermApp {
                 })
                 .into()
             })
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.select_failed_session_start(select_request_id.clone(), cx);
+            .on_click(cx.listener(move |this, event, window, cx| {
+                this.handle_tab_target_click(action_target.clone(), event, window, cx);
             }))
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(move |this, event, window, cx| {
+                    this.handle_tab_target_mouse_down(middle_target.clone(), event, window, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event, window, cx| {
+                    this.handle_tab_target_mouse_down(right_target.clone(), event, window, cx);
+                }),
+            )
     }
 
     pub(in crate::features) fn main_surface(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -478,18 +528,38 @@ impl ZzClawTermApp {
         let has_unread = leaf_ids
             .iter()
             .any(|id| self.terminal.session_has_unread(id));
-        let sync_group = leaf_ids
+        let terminal_ids = leaf_ids
+            .iter()
+            .filter(|id| self.terminal_sync_session(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let sync_group = terminal_ids
             .iter()
             .find_map(|id| self.sync_input.active_group_for_session(id));
-        let sync_paused = leaf_ids
-            .iter()
-            .any(|id| self.sync_input.session_is_paused_in_active_group(id));
-        let show_sync_indicator = self.sync_input.broadcast_to_all() || sync_group.is_some();
-        let sync_indicator_color = sync_group.map(|group| group.color).unwrap_or(palette.link);
+        let sync_paused = !self.sync_input.broadcast_to_all()
+            && terminal_ids
+                .iter()
+                .any(|id| self.sync_input.session_is_paused_in_active_group(id));
+        let show_sync_indicator = !terminal_ids.is_empty()
+            && (self.sync_input.broadcast_to_all() || sync_group.is_some());
+        let sync_checkbox = (self.sync_input.input_selection_active() && !terminal_ids.is_empty())
+            .then(|| {
+                let (checked, mixed) = self.sync_input.tab_receive_state(&terminal_ids);
+                (checked, mixed, terminal_ids)
+            });
+        let sync_indicator_color = if self.sync_input.broadcast_to_all() {
+            palette.link
+        } else {
+            sync_group.map(|group| group.color).unwrap_or(palette.link)
+        };
         let sync_indicator_label = show_sync_indicator.then(|| {
-            let scope = sync_group
-                .map(|group| group.name.clone())
-                .unwrap_or_else(|| t!("menu.broadcastToAll").to_string());
+            let scope = if self.sync_input.broadcast_to_all() {
+                t!("menu.broadcastToAll").to_string()
+            } else {
+                sync_group
+                    .map(|group| group.name.clone())
+                    .unwrap_or_default()
+            };
             if sync_paused {
                 format!("{scope} · {}", t!("syncGroup.paused"))
             } else {
@@ -766,6 +836,55 @@ impl ZzClawTermApp {
                         ),
                 )
             })
+            .when_some(sync_checkbox, |this, (checked, mixed, session_ids)| {
+                this.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "session-tab-sync-receive-{close_session_id}"
+                        )))
+                        .debug_selector(|| "session-tab-sync-receive".to_string())
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .tooltip(move |window, cx| {
+                            zzclawterm_ui::ZzClawTooltip::new(if mixed {
+                                t!("syncGroup.receiveInputMixed").to_string()
+                            } else {
+                                t!("syncGroup.receiveInput").to_string()
+                            })
+                            .build(window, cx)
+                        })
+                        .child(
+                            ZzClawCheckbox::new(SharedString::from(format!(
+                                "session-tab-sync-receive-box-{close_session_id}"
+                            )))
+                            .checked(checked)
+                            .on_click(cx.listener(
+                                move |this, receive: &bool, _, cx| {
+                                    cx.stop_propagation();
+                                    this.set_sessions_receive_sync_input(
+                                        &session_ids,
+                                        *receive,
+                                        cx,
+                                    );
+                                },
+                            )),
+                        )
+                        .when(mixed, |this| {
+                            this.child(
+                                div()
+                                    .text_size(px(9.))
+                                    .text_color(rgb(palette.text_muted))
+                                    .child(t!("syncGroup.partial").to_string()),
+                            )
+                        }),
+                )
+            })
             .when(has_unread && !is_active, |this| {
                 this.child(div().size(px(7.)).rounded_full().bg(rgb(palette.success)))
             })
@@ -842,6 +961,10 @@ impl ZzClawTermApp {
             );
         ZzClawHoverCard::new(hover_card_id, tab, hover_card)
             .anchor(Anchor::TopLeft)
+            .suspended(
+                self.session.dialog_tab_actions_target().is_some()
+                    || self.session.tab_drag_is_pending(),
+            )
             .into_any_element()
     }
 
@@ -955,7 +1078,7 @@ impl ZzClawTermApp {
                     this.drop_session_tab_on_strip(payload, &group, cx);
                 }
             }))
-            .on_scroll_wheel(cx.listener(move |_, event: &ScrollWheelEvent, _, cx| {
+            .on_scroll(cx.listener(move |_, event: &ScrollEvent, _, cx| {
                 let (delta_x, delta_y) = match event.delta {
                     ScrollDelta::Lines(delta) => (delta.x * 36., delta.y * 36.),
                     ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
@@ -992,6 +1115,9 @@ impl ZzClawTermApp {
                 }
                 SessionStripTabId::Workspace(crate::models::WorkspaceTabId::FileManager(id)) => {
                     self.file_manager_strip_tab(id, index, index + 1, group_active.as_deref(), cx)
+                }
+                SessionStripTabId::Workspace(crate::models::WorkspaceTabId::Settings) => {
+                    self.settings_strip_tab(index, index + 1, group_active.as_deref(), cx)
                 }
                 SessionStripTabId::Workspace(crate::models::WorkspaceTabId::Session(id)) => {
                     let Some(session) = self.session.session_info(&id) else {
@@ -1308,6 +1434,71 @@ impl ZzClawTermApp {
 #[cfg(test)]
 mod tests {
     use super::{tab_drop_insert_after, tab_scroll_x, tab_strip_overflows};
+
+    #[test]
+    fn checkbox_click_keeps_the_active_tab_and_terminal_focus() {
+        use crate::features::ZzClawTermApp;
+        use crate::features::test_support::app_with_visible_local_session;
+        use crate::test_support::{TestAppCleanup, TestConfigDir};
+        use gpui::{
+            AppContext as _, Entity, IntoElement, Modifiers, Render, TestAppContext, div,
+            prelude::*, px, size,
+        };
+
+        struct Host(Entity<ZzClawTermApp>);
+        impl Render for Host {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                cx: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                self.0.update(cx, |app, cx| {
+                    let session = app
+                        .session
+                        .ordered_sessions()
+                        .into_iter()
+                        .find(|session| session.id == "other")
+                        .unwrap();
+                    div()
+                        .size_full()
+                        .child(div().track_focus(app.terminal.input_focus()))
+                        .child(app.session_strip_tab(session, 1, 2, Some("active"), cx))
+                })
+            }
+        }
+        let root = TestConfigDir::new("zzclawterm-sync-checkbox-focus");
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), "active");
+        cx.update_entity(&app, |app, cx| {
+            let metadata = app.session.metadata("active").unwrap().clone();
+            app.session.register_session_metadata("other", metadata);
+            app.sync_input.toggle_broadcast_to_all();
+            zzclawterm_ui::apply_component_theme(
+                app.theme_palette(),
+                gpui::font("Arial"),
+                px(12.),
+                cx,
+            );
+        });
+        let (_, vcx) = cx.add_window_view(|_, _| Host(app.clone()));
+        vcx.simulate_resize(size(px(480.), px(100.)));
+        vcx.update(|window, cx| {
+            let focus = app.read(cx).terminal.input_focus().clone();
+            focus.focus(window, cx);
+            _ = window.draw(cx);
+        });
+        vcx.run_until_parked();
+        let checkbox = vcx.debug_bounds("session-tab-sync-receive").unwrap();
+        vcx.simulate_click(checkbox.center(), Modifiers::default());
+        vcx.update(|window, cx| {
+            let app = app.read(cx);
+            assert!(!app.sync_input.session_receives_input("other"));
+            assert_eq!(app.session.active_id(), Some("active"));
+            assert!(app.terminal.input_focus().is_focused(window));
+            assert!(!app.session.tab_drag_source_is("other"));
+        });
+    }
 
     #[test]
     fn tab_drop_uses_source_and_target_order_for_insertion_side() {

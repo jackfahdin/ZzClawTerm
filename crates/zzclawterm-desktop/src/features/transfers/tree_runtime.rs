@@ -1,15 +1,12 @@
-use std::sync::Arc;
-
-use gpui::{Context, KeyDownEvent, Window};
-use zzclawterm_transport::{
-    FileBrowserBackendKind, RemoteFilePath, SftpFileEntry, file_browser_join,
-};
-
 use crate::features::ZzClawTermApp;
 use crate::models::{
     TransferBrowserContextTarget, TransferJobEvent, TransferJobKind, TransferJobOutput,
     TransferJobResult, TransferJobState, TransferJobStatus,
 };
+use gpui::{Context, KeyDownEvent, Window};
+use std::sync::Arc;
+use zzclawterm_files::file_browser::{FileBrowserBackendKind, file_browser_join};
+use zzclawterm_files::sftp::{RemoteFilePath, SftpFileEntry};
 
 impl ZzClawTermApp {
     pub(super) fn request_missing_expanded_tree_listings(&mut self, cx: &mut Context<Self>) {
@@ -334,7 +331,7 @@ impl ZzClawTermApp {
             } => {
                 self.transfer
                     .invalidate_tree_path(session, &RemoteFilePath::new(old_path), true);
-                let parent = zzclawterm_transport::file_browser_parent(backend, new_path);
+                let parent = zzclawterm_files::file_browser::file_browser_parent(backend, new_path);
                 self.transfer
                     .invalidate_tree_path(session, &RemoteFilePath::new(parent), false);
                 seed(self, parent_path, entries);

@@ -1,18 +1,14 @@
-use std::borrow::Cow;
-
+use super::data::{ProcessDisplayMode, process_row_height_px};
+use super::resources::{compact_remote_svg_button, process_usage_color as usage_color};
+use crate::features::view_widgets::APP_OVERLAY_PRIORITY;
+use crate::models::RemoteProcessSortDirection;
+use crate::theme::ThemePalette;
 use gpui::{
     App, ClickEvent, FontWeight, IntoElement, SharedString, Window, deferred, div, prelude::*, px,
     rgb,
 };
-use zzclawterm_core::truncate_preview;
-use zzclawterm_transport::RemoteProcess;
-
-use crate::features::view_widgets::APP_OVERLAY_PRIORITY;
-use crate::models::RemoteProcessSortDirection;
-use crate::theme::ThemePalette;
-
-use super::data::{ProcessDisplayMode, process_row_height_px};
-use super::resources::{compact_remote_svg_button, usage_color};
+use std::borrow::Cow;
+use zzclawterm_remote_ops::remote_process::RemoteProcess;
 
 pub(in crate::features::pages::remote) fn process_sort_button(
     palette: ThemePalette,
@@ -113,27 +109,6 @@ where
         on_cont,
         on_kill,
     } = actions;
-    // Tauri ProcessManager: left accent + mode-aware columns (compact/narrow/medium/wide).
-    let accent = if process.cpu_percent >= 80.0 {
-        rgb(palette.danger)
-    } else if process.memory_percent >= 80.0 {
-        rgb(palette.warning)
-    } else if selected {
-        rgb(0x1f6feb)
-    } else {
-        rgb(palette.border)
-    };
-    let show_memory = !matches!(
-        mode,
-        ProcessDisplayMode::Narrow | ProcessDisplayMode::Compact
-    );
-    let show_user = matches!(mode, ProcessDisplayMode::Wide);
-    let cols = match mode {
-        ProcessDisplayMode::Compact => 2,
-        ProcessDisplayMode::Narrow => 4,
-        ProcessDisplayMode::Medium => 5,
-        ProcessDisplayMode::Wide => 6,
-    };
     let row_h = process_row_height_px(mode);
 
     let menu = div()
@@ -220,113 +195,102 @@ where
             )
         });
 
-    let body = if mode == ProcessDisplayMode::Compact {
-        // Tauri CompactProcessRow: command + PID/CPU mono line + menu.
-        div()
-            .id(gpui::SharedString::from(format!(
-                "process-row-{}",
-                process.pid
-            )))
-            .h(px(row_h))
-            .px_2()
-            .pl(px(10.))
-            .flex()
-            .items_center()
-            .gap_2()
-            .cursor_pointer()
-            .on_click(on_select)
+    let full_command = process.command.clone();
+    let name = div()
+        .id(SharedString::from(format!("process-name-{}", process.pid)))
+        .min_w_0()
+        .truncate()
+        .text_size(px(12.))
+        .font_weight(FontWeight(500.))
+        .text_color(rgb(palette.text))
+        .tooltip(move |window, cx| {
+            zzclawterm_ui::ZzClawTooltip::new(full_command.clone()).build(window, cx)
+        })
+        .child(process.command.clone());
+    let menu = process_column(Some(28.), menu);
+    let body = div()
+        .id(SharedString::from(format!("process-row-{}", process.pid)))
+        .h(px(row_h))
+        .w_full()
+        .min_w_0()
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_1()
+        .cursor_pointer()
+        .on_click(on_select);
+    let body = if matches!(
+        mode,
+        ProcessDisplayMode::Compact | ProcessDisplayMode::Narrow
+    ) {
+        body.flex_col()
+            .items_stretch()
+            .justify_center()
             .child(
                 div()
                     .min_w_0()
-                    .flex_1()
+                    .h(px(28.))
                     .flex()
-                    .flex_col()
-                    .justify_center()
+                    .items_center()
+                    .gap_1()
+                    .child(div().flex_1().min_w_0().child(name))
+                    .child(menu),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .when(mode == ProcessDisplayMode::Compact, |this| this.flex_col())
+                    .justify_between()
+                    .gap_1()
+                    .text_size(px(10.))
+                    .font_family(crate::features::shell::gpui_code_font_family())
+                    .text_color(rgb(palette.text_muted))
+                    .child(format!("PID {}", process.pid))
                     .child(
                         div()
-                            .text_size(px(12.))
-                            .font_weight(FontWeight(600.))
-                            .text_color(rgb(palette.text))
-                            .overflow_hidden()
-                            .child(truncate_preview(&process.command, 36)),
-                    )
-                    .child(
-                        div()
-                            .font_family(crate::features::shell::gpui_code_font_family())
-                            .text_size(px(10.))
-                            .text_color(rgb(palette.text_dimmed))
-                            .overflow_hidden()
-                            .child(format!("PID {} · {:.1}%", process.pid, process.cpu_percent)),
+                            .flex()
+                            .justify_between()
+                            .gap_2()
+                            .child(format!("CPU {:.1}%", process.cpu_percent))
+                            .child(format!(
+                                "{} {:.1}%",
+                                rust_i18n::t!("processManager.sortMemory"),
+                                process.memory_percent
+                            )),
                     ),
             )
-            .child(menu)
     } else {
-        let mut grid = div()
-            .grid()
-            .id(gpui::SharedString::from(format!(
-                "process-row-{}",
-                process.pid
-            )))
-            .grid_cols(cols)
-            .gap_1()
-            .h(px(row_h))
-            .px_2()
-            .pl(px(10.))
-            .items_center()
-            .cursor_pointer()
-            .on_click(on_select)
-            .child(
-                div()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .font_weight(FontWeight(600.))
-                            .text_color(rgb(palette.text))
-                            .overflow_hidden()
-                            .child(truncate_preview(&process.command, 40)),
-                    )
-                    .child(
-                        div()
-                            .font_family(crate::features::shell::gpui_code_font_family())
-                            .text_size(px(10.))
-                            .text_color(rgb(palette.text_dimmed))
-                            .overflow_hidden()
-                            .child(truncate_preview(&process.command_line, 52)),
-                    ),
-            )
-            .child(process_table_cell(
-                palette,
-                process.pid.to_string(),
-                None,
-                true,
+        body.child(process_column(None, name))
+            .child(process_column(
+                Some(72.),
+                process_table_cell(palette, process.pid.to_string(), None, true),
             ))
-            .child(process_table_cell(
-                palette,
-                format!("{:.1}%", process.cpu_percent),
-                Some(usage_color(palette, process.cpu_percent / 100.)),
-                true,
-            ));
-        if show_memory {
-            grid = grid.child(process_table_cell(
-                palette,
-                format!("{:.1}%", process.memory_percent),
-                Some(usage_color(palette, process.memory_percent / 100.)),
-                true,
-            ));
-        }
-        if show_user {
-            grid = grid.child(process_table_cell(
-                palette,
-                truncate_preview(&process.user, 12),
-                None,
-                false,
-            ));
-        }
-        grid.child(menu)
+            .child(process_column(
+                Some(64.),
+                process_table_cell(
+                    palette,
+                    format!("{:.1}%", process.cpu_percent),
+                    Some(usage_color(palette, process.cpu_percent / 100.)),
+                    true,
+                ),
+            ))
+            .child(process_column(
+                Some(64.),
+                process_table_cell(
+                    palette,
+                    format!("{:.1}%", process.memory_percent),
+                    Some(usage_color(palette, process.memory_percent / 100.)),
+                    true,
+                ),
+            ))
+            .when(mode == ProcessDisplayMode::Wide, |this| {
+                this.child(process_column(
+                    Some(72.),
+                    process_table_cell(palette, process.user.clone(), None, false),
+                ))
+            })
+            .child(menu)
     };
 
     div()
@@ -339,15 +303,17 @@ where
             rgb(palette.surface)
         })
         .hover(|this| this.bg(rgb(palette.hover)))
-        .child(
-            div()
-                .absolute()
-                .left_0()
-                .top_0()
-                .bottom_0()
-                .w(px(2.))
-                .bg(accent),
-        )
+        .when(selected, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(2.))
+                    .bg(rgb(palette.primary)),
+            )
+        })
         .child(body)
 }
 
@@ -433,6 +399,22 @@ pub(in crate::features::pages::remote) fn process_table_cell(
         .text_xs()
         .when(numeric, |this| this.text_right())
         .text_color(color.unwrap_or_else(|| rgb(palette.text).into()))
-        .overflow_hidden()
+        .truncate()
         .child(value)
+}
+
+/// Shared by table headings and rows so the flexible name never competes with numbers.
+pub(in crate::features::pages::remote) fn process_column(
+    width: Option<f32>,
+    content: impl IntoElement,
+) -> gpui::Div {
+    div()
+        .min_w_0()
+        .h_full()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .when_some(width, |this, width| this.w(px(width)).flex_none())
+        .when(width.is_none(), |this| this.flex_1())
+        .child(content)
 }

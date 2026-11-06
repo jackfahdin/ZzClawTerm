@@ -1,3 +1,6 @@
+use self::TransferContextMenuAction as Action;
+use self::TransferContextMenuNode::{Action as Item, Separator};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TransferContextMenuNode {
     Action(TransferContextMenuAction),
@@ -30,9 +33,9 @@ pub(super) enum TransferContextMenuAction {
 
 pub(super) fn transfer_context_action_visible_for_backend(
     action: TransferContextMenuAction,
-    backend: zzclawterm_transport::FileBrowserBackendKind,
+    backend: zzclawterm_files::file_browser::FileBrowserBackendKind,
 ) -> bool {
-    backend == zzclawterm_transport::FileBrowserBackendKind::Remote
+    backend == zzclawterm_files::file_browser::FileBrowserBackendKind::Remote
         || !matches!(
             action,
             TransferContextMenuAction::Upload
@@ -44,7 +47,7 @@ pub(super) fn transfer_context_action_visible_for_backend(
 
 pub(super) fn transfer_visible_context_menu_nodes(
     nodes: impl IntoIterator<Item = TransferContextMenuNode>,
-    backend: zzclawterm_transport::FileBrowserBackendKind,
+    backend: zzclawterm_files::file_browser::FileBrowserBackendKind,
 ) -> Vec<TransferContextMenuNode> {
     let mut visible = Vec::new();
     for node in nodes {
@@ -101,7 +104,7 @@ pub(super) struct TransferEntryMenuCapabilities {
 pub(super) fn transfer_entry_context_menu_policy(
     capabilities: TransferEntryMenuCapabilities,
 ) -> Vec<TransferContextMenuNode> {
-    use TransferContextMenuAction as Action;
+    use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
     use TransferContextMenuNode::{Action as Item, Separator};
 
     let mut items = vec![Item(Action::Open)];
@@ -148,9 +151,6 @@ pub(super) fn transfer_entry_context_menu_policy(
 pub(super) fn transfer_current_directory_context_menu_policy(
     terminal_available: bool,
 ) -> Vec<TransferContextMenuNode> {
-    use TransferContextMenuAction as Action;
-    use TransferContextMenuNode::{Action as Item, Separator};
-
     let mut items = vec![
         Item(Action::Refresh),
         Item(Action::Upload),
@@ -169,9 +169,6 @@ pub(super) fn transfer_current_directory_context_menu_policy(
 }
 
 pub(super) fn transfer_parent_directory_context_menu_policy() -> Vec<TransferContextMenuNode> {
-    use TransferContextMenuAction as Action;
-    use TransferContextMenuNode::{Action as Item, Separator};
-
     vec![Item(Action::GoUp), Separator, Item(Action::Refresh)]
 }
 
@@ -233,10 +230,9 @@ pub(super) fn send_to_destination_path(target_dir: &str, entry_name: &str) -> St
 #[cfg(test)]
 mod tests {
     use super::{
-        SendToCandidate, TransferContextMenuAction as Action, TransferContextMenuNode as Node,
-        TransferEntryMenuCapabilities, send_to_candidate_is_eligible, send_to_destination_path,
-        send_to_target_directory, transfer_action_bar_enabled,
-        transfer_context_action_visible_for_backend,
+        SendToCandidate, TransferContextMenuNode as Node, TransferEntryMenuCapabilities,
+        send_to_candidate_is_eligible, send_to_destination_path, send_to_target_directory,
+        transfer_action_bar_enabled, transfer_context_action_visible_for_backend,
         transfer_current_directory_context_menu_policy,
         transfer_directory_terminal_actions_visible, transfer_entry_context_menu_policy,
         transfer_parent_directory_context_menu_policy, transfer_visible_context_menu_nodes,
@@ -268,7 +264,8 @@ mod tests {
 
     #[test]
     fn local_backend_hides_remote_only_actions() {
-        use zzclawterm_transport::FileBrowserBackendKind::{Local, Remote};
+        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
+        use zzclawterm_files::file_browser::FileBrowserBackendKind::{Local, Remote};
 
         for action in [
             Action::Upload,
@@ -291,6 +288,7 @@ mod tests {
 
     #[test]
     fn file_menu_groups_copy_and_terminal_actions() {
+        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         assert_eq!(
             transfer_entry_context_menu_policy(TransferEntryMenuCapabilities {
                 show_open_internal: true,
@@ -322,6 +320,7 @@ mod tests {
 
     #[test]
     fn preview_action_follows_open_and_only_for_files() {
+        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         let file = transfer_entry_context_menu_policy(TransferEntryMenuCapabilities {
             show_preview: true,
             ..Default::default()
@@ -342,6 +341,7 @@ mod tests {
 
     #[test]
     fn directory_menu_inserts_favorite_group() {
+        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         let items = transfer_entry_context_menu_policy(TransferEntryMenuCapabilities {
             is_directory: true,
             ..Default::default()
@@ -359,6 +359,7 @@ mod tests {
 
     #[test]
     fn preview_action_shows_for_every_file_including_unrenderable_types() {
+        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         // Parity: the preview action is offered for any non-directory file. A
         // type the preview cannot render (e.g. a `.zip`) still gets the action;
         // the window opens and shows the unsupported message. The capability is
@@ -374,6 +375,7 @@ mod tests {
 
     #[test]
     fn current_and_parent_directory_menus_match_tauri_groups() {
+        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         assert_eq!(
             transfer_current_directory_context_menu_policy(true),
             vec![
@@ -402,6 +404,7 @@ mod tests {
 
     #[test]
     fn send_to_submenu_follows_download_with_its_own_separator() {
+        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         let items = transfer_entry_context_menu_policy(TransferEntryMenuCapabilities {
             has_send_targets: true,
             ..Default::default()
@@ -422,6 +425,7 @@ mod tests {
 
     #[test]
     fn send_to_submenu_absent_without_eligible_targets() {
+        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         let items = transfer_entry_context_menu_policy(TransferEntryMenuCapabilities {
             ..Default::default()
         });
@@ -440,6 +444,7 @@ mod tests {
 
     #[test]
     fn tree_entries_offer_creation_and_terminal_requires_availability() {
+        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         let items = transfer_entry_context_menu_policy(TransferEntryMenuCapabilities {
             is_tree_view: true,
             ..Default::default()
@@ -456,7 +461,8 @@ mod tests {
 
     #[test]
     fn local_menu_removes_remote_actions_without_empty_groups() {
-        use zzclawterm_transport::FileBrowserBackendKind::Local;
+        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
+        use zzclawterm_files::file_browser::FileBrowserBackendKind::Local;
 
         let nodes = transfer_visible_context_menu_nodes(
             transfer_entry_context_menu_policy(TransferEntryMenuCapabilities {

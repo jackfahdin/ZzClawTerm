@@ -1,14 +1,11 @@
-use std::sync::Arc;
-
-use gpui::Context;
-
-use crate::features::ZzClawTermApp;
-use crate::models::{TransferJobRowSnapshot, TransferJobStatus};
-
 use super::panel::{
     TransferBrowserPresentation, TransferChrome, TransferQueuePresentation, TransferSnapshot,
 };
 use super::transfer_browser_availability;
+use crate::features::ZzClawTermApp;
+use crate::models::{TransferJobRowSnapshot, TransferJobStatus};
+use gpui::Context;
+use std::sync::Arc;
 
 impl ZzClawTermApp {
     /// Flush the transfers panel once the current effect cycle ends.
@@ -120,7 +117,7 @@ impl ZzClawTermApp {
             tree,
             tree_focus,
             local_backend: self.session.active_file_browser_backend()
-                == Some(zzclawterm_transport::FileBrowserBackendKind::Local),
+                == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Local),
             path: browser.path.clone(),
             home_dir: browser.home_dir.clone(),
             path_editing: browser.path_editing,

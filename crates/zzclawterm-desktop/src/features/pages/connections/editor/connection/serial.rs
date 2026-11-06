@@ -34,7 +34,7 @@ fn serial_baud_picker(
         editor,
         fields,
         baud_popover_open: _,
-        narrow,
+        narrow: _,
     } = section;
     let is_preset = SERIAL_BAUD_PRESETS.contains(&editor.baud_rate.trim());
     let valid = editor
@@ -82,7 +82,9 @@ fn serial_baud_picker(
                 .text_color(rgb(palette.text_muted)),
         );
 
-    let mut preset_grid = div().grid().grid_cols(if narrow { 1 } else { 3 }).gap_1();
+    // The popup has its own fixed width, independent of the form column.
+    // Keeping its presets compact leaves the custom input visible on open.
+    let mut preset_grid = div().grid().grid_cols(3).gap_1();
     for preset in SERIAL_BAUD_PRESETS {
         let value = preset.to_string();
         let selected = editor.baud_rate == preset;

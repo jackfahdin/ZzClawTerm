@@ -834,6 +834,7 @@ mod hover_card_tests {
             )
         });
         let (_, cx) = cx.add_window_view(|window, cx| {
+            window.activate_window();
             let view = cx.new(|_| HoverCardHarness { app });
             zzclawterm_ui::zzclaw_root(view, window, cx)
         });

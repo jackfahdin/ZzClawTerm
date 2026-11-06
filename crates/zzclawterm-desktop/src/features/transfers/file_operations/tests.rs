@@ -1,15 +1,12 @@
-use std::fs;
-
-use zzclawterm_core::test_support::TestTempDir;
-use zzclawterm_transport::{
-    FileBrowserService, RemoteFilePath, SftpDuplicatePolicy, SftpPathTransferOptions,
-    SftpTransferControl,
-};
-
 use super::{
     FileMutation, FileMutationIntent, FileOperationEndpoint, FileOperationRequest,
     FileTransferIntent, FileTransferOperation, execute_file_operation,
 };
+use std::fs;
+use zzclawterm_core::test_support::TestTempDir;
+use zzclawterm_files::file_browser::FileBrowserService;
+use zzclawterm_files::sftp::{RemoteFilePath, SftpTransferControl};
+use zzclawterm_files::sftp_transfer_types::{SftpDuplicatePolicy, SftpPathTransferOptions};
 
 fn run(
     root: &TestTempDir,
@@ -123,6 +120,44 @@ fn cancellation_before_move_keeps_source_and_creates_nothing() {
     assert!(run(&root, "item", FileTransferOperation::Move, control).is_err());
     assert_eq!(fs::read(root.join("source/item")).unwrap(), b"keep");
     assert!(!root.join("target/item").exists());
+}
+
+#[test]
+fn cancelled_delete_keeps_file_and_a_fresh_retry_deletes_it() {
+    let root = fixture("zzclawterm-file-manager-delete-retry");
+    let path = root.join("source/item");
+    fs::write(&path, b"keep until retry").unwrap();
+    let request = FileOperationRequest::Mutation(FileMutationIntent {
+        endpoint: FileOperationEndpoint::Local,
+        directory: RemoteFilePath::new(root.join("source").to_string_lossy()),
+        mutation: FileMutation::Delete(RemoteFilePath::new(path.to_string_lossy())),
+    });
+    let cancelled = SftpTransferControl::new();
+    cancelled.cancel();
+    let service = FileBrowserService::local();
+    assert_eq!(
+        execute_file_operation(
+            request.clone(),
+            service.clone(),
+            service.clone(),
+            cancelled,
+            Default::default(),
+            |_| {},
+        )
+        .unwrap_err(),
+        zzclawterm_files::sftp::SFTP_TRANSFER_CANCELLED,
+    );
+    assert_eq!(fs::read(&path).unwrap(), b"keep until retry");
+    execute_file_operation(
+        request,
+        service.clone(),
+        service,
+        SftpTransferControl::new(),
+        Default::default(),
+        |_| {},
+    )
+    .unwrap();
+    assert!(!path.exists());
 }
 
 #[test]

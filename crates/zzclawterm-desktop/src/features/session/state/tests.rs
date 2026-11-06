@@ -1,17 +1,11 @@
-use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
-use std::time::Instant;
-
-use gpui::{AppContext as _, TestAppContext};
-use zzclawterm_core::AiExecutionProfile;
-use zzclawterm_transport::{
-    LocalSessionConfig, RemoteFileBackendPreference, RemoteFileBackendPreferenceStore,
-    SessionEvent, SessionKind, SessionManager, SshAgentPrompt, SshAgentPromptPhase,
-    SshCredentialPrompt, SshCredentialPromptKind, SshCredentialPromptReason, SshHostKey,
-    SshKeyboardInteractivePrompt, SshKeyboardInteractiveRequest, SshSessionConfig,
+use super::{
+    CredentialPromptState, FailedSessionStart, HostKeyPromptRequest,
+    KeyboardInteractivePromptState, NativeOtpCodePreview, NativeOtpProvider,
+    PendingReconnectCompletion, PendingSessionStart, PromptResolution, RenameSessionSubmission,
+    SessionFeatureFocus, SessionFeatureState, SessionPromptState, SessionStartEventRequest,
+    SessionStartFeatureState,
 };
-
+use crate::app_shell::session_hub::ssh_connections::SshConnectionPool;
 use crate::features::runtime_jobs::SessionStartResult;
 use crate::features::session::{HostKeyPromptChoice, HostKeyPromptIssue};
 use crate::features::test_support::{app_with_visible_local_session, session_focus_test_window};
@@ -21,15 +15,18 @@ use crate::models::{
 };
 use crate::temporary_ssh_link::TemporaryLinkProtocol;
 use crate::test_support::{TestConfigDir, blocking_test_store};
-
-use crate::app_shell::session_hub::ssh_connections::SshConnectionPool;
-
-use super::{
-    CredentialPromptState, FailedSessionStart, HostKeyPromptRequest,
-    KeyboardInteractivePromptState, NativeOtpCodePreview, NativeOtpProvider,
-    PendingReconnectCompletion, PendingSessionStart, PromptResolution, RenameSessionSubmission,
-    SessionFeatureFocus, SessionFeatureState, SessionPromptState, SessionStartEventRequest,
-    SessionStartFeatureState,
+use gpui::{AppContext as _, TestAppContext};
+use std::path::Path;
+use std::sync::{Arc, mpsc};
+use std::time::Instant;
+use zzclawterm_core::AiExecutionProfile;
+use zzclawterm_files::remote_file::{
+    RemoteFileBackendPreference, RemoteFileBackendPreferenceStore,
+};
+use zzclawterm_transport::{
+    LocalSessionConfig, SessionEvent, SessionKind, SessionManager, SshAgentPrompt,
+    SshAgentPromptPhase, SshCredentialPrompt, SshCredentialPromptKind, SshCredentialPromptReason,
+    SshHostKey, SshKeyboardInteractivePrompt, SshKeyboardInteractiveRequest, SshSessionConfig,
 };
 
 #[test]
@@ -78,6 +75,58 @@ fn host_key_prompt_accept_and_reject_restore_terminal_input_focus() {
 }
 
 #[test]
+fn host_key_prompt_overlay_keeps_its_content_height() {
+    use crate::features::ZzClawTermApp;
+    use gpui::{
+        Context, Entity, IntoElement, Render, VisualTestContext, Window, div, prelude::*, px,
+    };
+
+    struct HostKeyHost(Entity<ZzClawTermApp>);
+
+    impl Render for HostKeyHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let overlay = self.0.update(cx, |app, cx| {
+                app.ssh_auth_prompt_overlay(cx).into_any_element()
+            });
+            div().relative().size_full().child(overlay)
+        }
+    }
+
+    let root = TestConfigDir::new("zzclawterm-host-key-layout");
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "terminal");
+    app.update(&mut cx, |app, cx| {
+        app.sync_component_theme(cx);
+        let (response_tx, _) = mpsc::channel();
+        app.session.prompts.active_host_key_prompt = Some(HostKeyPromptRequest {
+            id: "host-key-layout".into(),
+            host_key: SshHostKey {
+                host: "example.test".into(),
+                port: 22,
+                host_identifier: "example.test".into(),
+                key_type: "ssh-ed25519".into(),
+                key_base64: "fixture-key".into(),
+                fingerprint: "SHA256:fixture".into(),
+            },
+            issue: HostKeyPromptIssue::Unknown,
+            response_tx,
+        });
+    });
+    let (_, cx) = cx.add_window_view(|_, _| HostKeyHost(app));
+    let cx: &mut VisualTestContext = cx;
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        _ = window.draw(cx);
+    });
+    let card = cx.debug_bounds("ssh-host-key-card").unwrap();
+    let viewport = cx.update(|window, _| window.viewport_size());
+    assert!(card.size.height > px(100.));
+    assert!(card.top() >= px(12.));
+    assert!(card.bottom() <= viewport.height - px(12.));
+}
+
+#[test]
 fn consuming_an_entire_sideband_prefix_keeps_ui_routing_after_the_drain_completes() {
     for prefix in [b":".as_slice(), b"*", b"::TRZ"] {
         let root = TestConfigDir::new("zzclawterm-sideband-prefix-routing");
@@ -106,6 +155,7 @@ fn consuming_an_entire_sideband_prefix_keeps_ui_routing_after_the_drain_complete
 
 fn pending(name: &str) -> PendingSessionStart {
     PendingSessionStart {
+        requested_ssh_runtime_mode: None,
         attempt: Default::default(),
         connection_name: name.to_string(),
         launch_config: None,
@@ -156,6 +206,39 @@ fn failed_start(
         false,
     );
     placement
+}
+
+#[test]
+fn saved_failed_retry_rejects_deleted_and_changed_sources_without_a_built_config() {
+    for changed_protocol in [false, true] {
+        let root = TestConfigDir::new("zzclawterm-failed-retry-current-source");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), "source");
+        let cx = session_focus_test_window(&mut cx, &app);
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let mut request = pending("failed");
+                request.kind = SessionKind::Ssh;
+                request.source_connection_id = Some("saved".into());
+                request.tab_placement = Some(app.session.start.allocate_tab_placement(1));
+                app.session.start.register_pending("failed".into(), request);
+                app.session.simulate_start_failure("failed");
+                if changed_protocol {
+                    let saved = serde_json::from_value(serde_json::json!({
+                        "id":"saved", "name":"Changed", "type":"telnet", "host":"127.0.0.1"
+                    }))
+                    .unwrap();
+                    app.connection_state.replace_loaded(vec![saved], vec![]);
+                }
+                app.retry_failed_session_start("failed".into(), window, cx);
+                assert!(!app.session.start_has_pending());
+                let failed = app.session.start.failed("failed").unwrap();
+                assert_ne!(failed.error, "failed");
+                assert!(failed.pending.launch_config.is_none());
+            })
+        });
+    }
 }
 
 #[test]
@@ -374,7 +457,6 @@ impl gpui::Render for StartupWorkspaceHost {
 #[test]
 fn grouped_connection_failure_and_retry_fill_and_center_in_the_content_area() {
     use gpui::px;
-
     let root = TestConfigDir::new("zzclawterm-startup-workspace-layout");
     let mut cx = TestAppContext::single();
     let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -455,11 +537,11 @@ impl gpui::Render for FailureViewHost {
 
 #[test]
 fn selected_failed_and_retry_tabs_replace_the_previous_tab_highlight() {
-    use gpui::VisualTestContext;
-    use zzclawterm_core::InternalEditorDisplay;
-
     use crate::features::test_support::editor_document;
     use crate::models::{QuickSwitchItem, WorkspaceTabId};
+    use gpui::VisualTestContext;
+
+    use zzclawterm_core::InternalEditorDisplay;
 
     let draw_and_assert =
         |cx: &mut VisualTestContext, selected: &'static str, unselected: &[&'static str]| {
@@ -608,7 +690,8 @@ fn failure_view_reconnect_button_retries_the_selected_request() {
 #[test]
 fn real_failed_tabs_drag_both_directions_cancel_and_never_detach() {
     use crate::app_shell::{AppShellStartup, DesktopController};
-    use gpui::{MouseButton, point, px};
+    use gpui::px;
+    use gpui::{MouseButton, point};
     use zzclawterm_core::{AppRuntime, RuntimeMode};
     for (failed_source, action) in [
         (true, "commit"),
@@ -725,7 +808,8 @@ fn real_failed_tabs_drag_both_directions_cancel_and_never_detach() {
 #[test]
 fn mixed_failed_pending_editor_and_session_tabs_keep_dragged_order_on_completion() {
     use crate::features::shell::session_tabs::SessionStripTabId;
-    use crate::models::{TerminalWindowNode, WorkspaceTabId};
+    use crate::models::TerminalWindowNode;
+    use crate::models::WorkspaceTabId;
     let root = TestConfigDir::new("zzclawterm-failed-order");
     let mut cx = TestAppContext::single();
     let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -870,6 +954,54 @@ fn session_metadata(name: &str, multiplex_key: Option<&str>) -> SessionRuntimeMe
     }
 }
 
+fn rdp_session_config(name: &str) -> zzclawterm_remote_desktop::RdpSessionConfig {
+    zzclawterm_remote_desktop::RdpSessionConfig {
+        relay: None,
+        backend: Default::default(),
+        windows_authentication: None,
+        name: name.into(),
+        host: "127.0.0.1".into(),
+        port: 3389,
+        username: String::new(),
+        domain: String::new(),
+        password: None,
+        use_nla: false,
+        certificate_policy: Default::default(),
+        administrative_session: false,
+        display: Default::default(),
+        clipboard: Default::default(),
+        reconnect: Default::default(),
+    }
+}
+
+fn remote_desktop_metadata(connection_id: &str) -> SessionRuntimeMetadata {
+    SessionRuntimeMetadata {
+        ssh_config: None,
+        ssh_multiplex_key: None,
+        source_connection_id: Some(connection_id.to_string()),
+        ai_execution_profile: AiExecutionProfile::Posix,
+        launch_config: SessionLaunchConfig::Rdp(rdp_session_config("rdp")),
+        disconnected: false,
+    }
+}
+
+fn ssh_metadata(name: &str) -> SessionRuntimeMetadata {
+    let config = SshSessionConfig {
+        name: name.to_string(),
+        host: "example.test".to_string(),
+        username: "tester".to_string(),
+        ..SshSessionConfig::default()
+    };
+    SessionRuntimeMetadata {
+        ssh_config: Some(config.clone()),
+        ssh_multiplex_key: None,
+        source_connection_id: None,
+        ai_execution_profile: AiExecutionProfile::Posix,
+        launch_config: SessionLaunchConfig::Ssh(Box::new(config)),
+        disconnected: false,
+    }
+}
+
 struct EmptyRemoteFilePreferenceStore;
 
 impl RemoteFileBackendPreferenceStore for EmptyRemoteFilePreferenceStore {
@@ -904,7 +1036,8 @@ fn credential_prompt_state(id: &str) -> CredentialPromptState {
             prompt_text: None,
             echo: false,
         },
-        response_tx,
+        response_tx: response_tx.into(),
+        authentication: None,
         value: String::new(),
     }
 }
@@ -1333,7 +1466,7 @@ fn session_state_owns_live_runtime_and_initializes_transient_state() {
     );
     assert!(matches!(
         sessions.dialogs.take_rename_submission(),
-        RenameSessionSubmission::Ready { session_id, name }
+        RenameSessionSubmission::Ready { target: crate::features::shell::tab_mouse::TabActionTarget::Session(session_id), name }
             if session_id == "session-a" && name == "renamed"
     ));
 
@@ -1654,6 +1787,35 @@ fn session_disconnect_transition_is_idempotent() {
     sessions
         .mark_session_disconnected("session-b")
         .expect("shared session should transition");
+}
+
+#[test]
+fn disconnected_tabs_do_not_block_configuration_replacement() {
+    let test_dir = TestConfigDir::new("zzclawterm-session-state-test");
+    let cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let mut sessions = session_state(&cx, test_dir.path());
+
+    assert!(!sessions.has_live_remote_sessions());
+
+    // A local shell keeps a backend, but it is spawned by the local runtime,
+    // not from the connection catalog a cloud pull or backup import rewrites,
+    // so it must not block the replacement.
+    sessions.register_session_metadata("local", session_metadata("local", None));
+    assert!(!sessions.has_live_remote_sessions());
+
+    // A live remote session does block.
+    sessions.register_session_metadata("ssh", ssh_metadata("ssh"));
+    assert!(sessions.has_live_remote_sessions());
+
+    // A tab kept for reconnect holds no backend, so it must not.
+    sessions
+        .mark_session_disconnected("ssh")
+        .expect("registered session should transition");
+    sessions
+        .mark_session_disconnected("local")
+        .expect("registered session should transition");
+    assert!(!sessions.has_live_remote_sessions());
 }
 
 #[test]
@@ -2170,6 +2332,41 @@ fn pending_registration_promotes_saved_preparation_without_changing_placement() 
 }
 
 #[test]
+fn saved_ssh_mode_survives_failure_before_config_build_and_retry_preparation() {
+    use zzclawterm_core::models::ssh_runtime::SshRuntimeMode;
+
+    for mode in [SshRuntimeMode::Terminal, SshRuntimeMode::Sftp] {
+        let mut starts = SessionStartFeatureState::new();
+        let mut request = pending("saved");
+        request.launch_config = None;
+        request.source_connection_id = Some("saved-connection".into());
+        request.requested_ssh_runtime_mode = Some(mode);
+        starts.register_pending("first".into(), request);
+        let SessionStartEventRequest::Pending {
+            pending,
+            was_active,
+        } = starts.take_event_request("first")
+        else {
+            panic!("expected pending request");
+        };
+        starts.record_failure(
+            "first".into(),
+            pending,
+            "config failed".into(),
+            was_active,
+            false,
+        );
+        let failed = starts.take_failed_for_retry("first").unwrap();
+        assert_eq!(failed.pending.ssh_runtime_mode(), Some(mode));
+        starts.begin_retry_preparation("retry".into(), failed.pending);
+        assert_eq!(
+            starts.pending.get("retry").unwrap().ssh_runtime_mode(),
+            Some(mode)
+        );
+    }
+}
+
+#[test]
 fn unrelated_start_from_same_connection_does_not_release_preparation() {
     let mut starts = SessionStartFeatureState::new();
     let preparing = starts.allocate_tab_placement(0);
@@ -2245,6 +2442,7 @@ fn closing_pending_starts_preserves_non_reconnect_and_failed_fallback_order() {
         FailedSessionStart {
             pending: pending("failed"),
             error: "failed".to_string(),
+            reason: super::SessionStartEndReason::Failed,
         },
     );
 
@@ -2320,6 +2518,8 @@ fn moved_ssh_connection_survives_source_shutdown_and_repeated_transfers() {
 
 #[test]
 fn closing_and_disconnecting_sessions_in_other_windows_release_only_their_leases() {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     let source_dir = TestConfigDir::new("zzclawterm-ssh-shared-source");
     let target_dir = TestConfigDir::new("zzclawterm-ssh-shared-target");
     let cx = TestAppContext::single();
@@ -2382,6 +2582,8 @@ fn window_shutdown_marks_pending_starts_cancelled_before_late_results_arrive() {
 
 #[test]
 fn reconnect_releases_old_lease_without_disconnecting_shared_sibling_or_replacement() {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     let dir = TestConfigDir::new("zzclawterm-ssh-reconnect-leases");
     let cx = TestAppContext::single();
     let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -2525,4 +2727,31 @@ fn zmodem_handoff_preserves_ui_then_bridge_order_and_other_sessions() {
     assert_eq!(bytes, b"uibridge");
     state.finish_zmodem_runtime("z", result.pending_events);
     assert_eq!(state.pending_event_count(), 3);
+}
+
+mod tab_actions;
+
+#[test]
+fn independent_rdp_instances_can_reference_the_same_saved_connection() {
+    let root = TestConfigDir::new("zzclawterm-rdp-multiple-instances");
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let first = app_with_visible_local_session(&mut cx, root.path(), "local");
+    let other_root = TestConfigDir::new("zzclawterm-rdp-other-window");
+    let second = app_with_visible_local_session(&mut cx, other_root.path(), "other");
+    first.update(&mut cx, |app, _| {
+        app.session
+            .register_session_metadata("rdp-one", remote_desktop_metadata("saved-rdp"));
+        app.session
+            .register_session_metadata("rdp-two", remote_desktop_metadata("saved-rdp"));
+        assert!(app.session.has_session("rdp-one"));
+        assert!(app.session.has_session("rdp-two"));
+        app.session.remove_session_catalog("rdp-one");
+        assert!(app.session.has_session("rdp-two"));
+    });
+    second.update(&mut cx, |app, _| {
+        app.session
+            .register_session_metadata("rdp-three", remote_desktop_metadata("saved-rdp"));
+        assert!(app.session.has_session("rdp-three"));
+    });
 }

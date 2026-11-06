@@ -10,11 +10,16 @@ use gpui::{
 use rust_i18n::t;
 use zzclawterm_core::MAX_AI_CUSTOM_HEADERS;
 use zzclawterm_core::ai::provider_settings::{
-    CustomHeaderError, DEFAULT_MODEL_REASONING_EFFORTS, MODEL_REASONING_EFFORTS, protocol_value,
-    provider_label, provider_name_taken, provider_requires_api_key,
+    CustomHeaderError, DEFAULT_MODEL_REASONING_EFFORTS, MODEL_REASONING_EFFORTS,
+    prioritized_provider_models, protocol_value, provider_label, provider_name_taken,
+    provider_requires_api_key,
 };
 use zzclawterm_core::ai::{AiModelSource, AiProviderKind};
+use zzclawterm_ui::ZzClawTooltip;
 use zzclawterm_ui::{ZzClawButton, ZzClawButtonVariant, ZzClawIconButton, ZzClawSelectOption};
+
+#[cfg(test)]
+mod tests;
 
 impl SettingsPanel {
     pub(in crate::features) fn ai_models_settings_section(
@@ -59,9 +64,9 @@ impl SettingsPanel {
                         panel.with_app(cx, |app, cx| app.toggle_ai_provider_choices(cx));
                     })),
             );
-        let columns = if self.viewport_width >= 800. {
+        let columns = if self.content_width >= 800. {
             3
-        } else if self.viewport_width >= 520. {
+        } else if self.content_width >= 520. {
             2
         } else {
             1
@@ -90,6 +95,10 @@ impl SettingsPanel {
             };
             providers = providers.child(
                 div()
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("ai-provider-card-{id}")
+                    })
                     .min_w_0()
                     .rounded_md()
                     .border_1()
@@ -494,7 +503,7 @@ impl SettingsPanel {
             .on_click(cx.listener(|panel, _, _, cx| {
                 panel.with_app(cx, |app, cx| app.test_ai_provider(false, true, cx));
             }));
-        let mut rows = div().flex().flex_col();
+        let mut rows = div().min_w_0().flex().flex_col();
         let draft = self
             .ai
             .settings_manual_model_drafts()
@@ -547,41 +556,34 @@ impl SettingsPanel {
                         })),
                 ),
         );
-        for model_id in &view.model_order {
-            let Some(model) = config.models.iter().find(|model| &model.id == model_id) else {
-                continue;
-            };
+        let models = prioritized_provider_models(&config.models, &view.model_order, &draft);
+        let draft_name = draft.trim();
+        if let Some(existing) = models
+            .iter()
+            .find(|model| !draft_name.is_empty() && model.name == draft_name)
+        {
+            rows = rows.child(
+                div()
+                    .pb_3()
+                    .text_size(px(12.))
+                    .text_color(rgb(palette.text_muted))
+                    .child(t!("ai.manualModelExists", model = existing.name.clone())),
+            );
+        }
+        for model in models {
             let model_id = model.id.clone();
             let model_status = view
                 .model_statuses
                 .get(&model_id)
                 .copied()
                 .unwrap_or_default();
-            let mut label = div()
+            let actions = div()
                 .min_w_0()
-                .flex_1()
+                .max_w_full()
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .gap_2()
-                .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_size(px(12.))
-                        .child(model.name.clone()),
-                );
-            if model.last_seen_at.is_some() {
-                label = label.child(model_badge(palette, t!("ai.providerReturnedBadge")));
-            }
-            if model.source == AiModelSource::Manual {
-                label = label.child(model_badge(palette, t!("ai.manualModelBadge")));
-            }
-            let row = div()
-                .py_2()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(label)
                 .child(status_dot(palette, model_status))
                 .child(
                     ZzClawIconButton::new(
@@ -638,7 +640,14 @@ impl SettingsPanel {
                         }
                     }),
                 ));
+            let row = model_row(palette, model, actions);
             let mut item = div()
+                .debug_selector({
+                    let id = model_id.clone();
+                    move || format!("ai-model-row-{id}")
+                })
+                .min_w_0()
+                .flex_none()
                 .border_b_1()
                 .border_color(rgb(palette.border))
                 .child(row);
@@ -764,6 +773,67 @@ impl SettingsPanel {
             )
             .into_any_element()
     }
+}
+
+fn model_row(
+    palette: ThemePalette,
+    model: &zzclawterm_core::ai::AiModelConfigItem,
+    actions: impl IntoElement,
+) -> gpui::Div {
+    let model_id = &model.id;
+    let mut label = div()
+        .min_w_0()
+        .flex_basis(px(240.))
+        .flex_grow(1.)
+        .max_w_full()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .id(SharedString::from(format!("ai-model-name-{model_id}")))
+                .debug_selector({
+                    let id = model_id.clone();
+                    move || format!("ai-model-name-{id}")
+                })
+                .min_w_0()
+                .flex_basis(px(160.))
+                .flex_grow(1.)
+                .max_w_full()
+                .truncate()
+                .text_size(px(12.))
+                .tooltip({
+                    let name = model.name.clone();
+                    move |window, cx| ZzClawTooltip::new(name.clone()).build(window, cx)
+                })
+                .child(model.name.clone()),
+        );
+    if model.last_seen_at.is_some() {
+        label = label.child(model_badge(palette, t!("ai.providerReturnedBadge")));
+    }
+    if model.source == AiModelSource::Manual {
+        label = label.child(model_badge(palette, t!("ai.manualModelBadge")));
+    }
+    div()
+        .py_2()
+        .min_w_0()
+        .flex_none()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_2()
+        .child(label)
+        .child(
+            div()
+                .debug_selector({
+                    let id = model_id.clone();
+                    move || format!("ai-model-actions-{id}")
+                })
+                .flex_none()
+                .max_w_full()
+                .child(actions),
+        )
 }
 
 fn status_dot(palette: ThemePalette, status: ConnectionStatus) -> impl IntoElement {

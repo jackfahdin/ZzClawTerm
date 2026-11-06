@@ -18,6 +18,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 import package_native
+import windows_portable
 
 
 MIN_ARTIFACT_SIZE = 1024
@@ -147,11 +148,11 @@ def windows_version_info(path: Path) -> dict[str, object]:
     return json.loads(subprocess.check_output([
         "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
         "$ErrorActionPreference = 'Stop'; "
-        "$v = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($env:NYATERM_VERIFY_EXE); "
+        "$v = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($env:ZZCLAWTERM_VERIFY_EXE); "
         "$v | Select-Object ProductName,FileDescription,ProductVersion,FileVersion,"
         "FileMajorPart,FileMinorPart,FileBuildPart,FilePrivatePart,"
         "ProductMajorPart,ProductMinorPart,ProductBuildPart,ProductPrivatePart | ConvertTo-Json -Compress",
-    ], text=True, env={**os.environ, "NYATERM_VERIFY_EXE": str(path.resolve())}))
+    ], text=True, env={**os.environ, "ZZCLAWTERM_VERIFY_EXE": str(path.resolve())}))
 
 
 def verify_windows_application_version(path: Path, version: str) -> None:
@@ -207,9 +208,9 @@ def verify_macos_url_scheme(
     if not isinstance(url_type, dict):
         raise RuntimeError(f"{artifact} contains an invalid macOS URL type")
     schemes = url_type.get("CFBundleURLSchemes")
-    if schemes != [identity.desktop_id]:
+    if schemes != list(identity.url_schemes):
         raise RuntimeError(
-            f"{artifact} must register only the {identity.desktop_id} URL scheme"
+            f"{artifact} must register URL schemes {identity.url_schemes}"
         )
 
 
@@ -235,7 +236,9 @@ def verify_linux_desktop(
         "Icon": identity.desktop_id,
         "StartupWMClass": identity.desktop_id,
         "Exec": f"{expected_executable} %U",
-        "MimeType": f"x-scheme-handler/{identity.desktop_id};",
+        "MimeType": "".join(
+            f"x-scheme-handler/{scheme};" for scheme in identity.url_schemes
+        ),
     }
     for key, value in expected.items():
         if fields.get(key) != value:
@@ -285,22 +288,33 @@ def read_rpm_member(path: Path, member: str) -> bytes:
 def verify_windows_portable(path: Path, target: str, version: str) -> None:
     root = "ZzClawTerm-portable"
     executables = ["ZzClawTerm.exe", *helper_filenames(target)]
-    required = {
-        f"{root}/{name}" for name in executables
-    } | {
-        f"{root}/{package_native.PORTABLE_MARKER}",
-        f"{root}/LICENSE",
-        f"{root}/VERSION",
-        f"{root}/data/.keep",
-    }
+    conpty_files = package_native.conpty_files(target)
+    required = windows_portable.archive_files(target)
     with zipfile.ZipFile(path) as archive:
         names = verify_zip_paths(archive)
+        seen = set()
+        directories = {
+            str(parent)
+            for name in required
+            for parent in PurePosixPath(name).parents
+            if str(parent) != "."
+        }
+        vcxsrv_prefix = f"{root}/{package_native.VCXSRV_DIRNAME}/"
+        for entry in archive.infolist():
+            name = entry.filename.rstrip("/")
+            if name.casefold() in seen:
+                raise RuntimeError(f"{path.name} contains a duplicate entry: {name}")
+            seen.add(name.casefold())
+            if (entry.external_attr >> 16) & 0o170000 == 0o120000:
+                raise RuntimeError(f"{path.name} contains a symbolic link: {name}")
+            allowed = directories if entry.is_dir() else required
+            if name not in allowed and not name.startswith(vcxsrv_prefix):
+                raise RuntimeError(f"{path.name} contains an unexpected entry: {name}")
         missing = required - names
         if missing:
             raise RuntimeError(f"{path.name} is missing: {', '.join(sorted(missing))}")
         # The bundled VcXsrv tree is optional, but when present it must be
         # complete enough to launch and to satisfy the GPLv3 notice.
-        vcxsrv_prefix = f"{root}/{package_native.VCXSRV_DIRNAME}/"
         if any(name.startswith(vcxsrv_prefix) for name in names):
             for member in (package_native.VCXSRV_EXE, "NOTICE.txt"):
                 if f"{vcxsrv_prefix}{member}" not in names:
@@ -312,6 +326,10 @@ def verify_windows_portable(path: Path, target: str, version: str) -> None:
             raise RuntimeError(f"{path.name} contains version {packaged_version}, expected {version}")
         binaries = {name: archive.read(f"{root}/{name}") for name in executables}
         machines = {name: pe_machine(data) for name, data in binaries.items()}
+        conpty_machines = {
+            relative: pe_machine(archive.read(f"{root}/conpty/{relative.as_posix()}"))
+            for relative in conpty_files
+        }
         verify_windows_application_binary(binaries["ZzClawTerm.exe"], path.name)
         if sys.platform == "win32":
             with tempfile.TemporaryDirectory() as directory:
@@ -327,6 +345,17 @@ def verify_windows_portable(path: Path, target: str, version: str) -> None:
             raise RuntimeError(
                 f"{path.name} contains PE machine 0x{machine:04x} for {name}, "
                 f"expected 0x{expected_machine:04x}"
+            )
+    verify_conpty_machines(conpty_machines, path.name)
+
+
+def verify_conpty_machines(machines: dict[Path, int], artifact: str) -> None:
+    for relative, actual in machines.items():
+        expected = 0xAA64 if "arm64" in relative.parts else 0x8664
+        if actual != expected:
+            raise RuntimeError(
+                f"{artifact} contains ConPTY PE machine 0x{actual:04x} for {relative}, "
+                f"expected 0x{expected:04x}"
             )
 
 
@@ -370,12 +399,25 @@ def verify_windows_installer(path: Path, target: str, version: str) -> None:
         installed = [
             candidate for candidate in installed_dir.rglob("*") if candidate.is_file()
         ]
+        files = {
+            candidate.relative_to(installed_dir).as_posix(): candidate
+            for candidate in installed
+        }
         names = {candidate.name for candidate in installed}
         required = {"ZzClawTerm.exe", "LICENSE", "VERSION", "unins000.exe"}
         required.update(helper_filenames(target))
         missing = required - names
         if missing:
             raise RuntimeError(f"{path.name} is missing installed files: {', '.join(sorted(missing))}")
+        conpty_required = [
+            f"conpty/{relative.as_posix()}"
+            for relative in package_native.conpty_files(target)
+        ] + ["conpty/LICENSE.txt"]
+        missing_conpty = set(conpty_required) - files.keys()
+        if missing_conpty:
+            raise RuntimeError(
+                f"{path.name} is missing ConPTY files: {', '.join(sorted(missing_conpty))}"
+            )
         # The VcXsrv directory is optional; when present it must ship
         # vcxsrv.exe and the GPLv3 NOTICE.txt next to it.
         vcxsrv_entries = [
@@ -391,6 +433,15 @@ def verify_windows_installer(path: Path, target: str, version: str) -> None:
                     raise RuntimeError(
                         f"{path.name} contains a vcxsrv directory without {member}"
                     )
+        verify_conpty_machines(
+            {
+                relative: pe_machine(
+                    files[f"conpty/{relative.as_posix()}"].read_bytes()
+                )
+                for relative in package_native.conpty_files(target)
+            },
+            path.name,
+        )
         # Leave the machine as we found it.
         subprocess.run(
             [str(installed_dir / "unins000.exe"), "/VERYSILENT", "/NORESTART"],

@@ -5,7 +5,7 @@ use zzclawterm_ui::ZzClawSwitch;
 use gpui::{
     Context, FontWeight, div,
     prelude::{FluentBuilder, InteractiveElement, ParentElement, Styled},
-    px, rgb, rgba,
+    px, rgb,
 };
 
 use crate::features::{ZzClawTermApp, connections::ConnectionEditorToggle};
@@ -22,7 +22,7 @@ pub(super) fn connection_editor_local_section(
     cx: &mut Context<ZzClawTermApp>,
 ) -> gpui::Div {
     let content = match section.editor.section {
-        ConnectionEditorSection::Startup => local_startup(section, cx),
+        ConnectionEditorSection::Basic => local_startup(section, cx),
         ConnectionEditorSection::Terminal => local_terminal(section, cx),
         _ => div(),
     };
@@ -148,7 +148,7 @@ fn local_terminal(
             .rounded_md()
             .border_1()
             .border_color(rgb(palette.border))
-            .bg(rgba((palette.accent << 8) | 0x12))
+            .bg(rgb(palette.bg))
             .p_3()
             .flex()
             .flex_col()

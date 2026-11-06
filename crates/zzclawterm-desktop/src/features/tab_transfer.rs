@@ -17,6 +17,7 @@ pub(crate) struct WorkspaceTabTransferBundle {
     session_ids: Vec<String>,
     pane_root: Option<WorkspacePaneNode>,
     catalog: SessionCatalogTransferBundle,
+    completion: Vec<super::commands::CompletionSessionTransfer>,
     terminal: TerminalSessionTransferBundle,
     transfer: TransferSessionTransferBundle,
     sync_input: SyncInputTransferBundle,
@@ -256,6 +257,10 @@ impl ZzClawTermApp {
             .session
             .detach_sessions_for_transfer(&session_ids, bridge_events)
             .ok_or_else(|| "the source tab changed during transfer".to_string())?;
+        let completion = self.commands.take_completion_sessions(&session_ids);
+        for id in &session_ids {
+            self.file_manager.remove_sftp_session(id);
+        }
         let pane_root = self.shell.take_workspace_pane_root(root_tab_id);
         self.rebuild_session_tab_owners();
         self.reconcile_terminal_windows();
@@ -286,6 +291,7 @@ impl ZzClawTermApp {
             session_ids,
             pane_root,
             catalog,
+            completion,
             terminal,
             transfer,
             sync_input,
@@ -314,6 +320,7 @@ impl ZzClawTermApp {
         let WorkspaceTabTransferBundle {
             root_tab_id,
             catalog,
+            completion,
             terminal,
             transfer,
             sync_input,
@@ -331,6 +338,7 @@ impl ZzClawTermApp {
                     session_ids,
                     pane_root,
                     catalog,
+                    completion,
                     terminal,
                     transfer,
                     sync_input,
@@ -342,6 +350,10 @@ impl ZzClawTermApp {
         }
         self.session
             .attach_sessions_from_transfer(catalog, insert_index);
+        for id in &session_ids {
+            self.ensure_sftp_session_view(id, cx);
+        }
+        self.commands.accept_completion_sessions(completion);
         self.rebind_zmodem_recording();
         self.transfer.attach_sessions_from_transfer(transfer);
         self.sync_input.attach_sessions_from_transfer(sync_input);
@@ -394,6 +406,10 @@ impl ZzClawTermApp {
             .map_err(|_| "the source terminal pipeline is unavailable".to_string())?;
         self.session
             .attach_sessions_from_transfer(bundle.catalog, Some(bundle.source_index));
+        for id in &bundle.session_ids {
+            self.ensure_sftp_session_view(id, cx);
+        }
+        self.commands.accept_completion_sessions(bundle.completion);
         self.rebind_zmodem_recording();
         self.transfer.attach_sessions_from_transfer(bundle.transfer);
         self.sync_input

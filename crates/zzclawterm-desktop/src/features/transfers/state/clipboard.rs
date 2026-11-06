@@ -1,10 +1,7 @@
-use std::path::PathBuf;
-
-use zzclawterm_transport::SftpFileEntry;
-
-use crate::models::{TransferJobKind, TransferJobStatus};
-
 use super::TransferFeatureState;
+use crate::models::{TransferJobKind, TransferJobStatus};
+use std::path::PathBuf;
+use zzclawterm_files::sftp::SftpFileEntry;
 
 #[derive(Clone)]
 pub(in crate::features) struct TransferFileClipboard {

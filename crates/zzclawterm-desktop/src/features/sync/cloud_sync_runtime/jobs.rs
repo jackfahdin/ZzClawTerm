@@ -30,6 +30,9 @@ impl ZzClawTermApp {
         phase: CloudSyncCancellation,
         cx: &mut Context<Self>,
     ) {
+        if !self.cloud_sync.operations.accepting() {
+            return;
+        }
         let status = match phase {
             CloudSyncCancellation::Stopping => t!("settings.syncTimeoutStopping").to_string(),
             CloudSyncCancellation::FinishingCommit => {
@@ -56,6 +59,14 @@ impl ZzClawTermApp {
         self.shell
             .set_status(t!("settings.syncConnectionTestStarted"));
         let control = CloudSyncOperationControl::default();
+        let Some(registration) =
+            self.cloud_sync
+                .operations
+                .register("cloud-sync-manual", vec![control.clone()], None)
+        else {
+            self.cloud_sync.cancel_job_for_shutdown();
+            return;
+        };
         let operation_control = control.clone();
         let task = self.blocking_jobs.submit_task("cloud-sync-test", move |_| {
             let _operation = lock_cloud_sync_operation(&operation_control)?;
@@ -75,6 +86,11 @@ impl ZzClawTermApp {
             )
             .await;
             let _ = this.update(cx, |this, cx| {
+                if registration.shutdown_cancelled(&result) {
+                    this.cloud_sync.cancel_job_for_shutdown();
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok(checked) => {
                         let status = t!("settings.syncTestSuccess").to_string();
@@ -91,6 +107,7 @@ impl ZzClawTermApp {
                 this.request_settings_panel_refresh(cx);
                 cx.notify();
             });
+            drop(registration);
         })
         .detach();
         cx.notify();
@@ -101,6 +118,10 @@ impl ZzClawTermApp {
         force: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.cloud_sync.settings().protocol_version == 4 {
+            self.run_cloud_sync_v3_preview(cx);
+            return;
+        }
         if self.block_cloud_sync_for_settings_draft(cx) {
             return;
         }
@@ -123,6 +144,14 @@ impl ZzClawTermApp {
         });
         self.shell.set_status(t!("settings.syncPushStarted"));
         let control = CloudSyncOperationControl::default();
+        let Some(registration) =
+            self.cloud_sync
+                .operations
+                .register("cloud-sync-manual", vec![control.clone()], None)
+        else {
+            self.cloud_sync.cancel_job_for_shutdown();
+            return;
+        };
         let operation_control = control.clone();
         let task = self
             .blocking_jobs
@@ -167,11 +196,17 @@ impl ZzClawTermApp {
             )
             .await;
             let _ = this.update(cx, |this, cx| {
+                if registration.shutdown_cancelled(&result) {
+                    this.cloud_sync.cancel_job_for_shutdown();
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok((result, cleanup_options)) => {
                         schedule_cloud_sync_cleanup(
                             this.store_blocking_client(),
                             this.blocking_jobs.clone(),
+                            this.cloud_sync.operations.clone(),
                             None,
                             cleanup_options,
                             result.pointer.clone(),
@@ -226,6 +261,7 @@ impl ZzClawTermApp {
                 this.request_settings_panel_refresh(cx);
                 cx.notify();
             });
+            drop(registration);
         })
         .detach();
         cx.notify();
@@ -236,15 +272,25 @@ impl ZzClawTermApp {
         force: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.cloud_sync.settings().protocol_version == 4 {
+            self.run_cloud_sync_v3_preview(cx);
+            return;
+        }
         if self.block_cloud_sync_for_settings_draft(cx) {
             return;
         }
-        if self.cloud_sync_restore_blocked(cx) {
-            self.cloud_sync
-                .set_status(t!("settings.syncCloseActiveSessionBeforePull"));
+        if let Some(message) =
+            self.cloud_sync_restore_block_message("settings.syncCloseActiveSessionBeforePull", cx)
+        {
+            self.cloud_sync.set_status(message);
             cx.notify();
             return;
         }
+        let Some(replacement) =
+            self.begin_configuration_replacement("settings.syncCloseActiveSessionBeforePull", cx)
+        else {
+            return;
+        };
         if !self.begin_cloud_sync_snapshot_job(cx) {
             return;
         }
@@ -264,10 +310,22 @@ impl ZzClawTermApp {
         });
         self.shell.set_status(t!("settings.syncPullStarted"));
         let control = CloudSyncOperationControl::default();
+        let Some(registration) =
+            self.cloud_sync
+                .operations
+                .register("cloud-sync-manual", vec![control.clone()], None)
+        else {
+            self.cloud_sync.cancel_job_for_shutdown();
+            return;
+        };
         let operation_control = control.clone();
+        let worker_replacement = replacement.clone();
+        let replacement_controller = self.desktop_controller.clone();
         let task = self
             .blocking_jobs
             .submit_task("cloud-sync-local-pull", move |_| {
+                let _replacement = worker_replacement;
+                _replacement.require_refresh();
                 let _operation = lock_cloud_sync_operation(&operation_control)?;
                 let state = load_current_cloud_sync_state(&local_store)?;
                 let options = load_cloud_sync_options(&local_store, &runtime, &settings, &state)?;
@@ -309,11 +367,17 @@ impl ZzClawTermApp {
             )
             .await;
             let _ = this.update(cx, |this, cx| {
+                if registration.shutdown_cancelled(&result) {
+                    this.cloud_sync.cancel_job_for_shutdown();
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok((result, cleanup_options)) => {
                         schedule_cloud_sync_cleanup(
                             this.store_blocking_client(),
                             this.blocking_jobs.clone(),
+                            this.cloud_sync.operations.clone(),
                             None,
                             cleanup_options,
                             result.pointer.clone(),
@@ -369,6 +433,8 @@ impl ZzClawTermApp {
                 this.request_settings_panel_refresh(cx);
                 cx.notify();
             });
+            Self::finish_configuration_replacement(replacement, replacement_controller, &this, cx);
+            drop(registration);
         })
         .detach();
         cx.notify();
@@ -379,6 +445,10 @@ impl ZzClawTermApp {
         force: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.cloud_sync.settings().protocol_version == 4 {
+            self.run_cloud_sync_v3_preview(cx);
+            return;
+        }
         if self.block_cloud_sync_for_settings_draft(cx) {
             return;
         }
@@ -405,6 +475,14 @@ impl ZzClawTermApp {
         self.shell
             .set_status(t!("settings.syncProviderPushStarted"));
         let control = CloudSyncOperationControl::default();
+        let Some(registration) =
+            self.cloud_sync
+                .operations
+                .register("cloud-sync-manual", vec![control.clone()], None)
+        else {
+            self.cloud_sync.cancel_job_for_shutdown();
+            return;
+        };
         let operation_control = control.clone();
         let task = self
             .blocking_jobs
@@ -448,11 +526,17 @@ impl ZzClawTermApp {
             )
             .await;
             let _ = this.update(cx, |this, cx| {
+                if registration.shutdown_cancelled(&result) {
+                    this.cloud_sync.cancel_job_for_shutdown();
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok((result, cleanup_options)) => {
                         schedule_cloud_sync_cleanup(
                             this.store_blocking_client(),
                             this.blocking_jobs.clone(),
+                            this.cloud_sync.operations.clone(),
                             Some(cleanup_settings),
                             cleanup_options,
                             result.pointer.clone(),
@@ -507,6 +591,7 @@ impl ZzClawTermApp {
                 this.request_settings_panel_refresh(cx);
                 cx.notify();
             });
+            drop(registration);
         })
         .detach();
         cx.notify();
@@ -517,15 +602,25 @@ impl ZzClawTermApp {
         force: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.cloud_sync.settings().protocol_version == 4 {
+            self.run_cloud_sync_v3_preview(cx);
+            return;
+        }
         if self.block_cloud_sync_for_settings_draft(cx) {
             return;
         }
-        if self.cloud_sync_restore_blocked(cx) {
-            self.cloud_sync
-                .set_status(t!("settings.syncCloseActiveSessionBeforePull"));
+        if let Some(message) =
+            self.cloud_sync_restore_block_message("settings.syncCloseActiveSessionBeforePull", cx)
+        {
+            self.cloud_sync.set_status(message);
             cx.notify();
             return;
         }
+        let Some(replacement) =
+            self.begin_configuration_replacement("settings.syncCloseActiveSessionBeforePull", cx)
+        else {
+            return;
+        };
         if !self.begin_cloud_sync_snapshot_job(cx) {
             return;
         }
@@ -549,10 +644,22 @@ impl ZzClawTermApp {
         self.shell
             .set_status(t!("settings.syncProviderPullStarted"));
         let control = CloudSyncOperationControl::default();
+        let Some(registration) =
+            self.cloud_sync
+                .operations
+                .register("cloud-sync-manual", vec![control.clone()], None)
+        else {
+            self.cloud_sync.cancel_job_for_shutdown();
+            return;
+        };
         let operation_control = control.clone();
+        let worker_replacement = replacement.clone();
+        let replacement_controller = self.desktop_controller.clone();
         let task = self
             .blocking_jobs
             .submit_task("cloud-sync-provider-pull", move |_| {
+                let _replacement = worker_replacement;
+                _replacement.require_refresh();
                 let _operation = lock_cloud_sync_operation(&operation_control)?;
                 let state = load_current_cloud_sync_state(&local_store)?;
                 let options = load_cloud_sync_options(&local_store, &runtime, &settings, &state)?;
@@ -592,11 +699,17 @@ impl ZzClawTermApp {
             )
             .await;
             let _ = this.update(cx, |this, cx| {
+                if registration.shutdown_cancelled(&result) {
+                    this.cloud_sync.cancel_job_for_shutdown();
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok((result, cleanup_options)) => {
                         schedule_cloud_sync_cleanup(
                             this.store_blocking_client(),
                             this.blocking_jobs.clone(),
+                            this.cloud_sync.operations.clone(),
                             Some(cleanup_settings),
                             cleanup_options,
                             result.pointer.clone(),
@@ -652,6 +765,8 @@ impl ZzClawTermApp {
                 this.request_settings_panel_refresh(cx);
                 cx.notify();
             });
+            Self::finish_configuration_replacement(replacement, replacement_controller, &this, cx);
+            drop(registration);
         })
         .detach();
         cx.notify();
@@ -665,12 +780,18 @@ impl ZzClawTermApp {
         if self.block_cloud_sync_for_settings_draft(cx) {
             return;
         }
-        if self.cloud_sync_restore_blocked(cx) {
-            self.cloud_sync
-                .set_status(t!("settings.syncCloseActiveSessionBeforeRecovery"));
+        if let Some(message) = self
+            .cloud_sync_restore_block_message("settings.syncCloseActiveSessionBeforeRecovery", cx)
+        {
+            self.cloud_sync.set_status(message);
             cx.notify();
             return;
         }
+        let Some(replacement) =
+            self.begin_configuration_replacement("settings.syncCloseActiveSessionBeforePull", cx)
+        else {
+            return;
+        };
         if !self.begin_cloud_sync_snapshot_job(cx) {
             return;
         }
@@ -687,10 +808,22 @@ impl ZzClawTermApp {
         self.cloud_sync.set_status(t!("settings.syncRecovering"));
         self.shell.set_status(t!("settings.syncRecoveryStarted"));
         let control = CloudSyncOperationControl::default();
+        let Some(registration) =
+            self.cloud_sync
+                .operations
+                .register("cloud-sync-manual", vec![control.clone()], None)
+        else {
+            self.cloud_sync.cancel_job_for_shutdown();
+            return;
+        };
         let operation_control = control.clone();
+        let worker_replacement = replacement.clone();
+        let replacement_controller = self.desktop_controller.clone();
         let task = self
             .blocking_jobs
             .submit_task("cloud-sync-recover", move |_| {
+                let _replacement = worker_replacement;
+                _replacement.require_refresh();
                 let _operation = lock_cloud_sync_operation(&operation_control)?;
                 let state = load_current_cloud_sync_state(&local_store)?;
                 let options = load_cloud_sync_options(&local_store, &runtime, &settings, &state)?;
@@ -718,11 +851,17 @@ impl ZzClawTermApp {
             )
             .await;
             let _ = this.update(cx, |this, cx| {
+                if registration.shutdown_cancelled(&result) {
+                    this.cloud_sync.cancel_job_for_shutdown();
+                    cx.notify();
+                    return;
+                }
                 match result {
                     Ok((result, cleanup_options)) => {
                         schedule_cloud_sync_cleanup(
                             this.store_blocking_client(),
                             this.blocking_jobs.clone(),
+                            this.cloud_sync.operations.clone(),
                             provider_action.then_some(cleanup_settings),
                             cleanup_options,
                             result.pointer.clone(),
@@ -770,6 +909,8 @@ impl ZzClawTermApp {
                 this.request_settings_panel_refresh(cx);
                 cx.notify();
             });
+            Self::finish_configuration_replacement(replacement, replacement_controller, &this, cx);
+            drop(registration);
         })
         .detach();
         cx.notify();
@@ -790,7 +931,14 @@ impl ZzClawTermApp {
         }
     }
 
-    fn begin_cloud_sync_snapshot_job(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(super) fn begin_cloud_sync_snapshot_job(&mut self, cx: &mut Context<Self>) -> bool {
+        if !matches!(self.cloud_sync.settings().protocol_version, 3 | 4) {
+            self.cloud_sync
+                .set_status("Unsupported cloud sync protocol");
+            self.request_settings_panel_refresh(cx);
+            cx.notify();
+            return false;
+        }
         if !self.cloud_sync.settings().enabled {
             self.cloud_sync.set_status(t!("settings.syncEnableFirst"));
             self.shell.set_status(self.cloud_sync.status().to_string());
@@ -800,7 +948,7 @@ impl ZzClawTermApp {
         self.begin_cloud_sync_job(cx)
     }
 
-    fn begin_cloud_sync_job(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(super) fn begin_cloud_sync_job(&mut self, cx: &mut Context<Self>) -> bool {
         let other_job_running = self
             .desktop_controller
             .as_ref()
@@ -810,6 +958,9 @@ impl ZzClawTermApp {
                     .read(cx)
                     .cloud_sync_job_running_excluding(self.workspace_id, cx)
             });
+        if !self.cloud_sync.operations.accepting() {
+            return false;
+        }
         if other_job_running || !self.cloud_sync.begin_job() {
             self.shell
                 .set_status(t!("settings.syncOperationInProgress"));
@@ -824,6 +975,7 @@ impl ZzClawTermApp {
         entry: Option<CloudSyncHistoryEntry>,
         cx: &mut Context<Self>,
     ) {
+        let registration = self.cloud_sync.operations.followup("cloud-sync-history");
         let log_dir = self.runtime.log_dir().to_path_buf();
         let retention_days = self.settings.summary().diagnostics_retention_days;
         let task = self
@@ -844,6 +996,7 @@ impl ZzClawTermApp {
                 this.request_settings_panel_refresh(cx);
                 cx.notify();
             });
+            drop(registration);
         })
         .detach();
     }
@@ -861,6 +1014,7 @@ impl ZzClawTermApp {
 fn schedule_cloud_sync_cleanup(
     local_store: zzclawterm_store::StoreBlockingClient,
     scheduler: BlockingJobScheduler,
+    operations: crate::features::sync::operation::CloudSyncOperationRegistry,
     settings: Option<CloudSyncSettings>,
     options: LocalCloudSyncOptions,
     latest: Option<RemoteSyncPointer>,
@@ -872,6 +1026,10 @@ fn schedule_cloud_sync_cleanup(
         .unwrap_or_else(|| "local_directory".to_string());
     let latest_revision = latest.as_ref().map(|pointer| pointer.revision_id.clone());
     let control = CloudSyncOperationControl::default();
+    let Some(registration) = operations.register("cloud-sync-cleanup", vec![control.clone()], None)
+    else {
+        return;
+    };
     let operation_control = control.clone();
     let task = scheduler.submit_task("cloud-sync-cleanup", move |_| {
         let _operation = lock_cloud_sync_operation(&operation_control)?;
@@ -923,21 +1081,21 @@ fn schedule_cloud_sync_cleanup(
         result
     });
     cx.spawn(async move |_, cx| {
-        if await_cloud_sync_job(
+        let result = await_cloud_sync_job(
             task,
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(300)),
             control,
             |_| {},
         )
-        .await
-        .is_err()
-        {
+        .await;
+        if result.is_err() && !registration.shutdown_cancelled(&result) {
             tracing::warn!(
                 provider = %provider,
                 "cloud sync snapshot cleanup failed after a successful sync"
             );
         }
+        drop(registration);
     })
     .detach();
 }
@@ -983,7 +1141,7 @@ fn cloud_sync_outcome_message(outcome: CloudSyncOutcome) -> String {
 }
 
 // Called only by a blocking job, under the same operation lock as automatic sync.
-fn load_cloud_sync_options(
+pub(super) fn load_cloud_sync_options(
     store: &zzclawterm_store::StoreBlockingClient,
     runtime: &zzclawterm_core::AppRuntime,
     settings: &CloudSyncSettings,

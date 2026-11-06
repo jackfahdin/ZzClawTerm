@@ -155,6 +155,26 @@ python scripts/release/verify_native_package.py \
   --artifact-version continuous-build --dist dist
 ```
 
+### External package manager builds
+
+Packagers that build from source (nixpkgs and similar) can declare that they own
+the update channel by setting `ZZCLAWTERM_PACKAGE_MANAGER` at build time:
+
+```bash
+ZZCLAWTERM_PACKAGE_MANAGER=nix cargo build -p zzclawterm-app --release --locked
+```
+
+The value is baked into the binary at compile time: the application skips the
+startup silent update check, hides the in-app update entries in the title bar and
+tray, and reports the package manager name in the About dialog's support
+information. Leaving it unset keeps the ordinary build behaviour; development
+builds should not set it. Cargo rebuilds the affected crates when the variable
+changes, so no build script is required.
+
+The variable only applies to packages built from source. AUR and the Homebrew
+cask repack the published `.deb` / `.dmg` artifacts, so the application still
+owns their updates and they must not set it.
+
 After validation, a version tag stages the GitHub Release as a draft, uploads every asset and compares each remote asset's size and sha256 digest against the local file through `scripts/ci/verify_remote_assets.py` before publishing (a prerelease version is flagged as such and never takes over `releases/latest`); rerunning the same tag restages the release, replaces its old assets, and republishes it after verification. The website reads `downloads.json`; signed `latest.json` is the update manifest an installed application reads. GitCode receives the tag and attachments only after GitHub publication succeeds. `Continuous Build` checks master daily at 00:00 (UTC+8) and skips rebuilding only when the current commit's snapshot was verified (it can also be dispatched manually). It records completion after replacing and verifying the remote assets, so a failed replacement is retried on the next scheduled run. An existing snapshot briefly becomes a draft and is republished to refresh its date in GitHub's release list while remaining a prerelease. When the workspace version carries a prerelease suffix it also signs and publishes `latest.json` and `downloads.json` as the preview channel manifest at `releases/download/continuous-build/latest.json`, while a stable-looking version skips the manifest because stable clients only read the stable channel.
 
 Stable builds offer Auto, GitCode, and GitHub update sources. Auto checks GitCode's fixed `update-stable/latest.json` attachment first, then briefly compares the GitHub version and uses GitHub if GitCode is unavailable or behind. The fixed manifest advances only after the current GitHub latest stable release's required update attachments and version manifest have synced to GitCode. Package signatures remain verified with minisign. Preview builds continue using GitHub `continuous-build` until those snapshots are mirrored to GitCode.
@@ -166,6 +186,18 @@ The Release workflow requires the Tauri updater signing secrets; `ZZCLAWTERM_GIT
 Native packaging depends on target-platform tools: Windows uses Inno Setup 7 (installer verification performs a real silent install); macOS uses `codesign` and `hdiutil`; Linux uses tools such as `appimagetool`, `dpkg-shlibdeps`, `dpkg-deb`, `rpmbuild`, and `rpm`/`rpm2cpio`. Running only the Python packaging unit tests on a machine without those tools is therefore not a native package build.
 
 Automated verification checks the artifact set, archive paths, application and helper presence, binary architecture, version, and package metadata. It does not prove that the GUI launches, and does not cover real install/upgrade/uninstall flows, shortcuts or `zzclawterm:` URL-handler invocation, signing/notarization and Gatekeeper/SmartScreen trust, real RDP/VNC sessions, or GPU, IME, PTY, clipboard, and window lifecycle behavior. Release candidates must be accepted manually on the corresponding target OS, with the actual platform and results recorded truthfully.
+
+## Selective CI jobs
+
+The Rust workflow starts with a lightweight `orchestrate` job that tests the selection rules and compares the PR event's base SHA with the merge commit being tested. It selects the union of jobs required by all changed paths and explains its choices in the Actions Job Summary. Ordinary Rust changes still run the existing lint and Linux, macOS, and Windows workspace tests; application translation JSON keeps those checks too.
+
+The four tmux compatibility jobs run when transport, terminal, core, the plugin API, the MCP protocol, or shared build/CI configuration changes. The Plugin SDK job follows plugin examples, scripts, and related crates; Python and workflow checks have their own path rules. Documentation-site or root Markdown changes skip heavy Rust jobs, while the `Docs` workflow continues to build every locale.
+
+Add the `run-tmux` label to a PR to force the full tmux matrix; later commits continue to run it while the label remains. Label events also rerun the other checks selected for that PR's paths, rather than reporting only tmux results. Pushes to `main` or `migration/gpui`, Merge Queue events, and manual runs of the `Rust` workflow execute the full job set.
+
+Unclassified paths, new crates, Cargo manifests/lockfiles, and shared build configuration enable all jobs. Missing comparison revisions or a failed Git diff also fall back to the full suite. A selection-script exception or failing regression test fails `Rust gate`. When adding a workspace crate or changing a related crate's dependencies, update the registration and dependency sets in `scripts/ci/select_rust_jobs.py`; manifest checks guard against missing coverage.
+
+`Rust gate` and `Docs gate` remain the unified Required Checks and support Merge Queue. Gates always aggregate dependency results: success and conditional skips pass, while failure or cancellation fails.
 
 ## Documentation development
 
@@ -196,9 +228,9 @@ Note that the script compares heading counts, not translated wording.
 
 ## Changing third-party dependencies
 
-The third-party dependencies ZzClawTerm patches are **not vendored into this repository**. Each is a patch series on a fork under [github.com/jackfahdin](https://github.com/jackfahdin) on branch `nyaterm` (forked from the original series under [github.com/nyakang](https://github.com/nyakang)), mirrored to [gitcode.com/JackfahdinImport](https://gitcode.com/JackfahdinImport) for faster access in mainland China and consumed from there at a revision pinned in the root `Cargo.toml`: `alacritty`, `gpui-kit`, `IronRDP`, `russh`, `russh-sftp`, `sspi-rs`, `vnc-rs`, `zed` (`gpui`), and `zmodem2`.
+The third-party dependencies ZzClawTerm patches are **not vendored into this repository**. Each is a patch series on a fork under [github.com/jackfahdin](https://github.com/jackfahdin) on branch `zzclawterm` (forked from the original series under [github.com/nyakang](https://github.com/nyakang)), mirrored to [gitcode.com/JackfahdinImport](https://gitcode.com/JackfahdinImport) for faster access in mainland China and consumed from there at a revision pinned in the root `Cargo.toml`: `alacritty`, `gpui-kit`, `IronRDP`, `russh`, `russh-sftp`, `sspi-rs`, `vnc-rs`, `zed` (`gpui`), and `zmodem2`.
 
-The workflow is: commit to the fork branch, push, then bump the pinned revision in the root `Cargo.toml`. Keep the patch series split by concern rather than squashed, and record the reason and the validation performed on the patch commit and in that branch's `NYATERM.md`. Prefer rebasing an existing series onto a newer upstream revision over accumulating snapshots.
+The workflow is: commit to the fork branch, push, then bump the pinned revision in the root `Cargo.toml`. Keep the patch series split by concern rather than squashed, and record the reason and the validation performed on the patch commit and in that branch's `ZZCLAWTERM.md`. Prefer rebasing an existing series onto a newer upstream revision over accumulating snapshots.
 
 `temp/vendor/` holds read-only local copies of those sources, kept only so they can be read locally. **Nothing there is compiled — editing it has no effect on the build and produces no error.**
 

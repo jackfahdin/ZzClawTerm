@@ -5,17 +5,17 @@
 //! worker sends the finished [`PreviewContent`] back as a `TransferJobResult`,
 //! and the event drain applies it under the tab's generation guard.
 
-use gpui::{Context, Window};
-use rust_i18n::t;
-use zzclawterm_core::{PreviewCategory, classify_preview, preview_within_limit};
-use zzclawterm_transport::{RemoteFilePath, RemoteTextGeneration, SftpFileEntry};
-
 use crate::features::ZzClawTermApp;
 use crate::features::transfers::preview::decode::{decode_binary_content, decode_text_content};
 use crate::models::{
     PreviewContent, PreviewViewport, TransferJobEvent, TransferJobKind, TransferJobOutput,
     TransferJobResult, TransferJobState, TransferJobStatus, TransferPreviewState,
 };
+use gpui::{Context, Window};
+use rust_i18n::t;
+use zzclawterm_core::{PreviewCategory, classify_preview, preview_within_limit};
+use zzclawterm_files::remote_file::RemoteTextGeneration;
+use zzclawterm_files::sftp::{RemoteFilePath, SftpFileEntry};
 
 impl ZzClawTermApp {
     /// Whether the entry menu should offer a Preview action for `entry`.
@@ -235,7 +235,7 @@ impl ZzClawTermApp {
         let entry = SftpFileEntry {
             name: tab.name,
             path: tab.remote_path,
-            file_type: zzclawterm_transport::SftpFileType::File,
+            file_type: zzclawterm_files::sftp::SftpFileType::File,
             size: tab.size,
             permissions: None,
             owner: String::new(),
@@ -392,7 +392,7 @@ impl ZzClawTermApp {
 /// length is not known until read). Failures return an error card rather than
 /// propagating, so the tab always resolves.
 fn load_preview_content(
-    service: &zzclawterm_transport::FileBrowserService,
+    service: &zzclawterm_files::file_browser::FileBrowserService,
     remote_file_path: &RemoteFilePath,
     category: PreviewCategory,
     max_bytes: u64,

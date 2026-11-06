@@ -101,7 +101,7 @@ impl ZzClawTermApp {
         cx.defer(move |cx| {
             let _ = handle.update(cx, |root, window, cx| {
                 window.set_background_appearance(appearance);
-                zzclawterm_ui::set_nya_root_transparent(
+                zzclawterm_ui::set_zzclaw_root_transparent(
                     root,
                     appearance != WindowBackgroundAppearance::Opaque,
                 );

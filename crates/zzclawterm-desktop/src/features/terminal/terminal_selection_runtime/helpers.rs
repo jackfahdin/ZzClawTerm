@@ -1,12 +1,13 @@
+use std::cell::Cell;
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::{
-    Bounds, Context, ElementInputHandler, EntityInputHandler, IntoElement, Pixels, Point, Size,
+    Bounds, Context, ElementInputHandler, EntityInputHandler, IntoElement, Pixels, Point,
     UTF16Selection, Window, prelude::*, px,
 };
 
 use crate::features::ZzClawTermApp;
-use crate::features::terminal::terminal_surface_entity::terminal_snapshot_anchor_row_for_display_offset;
 
 fn terminal_input_selection() -> UTF16Selection {
     UTF16Selection {
@@ -29,16 +30,32 @@ pub(in crate::features) fn terminal_bounds_tracker(
     session_id: Option<String>,
     active: bool,
 ) -> impl IntoElement {
+    terminal_bounds_tracker_with_exclusion(entity, session_id, active, Rc::default())
+}
+
+/// Frame-local geometry shared by the grid and its composition overlay. The
+/// overlay resolves it during prepaint, before either element starts painting.
+pub(in crate::features) fn terminal_bounds_tracker_with_exclusion(
+    entity: gpui::Entity<ZzClawTermApp>,
+    session_id: Option<String>,
+    active: bool,
+    exclusion: Rc<Cell<Option<Bounds<Pixels>>>>,
+) -> impl IntoElement {
     let input_entity = entity.clone();
     let bounds_entity = input_entity.clone();
     let tracked_session_id = session_id.clone();
     gpui::canvas(
         move |bounds, window, cx| {
-            let Some(bounds) =
-                terminal_visible_surface_bounds(bounds, window.content_mask().bounds)
-            else {
-                return;
+            exclusion.set(None);
+            let bounds = terminal_visible_surface_bounds(bounds, window.content_mask().bounds)?;
+            let ime = if active {
+                bounds_entity
+                    .read(cx)
+                    .terminal_ime_layout(bounds, window, cx)
+            } else {
+                None
             };
+            exclusion.set(ime.as_ref().map(|layout| layout.bounds));
             let scale_factor = window.scale_factor();
             if bounds_entity
                 .read(cx)
@@ -48,7 +65,7 @@ pub(in crate::features) fn terminal_bounds_tracker(
                     scale_factor,
                 )
             {
-                return;
+                return ime;
             }
             // Defer mutation so we never re-enter the entity while layout/prepaint is running.
             let entity = entity.clone();
@@ -63,13 +80,22 @@ pub(in crate::features) fn terminal_bounds_tracker(
                     );
                 });
             });
+            ime
         },
-        move |bounds, _state, window, cx| {
+        move |bounds, ime, window, cx| {
             if !active {
                 return;
             }
+            let Some(bounds) =
+                terminal_visible_surface_bounds(bounds, window.content_mask().bounds)
+            else {
+                return;
+            };
             let focus = input_entity.read(cx).terminal.input.focus.clone();
             window.handle_input(&focus, ElementInputHandler::new(bounds, input_entity), cx);
+            if let Some(ime) = ime {
+                ime.paint(window, cx);
+            }
         },
     )
     .absolute()
@@ -85,14 +111,17 @@ impl EntityInputHandler for ZzClawTermApp {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        if self.terminal.input.ime_marked_text.is_empty() {
+        if !self
+            .terminal
+            .input
+            .ime
+            .is_active_for(self.session.active_id())
+        {
             return None;
         }
-        let len = self.terminal.input.ime_marked_text.encode_utf16().count();
-        let start = range.start.min(len);
-        let end = range.end.min(len).max(start);
-        *adjusted_range = Some(start..end);
-        Some(self.terminal.input.ime_marked_text.clone())
+        let (text, range) = self.terminal.input.ime.text_for_range(range);
+        *adjusted_range = Some(range);
+        Some(text)
     }
 
     fn selected_text_range(
@@ -104,7 +133,16 @@ impl EntityInputHandler for ZzClawTermApp {
         // GPUI's IME contract needs a valid insertion range even when there is
         // no marked text. This is also what lets CJK candidate windows anchor to
         // the terminal cursor instead of treating the surface as non-editable.
-        Some(terminal_input_selection())
+        let mut selection = terminal_input_selection();
+        if self
+            .terminal
+            .input
+            .ime
+            .is_active_for(self.session.active_id())
+        {
+            selection.range = self.terminal.input.ime.selection();
+        }
+        Some(selection)
     }
 
     fn marked_text_range(
@@ -112,90 +150,126 @@ impl EntityInputHandler for ZzClawTermApp {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Range<usize>> {
-        let len = self.terminal.input.ime_marked_text.encode_utf16().count();
+        if !self
+            .terminal
+            .input
+            .ime
+            .is_active_for(self.session.active_id())
+        {
+            return None;
+        }
+        let len = self.terminal.input.ime.text().encode_utf16().count();
         (len > 0).then_some(0..len)
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        self.terminal.input.ime_marked_text.clear();
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_terminal_composition(cx);
+        window.notify_text_input_changed(&self.terminal.input.focus);
     }
 
     fn replace_text_in_range(
         &mut self,
         _range: Option<Range<usize>>,
         text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.terminal.input.ime_marked_text.clear();
+        self.clear_terminal_composition(cx);
         self.commit_terminal_text(text, cx);
+        window.notify_text_input_changed(&self.terminal.input.focus);
     }
 
     fn replace_and_mark_text_in_range(
         &mut self,
-        _range: Option<Range<usize>>,
+        range: Option<Range<usize>>,
         new_text: &str,
-        _new_selected_range: Option<Range<usize>>,
-        _window: &mut Window,
+        new_selected_range: Option<Range<usize>>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.terminal.input.ime_marked_text = new_text.to_string();
+        let Some(session_id) = self.session.active_id_owned() else {
+            return;
+        };
+        self.terminal
+            .input
+            .ime
+            .replace(&session_id, range, new_text, new_selected_range);
+        self.refresh_terminal_composition_surface(&session_id, cx);
+        window.notify_text_input_changed(&self.terminal.input.focus);
         cx.notify();
     }
 
     fn bounds_for_range(
         &mut self,
-        _range_utf16: Range<usize>,
+        range_utf16: Range<usize>,
         element_bounds: Bounds<Pixels>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let (cell_w, cell_h) = self.terminal_cell_size();
-        let insets = self.terminal_content_insets();
-        let gutter = self.terminal_gutter_width_px();
-        let snapshot = self.terminal_snapshot_for_session(self.session.active_id(), 0);
-        let anchor = terminal_snapshot_anchor_row_for_display_offset(
-            &snapshot,
-            0,
-            self.terminal_viewport_rows_for_session(self.session.active_id()),
-            self.terminal_scrollback_len_for_session(self.session.active_id()),
-        );
-        let row = if snapshot.cursor.row == usize::MAX {
-            snapshot.row_count().saturating_sub(1)
-        } else {
-            snapshot
-                .cursor
-                .row
-                .min(snapshot.row_count().saturating_sub(1))
-        };
-        let row = row.saturating_sub(anchor + snapshot.leading_cleared_rows(anchor));
-        let col = snapshot.cursor.col.min(snapshot.cols.saturating_sub(1));
-        let origin_x = f32::from(element_bounds.origin.x);
-        let origin_y = f32::from(element_bounds.origin.y);
-        let max_x = origin_x + f32::from(element_bounds.size.width) - cell_w.max(1.);
-        let max_y = origin_y + f32::from(element_bounds.size.height) - cell_h.max(1.);
-        let x = (origin_x + insets.left + gutter + col as f32 * cell_w)
-            .min(max_x)
-            .max(origin_x);
-        let y = (origin_y + insets.top + row as f32 * cell_h)
-            .min(max_y)
-            .max(origin_y);
-        Some(gpui::bounds(
-            Point { x: px(x), y: px(y) },
-            Size {
-                width: px(cell_w.max(1.)),
-                height: px(cell_h.max(1.)),
-            },
-        ))
+        Some(
+            self.terminal_ime_layout(element_bounds, window, cx)
+                .map(|layout| layout.range_bounds(range_utf16))
+                .unwrap_or_else(|| self.terminal_ime_anchor_bounds(element_bounds, cx)),
+        )
     }
 
     fn character_index_for_point(
         &mut self,
-        _point: Point<Pixels>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Option<usize> {
-        Some(0)
+        let bounds = self
+            .session
+            .active_id()
+            .and_then(|id| self.terminal.layout.session_surface_bounds.get(id).copied());
+        Some(
+            bounds
+                .and_then(|bounds| self.terminal_ime_layout(bounds, window, cx))
+                .map_or(0, |layout| layout.character_index(point)),
+        )
+    }
+
+    fn set_selected_text_range(
+        &mut self,
+        range: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.terminal.input.ime.select(range);
+        if let Some(session_id) = self.terminal.input.ime.session_id().map(str::to_owned) {
+            self.refresh_terminal_composition_surface(&session_id, cx);
+        }
+        window.notify_text_selection_changed(&self.terminal.input.focus);
+        cx.notify();
+    }
+}
+
+impl ZzClawTermApp {
+    fn refresh_terminal_composition_surface(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        self.sync_terminal_surface_paint(session_id, cx);
+        if let Some(surface) = self.terminal.view.surfaces.get(session_id) {
+            // Text/selection changes do not change the remote snapshot or cursor
+            // policy, but must invalidate the entity's cached preedit paint.
+            surface.update(cx, |_, cx| cx.notify());
+        }
+    }
+
+    pub(in crate::features) fn clear_terminal_composition(&mut self, cx: &mut Context<Self>) {
+        if let Some(session_id) = self.terminal.input.ime.clear() {
+            self.refresh_terminal_composition_surface(&session_id, cx);
+            cx.notify();
+        }
+    }
+
+    pub(in crate::features) fn clear_terminal_composition_for_session(
+        &mut self,
+        session_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.terminal.input.ime.session_id() == Some(session_id) {
+            self.clear_terminal_composition(cx);
+        }
     }
 }
 

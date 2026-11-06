@@ -1,17 +1,3 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
-
-use futures::{FutureExt as _, StreamExt as _, select_biased};
-use gpui::{Context, Window};
-use rust_i18n::t;
-use zzclawterm_core::{AiAction, truncate_preview};
-use zzclawterm_transport::{
-    SFTP_TRANSFER_CANCELLED, SftpFileEntry, SftpFileType, SftpTransferProgress,
-};
-use zzclawterm_ui::ZzClawDialogWindowExt as _;
-
 use crate::features::ZzClawTermApp;
 use crate::features::formatting::format_permissions_octal;
 use crate::models::{
@@ -19,6 +5,17 @@ use crate::models::{
     TransferBrowserPathMenuState, TransferExternalSyncPromptState, TransferJobEvent,
     TransferJobKind, TransferJobOutput, TransferJobResult, TransferJobStatus,
 };
+use futures::{FutureExt as _, StreamExt as _, select_biased};
+use gpui::{Context, Window};
+use rust_i18n::t;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use zzclawterm_core::{AiAction, truncate_preview};
+use zzclawterm_files::sftp::{SFTP_TRANSFER_CANCELLED, SftpFileEntry, SftpFileType};
+use zzclawterm_files::sftp_transfer_types::SftpTransferProgress;
+use zzclawterm_ui::ZzClawDialogWindowExt as _;
 
 /// How long the event drain holds a progress batch open before entering GPUI.
 ///
@@ -350,12 +347,14 @@ impl ZzClawTermApp {
                                 bytes, target_path, ..
                             } = output
                             {
-                                job.summary = Some(zzclawterm_transport::SftpTransferSummary {
-                                    remote_path: target_path,
-                                    local_path: Default::default(),
-                                    bytes,
-                                    skipped: false,
-                                });
+                                job.summary = Some(
+                                    zzclawterm_files::sftp_transfer_types::SftpTransferSummary {
+                                        remote_path: target_path,
+                                        local_path: Default::default(),
+                                        bytes,
+                                        skipped: false,
+                                    },
+                                );
                             }
                         }
                         Err(error) => {
@@ -819,7 +818,7 @@ impl ZzClawTermApp {
                     target_parent_path: target_parent_path.clone(),
                 };
                 job.entries.clear();
-                job.summary = Some(zzclawterm_transport::SftpTransferSummary {
+                job.summary = Some(zzclawterm_files::sftp_transfer_types::SftpTransferSummary {
                     remote_path: target_path.clone(),
                     local_path: job
                         .progress
@@ -1595,30 +1594,27 @@ fn transfer_navigation_job_is_stale(
 
 #[cfg(test)]
 mod tests {
-    use crate::features::ZzClawTermApp;
-    use std::collections::{HashMap, HashSet};
-    use std::path::{Path, PathBuf};
-    use std::time::Duration;
-
-    use gpui::{
-        AppContext as _, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-        TestAppContext, VisualTestContext, div,
+    use super::{
+        TRANSFER_UI_COALESCE_WINDOW, transfer_event_needs_browser_context,
+        transfer_event_needs_ui_refresh, transfer_navigation_job_is_stale,
     };
-    use zzclawterm_core::{AppRuntime, RuntimeMode};
-    use zzclawterm_transport::{
-        SFTP_TRANSFER_CANCELLED, SftpPathTransferOptions, SftpTransferProgress, SftpTransferSummary,
-    };
-
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
     use crate::models::{
         TransferJobEvent, TransferJobKind, TransferJobOutput, TransferJobResult, TransferJobState,
         TransferJobStatus,
     };
     use crate::test_support::TestConfigDir;
-
-    use super::{
-        TRANSFER_UI_COALESCE_WINDOW, transfer_event_needs_browser_context,
-        transfer_event_needs_ui_refresh, transfer_navigation_job_is_stale,
+    use gpui::{
+        AppContext as _, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+        TestAppContext, VisualTestContext, div,
+    };
+    use std::collections::{HashMap, HashSet};
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+    use zzclawterm_core::{AppRuntime, RuntimeMode};
+    use zzclawterm_files::sftp::SFTP_TRANSFER_CANCELLED;
+    use zzclawterm_files::sftp_transfer_types::{
+        SftpPathTransferOptions, SftpTransferProgress, SftpTransferSummary,
     };
 
     #[test]
@@ -1773,6 +1769,7 @@ mod tests {
         }
     }
 
+    use crate::features::ZzClawTermApp;
     fn hosted<'a>(
         cx: &'a mut TestAppContext,
         root: &Path,
@@ -1785,11 +1782,11 @@ mod tests {
         (app, vcx)
     }
 
-    fn browser_entry(name: &str) -> zzclawterm_transport::SftpFileEntry {
-        zzclawterm_transport::SftpFileEntry {
+    fn browser_entry(name: &str) -> zzclawterm_files::sftp::SftpFileEntry {
+        zzclawterm_files::sftp::SftpFileEntry {
             name: name.to_string(),
             path: format!("/remote/{name}"),
-            file_type: zzclawterm_transport::SftpFileType::File,
+            file_type: zzclawterm_files::sftp::SftpFileType::File,
             size: Some(1),
             permissions: None,
             owner: String::new(),
@@ -2422,7 +2419,7 @@ mod tests {
                 remote_path: "/tmp/file".to_string(),
             },
             &TransferJobEvent::Finished(Ok(TransferJobOutput::Uploaded {
-                summary: zzclawterm_transport::SftpTransferSummary {
+                summary: zzclawterm_files::sftp_transfer_types::SftpTransferSummary {
                     remote_path: "/tmp/file".to_string(),
                     local_path: PathBuf::from("/tmp/file"),
                     bytes: 2,

@@ -1,12 +1,13 @@
+use super::TransferAdmission;
+use crate::models::{
+    TransferJobEvent, TransferJobKind, TransferJobOutput, TransferJobResult, TransferJobState,
+    TransferJobStatus,
+};
+use futures::channel::mpsc::unbounded;
 use std::collections::HashSet;
 use std::sync::mpsc;
 use std::time::Duration;
-
-use futures::channel::mpsc::unbounded;
-use zzclawterm_transport::SftpTransferControl;
-
-use super::TransferAdmission;
-use crate::models::{TransferJobKind, TransferJobState, TransferJobStatus};
+use zzclawterm_files::sftp::SftpTransferControl;
 
 fn job(id: &str, upload: bool) -> TransferJobState {
     TransferJobState {
@@ -221,6 +222,157 @@ fn cancelling_a_paused_worker_does_not_reacquire_a_direction_slot() {
         "waiting"
     );
     retired.extend(scheduler.shutdown());
+    for worker in retired {
+        worker.join().unwrap();
+    }
+}
+
+fn delete_job(id: &str) -> TransferJobState {
+    let mut row = job(id, false);
+    row.kind = TransferJobKind::Delete {
+        remote_path: format!("/dir/{id}"),
+        batch_id: "batch".into(),
+    };
+    row
+}
+
+#[test]
+fn delete_failures_and_panics_release_slots_and_do_not_stop_later_items() {
+    let mut scheduler = TransferAdmission::default();
+    let (events, mut rx) = unbounded();
+    let mut jobs: Vec<_> = ["denied", "panic", "later"]
+        .into_iter()
+        .map(delete_job)
+        .collect();
+    for row in &mut jobs {
+        let id = row.id.clone();
+        let tx = events.clone();
+        scheduler.enqueue(
+            row,
+            "delete-failures",
+            events.clone(),
+            Box::new(move || {
+                let result = match id.as_str() {
+                    "denied" => Err("permission denied".into()),
+                    "panic" => panic!("delete test worker"),
+                    _ => Ok(TransferJobOutput::Deleted),
+                };
+                tx.unbounded_send(TransferJobResult {
+                    id,
+                    event: TransferJobEvent::Finished(result),
+                })
+                .unwrap();
+            }),
+        );
+    }
+    let mut retired = scheduler.reconcile(&mut jobs, 1, 1);
+    assert_eq!(jobs[2].status, TransferJobStatus::Queued);
+    let mut outcomes = std::collections::HashMap::new();
+    for _ in 0..3 {
+        let event = futures::executor::block_on(futures::StreamExt::next(&mut rx)).unwrap();
+        let TransferJobEvent::Finished(result) = event.event else {
+            panic!("terminal event")
+        };
+        let row = jobs.iter_mut().find(|row| row.id == event.id).unwrap();
+        row.status = if result.is_ok() {
+            TransferJobStatus::Completed
+        } else {
+            TransferJobStatus::Failed
+        };
+        outcomes.insert(event.id, result);
+        retired.extend(scheduler.reconcile(&mut jobs, 10, 10));
+    }
+    assert_eq!(
+        outcomes["denied"].as_ref().unwrap_err(),
+        "permission denied"
+    );
+    assert_eq!(
+        outcomes["panic"].as_ref().unwrap_err(),
+        "transfer worker panicked"
+    );
+    assert!(outcomes["later"].is_ok());
+    assert!(scheduler.tasks.is_empty());
+    assert!(rx.try_recv().is_err());
+    for worker in retired {
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn delete_worker_start_failure_reports_once_and_releases_its_slot() {
+    let mut scheduler = TransferAdmission::default();
+    let (events, mut rx) = unbounded();
+    let mut jobs = vec![delete_job("start-failed"), delete_job("next")];
+    for row in &mut jobs {
+        scheduler.enqueue(row, "delete-start-failed", events.clone(), Box::new(|| {}));
+    }
+    let mut attempts = 0;
+    assert!(
+        scheduler
+            .reconcile_with_spawn(&mut jobs, 10, 10, |_, _| {
+                attempts += 1;
+                Err(std::io::Error::other("fixture: cannot create thread"))
+            })
+            .is_empty()
+    );
+    assert_eq!(attempts, 2);
+    for _ in 0..2 {
+        let event = rx.try_recv().unwrap();
+        let TransferJobEvent::Finished(Err(error)) = event.event else {
+            panic!("start failure")
+        };
+        assert_eq!(error, "failed to start transfer worker");
+        jobs.iter_mut()
+            .find(|row| row.id == event.id)
+            .unwrap()
+            .status = TransferJobStatus::Failed;
+    }
+    assert!(scheduler.reconcile(&mut jobs, 1, 1).is_empty());
+    assert!(scheduler.tasks.is_empty());
+    assert!(rx.try_recv().is_err());
+    jobs.push(delete_job("retry"));
+    let (started, starts) = mpsc::channel();
+    scheduler.enqueue(
+        &mut jobs[2],
+        "delete-retry",
+        events,
+        Box::new(move || {
+            started.send(()).unwrap();
+        }),
+    );
+    let mut retired = scheduler.reconcile(&mut jobs, 1, 1);
+    starts.recv_timeout(Duration::from_secs(5)).unwrap();
+    retired.extend(scheduler.shutdown());
+    for worker in retired {
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn delete_cancelled_after_admission_never_enters_the_operation() {
+    let mut scheduler = TransferAdmission::default();
+    let (events, mut rx) = unbounded();
+    let mut jobs = vec![delete_job("cancel-before-start")];
+    let control = jobs[0].control.clone().unwrap();
+    scheduler.enqueue(
+        &mut jobs[0],
+        "cancel-before-start",
+        events,
+        Box::new(|| panic!("cancelled deletion entered the operation")),
+    );
+    let mut retired = scheduler.reconcile_with_spawn(&mut jobs, 1, 1, |name, work| {
+        control.cancel();
+        crate::thread_owner::spawn_joinable(name, work)
+    });
+    let result = futures::executor::block_on(futures::StreamExt::next(&mut rx)).unwrap();
+    assert!(
+        matches!(result.event, TransferJobEvent::Finished(Err(ref error))
+        if error == zzclawterm_files::sftp::SFTP_TRANSFER_CANCELLED)
+    );
+    jobs[0].status = TransferJobStatus::Cancelled;
+    retired.extend(scheduler.reconcile(&mut jobs, 1, 1));
+    assert!(scheduler.tasks.is_empty());
+    assert!(rx.try_recv().is_err());
     for worker in retired {
         worker.join().unwrap();
     }

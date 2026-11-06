@@ -55,12 +55,15 @@ impl ZzClawTermApp {
             } else {
                 zzclawterm_ui::notification::ZzClawNotificationKind::Error
             },
-            t!(if outcome.errors.is_empty() {
-                "common.deletingSuccess"
+            if outcome.errors.is_empty() {
+                t!("common.deletingSuccess").to_string()
             } else {
-                "common.operationFailed"
-            })
-            .to_string(),
+                t!(
+                    "fileExplorer.deleteFailedCount",
+                    count = outcome.errors.len()
+                )
+                .to_string()
+            },
             cx,
         );
         cx.notify();

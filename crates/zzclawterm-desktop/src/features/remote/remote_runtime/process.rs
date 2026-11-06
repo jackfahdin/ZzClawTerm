@@ -1,13 +1,11 @@
-use futures::StreamExt as _;
-use rust_i18n::t;
-
-use gpui::{Context, Window};
-use zzclawterm_transport::SshProcessService;
-
 use crate::features::ZzClawTermApp;
 use crate::features::remote::state::ProcessApplyOutcome;
 use crate::features::runtime_jobs::{ProcessJobOutput, ProcessJobResult};
 use crate::models::{DockerTab, RemoteProcessSortKey};
+use futures::StreamExt as _;
+use gpui::{Context, Window};
+use rust_i18n::t;
+use zzclawterm_remote_ops::remote_process::SshProcessService;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn set_docker_tab(&mut self, tab: DockerTab, cx: &mut Context<Self>) {

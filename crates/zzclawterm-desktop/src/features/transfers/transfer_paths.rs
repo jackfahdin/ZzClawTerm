@@ -1,19 +1,18 @@
+use crate::features::ZzClawTermApp;
+use crate::features::session::UploadBatchDuplicateResolver;
+use crate::features::transfers::SftpJobSession;
+use crate::models::{NavItem, TransferPathPromptKind, TransferPathPromptResult};
+use gpui::{Context, PathPromptOptions, SharedString, Window};
 use rust_i18n::t;
-
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-
-use gpui::{Context, PathPromptOptions, SharedString, Window};
 use zzclawterm_core::truncate_preview;
-use zzclawterm_transport::{
-    RemoteFilePath, SftpDuplicatePolicy, SftpDuplicateResolver, SftpPathTransferOptions,
-    SshSessionConfig,
+use zzclawterm_files::sftp::RemoteFilePath;
+use zzclawterm_files::sftp_transfer_types::{
+    SftpDuplicatePolicy, SftpDuplicateResolver, SftpPathTransferOptions,
 };
-
-use crate::features::ZzClawTermApp;
-use crate::features::transfers::SftpJobSession;
-use crate::models::{NavItem, TransferPathPromptKind, TransferPathPromptResult};
+use zzclawterm_transport::SshSessionConfig;
 
 struct PendingBrowserUpload {
     kind: TransferPathPromptKind,
@@ -434,7 +433,7 @@ impl ZzClawTermApp {
                 if self
                     .session
                     .file_browser_backend_for_session(service_session_id)
-                    != Some(zzclawterm_transport::FileBrowserBackendKind::Remote)
+                    != Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Remote)
                 {
                     self.shell
                         .set_status("source session is unavailable".to_string());
@@ -576,7 +575,7 @@ impl ZzClawTermApp {
     ) {
         self.transfer.set_browser_external_drop_hover(false);
         if self.session.active_file_browser_backend()
-            == Some(zzclawterm_transport::FileBrowserBackendKind::Local)
+            == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Local)
         {
             let status = "upload by dropping files is unavailable for local browsing".to_string();
             self.shell.set_status(status.clone());
@@ -634,13 +633,22 @@ impl ZzClawTermApp {
             remote_path,
             session_id,
             config,
-            path_options,
+            mut path_options,
             fallback_name,
         } = request;
         if paths.is_empty() {
             return;
         }
         let total = paths.len();
+        if total > 1 && path_options.duplicate_policy() == SftpDuplicatePolicy::Ask {
+            path_options = SftpPathTransferOptions::new(
+                SftpDuplicatePolicy::Ask,
+                Some(Arc::new(UploadBatchDuplicateResolver::new(
+                    self.session.prompt_duplicate_broker(),
+                ))),
+                path_options.transfer_options().clone(),
+            );
+        }
         self.transfer.set_remote_path(remote_path.clone());
         self.transfer.browser.status = if total == 1 {
             format!(
@@ -722,9 +730,9 @@ fn transfer_download_targets(
     remote_paths
         .into_iter()
         .map(|remote_path| {
-            let name = zzclawterm_transport::download_path::file_name(&remote_path.display_path)?;
+            let name = zzclawterm_files::download_path::file_name(&remote_path.display_path)?;
             anyhow::ensure!(
-                names.insert(zzclawterm_transport::download_path::target_key(name)),
+                names.insert(zzclawterm_files::download_path::target_key(name)),
                 "selected remote items have conflicting local names"
             );
             let target = directory.join(name);
@@ -789,17 +797,15 @@ fn transfer_upload_remote_child_path(remote_dir: &str, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::features::ZzClawTermApp;
-    use gpui::{AppContext as _, Context, TestAppContext};
-    use std::path::PathBuf;
-    use zzclawterm_core::{AppRuntime, AppSettingsSummary, RuntimeMode, test_support::TestTempDir};
-
-    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
-    use crate::models::SettingsTab;
-
     use super::{
         local_directory_children, transfer_upload_local_name, transfer_upload_remote_child_path,
     };
+    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
+    use crate::features::ZzClawTermApp;
+    use crate::models::SettingsTab;
+    use gpui::{AppContext as _, Context, TestAppContext};
+    use std::path::PathBuf;
+    use zzclawterm_core::{AppRuntime, AppSettingsSummary, RuntimeMode, test_support::TestTempDir};
 
     fn assert_settings_path_picker_updates_existing_input(
         input_id: &str,
@@ -921,7 +927,7 @@ mod tests {
 
     #[test]
     fn download_targets_preserve_raw_identity_and_respect_explicit_single_target() {
-        use zzclawterm_transport::RemoteFilePath;
+        use zzclawterm_files::sftp::RemoteFilePath;
         let source = RemoteFilePath::from_raw("/remote/a\\b", b"/remote/a\\b");
         let explicit = PathBuf::from("chosen.txt");
         let targets = super::transfer_download_targets(

@@ -1,5 +1,5 @@
 use super::pane::PaneEndpoint;
-use zzclawterm_transport::{RemoteFilePath, SftpFileEntry};
+use zzclawterm_files::sftp::{RemoteFilePath, SftpFileEntry};
 
 /// Captured before a dialog or deferred application callback can change focus.
 #[derive(Clone)]

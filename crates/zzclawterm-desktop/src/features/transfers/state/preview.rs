@@ -6,17 +6,14 @@
 //! completion: a load result is only applied when its `generation` still matches
 //! the tab, so a slow fetch for a tab the user refreshed or closed is dropped.
 
-use std::sync::Arc;
-
-use gpui::FocusHandle;
-use zzclawterm_transport::RemoteTextGeneration;
-use zzclawterm_ui::{ChildWindowSlot, ZzClawWindowHandle};
-
+use super::{TransferFeatureState, TransferPreviewFeatureState};
 use crate::models::{
     PreviewContent, PreviewViewport, TransferPreviewState, TransferPreviewWorkspaceState,
 };
-
-use super::{TransferFeatureState, TransferPreviewFeatureState};
+use gpui::FocusHandle;
+use std::sync::Arc;
+use zzclawterm_files::remote_file::RemoteTextGeneration;
+use zzclawterm_ui::{ChildWindowSlot, ZzClawWindowHandle};
 
 /// A request to rasterize one PDF page on a background thread, carrying
 /// everything the job needs so the caller does not re-read the tab.

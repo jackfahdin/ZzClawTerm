@@ -1,15 +1,13 @@
-use gpui::{Context, FontWeight, IntoElement, SharedString, div, prelude::*, px, rgb};
-use rust_i18n::t;
-use zzclawterm_core::truncate_preview;
-use zzclawterm_transport::DockerComposeService;
-
 use super::super::super::panels::RemoteMonitorPanel;
-use crate::features::{formatting::compact_id, shell::gpui_code_font_family};
-use crate::widgets::{small_button, status_pill, svg_icon_button};
-
 use super::super::DockerRenderContext;
 use super::menus::{DockerComposeServiceMenu, docker_compose_service_action_menu};
 use super::status::{compose_status_color, compose_status_label};
+use crate::features::{formatting::compact_id, shell::gpui_code_font_family};
+use crate::widgets::{small_button, status_pill, svg_icon_button};
+use gpui::{Context, FontWeight, IntoElement, SharedString, div, prelude::*, px, rgb};
+use rust_i18n::t;
+use zzclawterm_core::truncate_preview;
+use zzclawterm_remote_ops::docker::DockerComposeService;
 
 pub(super) struct DockerComposeServicesPanel<'a> {
     pub project_name: String,

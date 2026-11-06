@@ -1,4 +1,3 @@
-use super::events::set_rdp_view_error;
 use super::events::set_remote_view_error;
 use crate::features::ZzClawTermApp;
 use gpui::AppContext as _;
@@ -8,7 +7,6 @@ use std::time::Duration;
 use std::time::Instant;
 use zzclawterm_remote_desktop::RdpError;
 use zzclawterm_remote_desktop::RdpErrorKind;
-use zzclawterm_remote_desktop::RdpSessionConfig;
 use zzclawterm_remote_desktop::RemoteDesktopViewState;
 use zzclawterm_remote_desktop::VncError;
 use zzclawterm_remote_desktop::VncSessionConfig;
@@ -115,9 +113,10 @@ impl ZzClawTermApp {
                                 } else {
                                     return true;
                                 }
-                                app.retry_rdp_runtime(&session_id, cx);
+                                // The target was resolved before opening this prompt.
+                                // Rebuilding it here would discard the entered password.
+                                app.restart_remote_desktop_runtime(&session_id, reset_attempts, cx);
                                 app.settle_remote_desktop_restore(cx);
-                                let _ = reset_attempts;
                                 true
                             },
                             move |app, cx| {
@@ -140,24 +139,22 @@ impl ZzClawTermApp {
         });
     }
 
-    pub(in crate::features) fn create_rdp_runtime(
-        &mut self,
-        config: RdpSessionConfig,
-    ) -> Result<String, RdpError> {
-        self.remote_desktop.create_rdp_session(config)
-    }
-
-    pub(in crate::features) fn create_failed_rdp_runtime(&mut self, error: RdpError) -> String {
-        let session_id = zzclawterm_core::uuid();
-        self.remote_desktop
-            .insert_failed_session(session_id.clone(), error.kind, error.message);
-        session_id
-    }
-
     pub(in crate::features) fn create_vnc_runtime(
         &mut self,
         config: VncSessionConfig,
     ) -> Result<String, VncError> {
+        if self
+            .cloud_sync
+            .operations
+            .replacement_gate()
+            .block_reason()
+            .is_some()
+        {
+            return Err(VncError::new(
+                zzclawterm_remote_desktop::VncErrorKind::Transport,
+                rust_i18n::t!("settings.configurationReplacementInProgress"),
+            ));
+        }
         self.remote_desktop.create_vnc_session(config)
     }
 
@@ -175,6 +172,33 @@ impl ZzClawTermApp {
         session_id: &str,
         cx: &mut Context<Self>,
     ) {
+        if self.remote_start_blocked_by_configuration_replacement(cx) {
+            return;
+        }
+        if self.retry_saved_remote_desktop(session_id, true, cx) {
+            return;
+        }
+
+        if let Some(metadata) = self.session.metadata_mut(session_id)
+            && let crate::models::SessionLaunchConfig::Rdp(config) = &mut metadata.launch_config
+        {
+            config.normalize_backend_settings();
+        }
+        if let Some(crate::models::SessionLaunchConfig::Rdp(config)) = self
+            .session
+            .metadata(session_id)
+            .map(|metadata| &metadata.launch_config)
+            && let Err(error) = config.backend.validate_config(config)
+        {
+            self.remote_desktop.insert_failed_session(
+                session_id.to_string(),
+                error.kind,
+                error.message,
+            );
+            self.settle_remote_desktop_restore(cx);
+            cx.notify();
+            return;
+        }
         let route_missing = !self.remote_desktop.routes.contains_key(session_id);
         if route_missing {
             let connection = self
@@ -194,6 +218,21 @@ impl ZzClawTermApp {
                     })
                 });
             if let Some(connection) = connection {
+                if let Some(crate::models::SessionLaunchConfig::Rdp(config)) = self
+                    .session
+                    .metadata(session_id)
+                    .map(|metadata| &metadata.launch_config)
+                    && let Err(error) = config.backend.validate_route(true)
+                {
+                    self.remote_desktop.insert_failed_session(
+                        session_id.to_string(),
+                        error.kind,
+                        error.message,
+                    );
+                    self.settle_remote_desktop_restore(cx);
+                    cx.notify();
+                    return;
+                }
                 if let Some(session) = self.remote_desktop.sessions.get_mut(session_id) {
                     session.state = RemoteDesktopViewState::Connecting;
                 }
@@ -255,12 +294,154 @@ impl ZzClawTermApp {
         }
     }
 
+    /// Rebuild saved targets and routes before retrying; runtime metadata is only
+    /// a fallback for genuinely temporary connections.
+    fn retry_saved_remote_desktop(
+        &mut self,
+        session_id: &str,
+        reset_attempts: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(metadata) = self.session.metadata(session_id).cloned() else {
+            return false;
+        };
+        let Some(id) = metadata.source_connection_id.as_ref() else {
+            return false;
+        };
+        let connection = self
+            .connection_state
+            .connections()
+            .iter()
+            .find(|connection| &connection.id == id)
+            .cloned();
+        let result = match connection.as_ref() {
+            None => Err(rust_i18n::t!("terminal.savedConnectionDeleted").to_string()),
+            Some(connection)
+                if !metadata
+                    .launch_config
+                    .matches_saved_protocol(&connection.config) =>
+            {
+                Err(rust_i18n::t!("terminal.savedConnectionProtocolChanged").to_string())
+            }
+            Some(connection) => self
+                .saved_remote_desktop_launch_config(connection)
+                .and_then(|config| {
+                    if let crate::models::SessionLaunchConfig::Rdp(config) = &config {
+                        let has_relay = connection.network.as_ref().is_some_and(|network| {
+                            network.proxy_id.is_some() || network.proxy_jump_id.is_some()
+                        });
+                        config
+                            .backend
+                            .validate_config(config)
+                            .and_then(|()| config.backend.validate_route(has_relay))
+                            .map_err(|error| error.to_string())?;
+                    }
+                    Ok(config)
+                }),
+        };
+        let mut config = match result {
+            Ok(config) => config,
+            Err(message) => {
+                if let Some(session) = self.remote_desktop.sessions.get_mut(session_id) {
+                    cancel_rdp_reconnect_schedule(session);
+                    session.state = RemoteDesktopViewState::Failed;
+                }
+                self.shell.set_status(message);
+                self.settle_remote_desktop_restore(cx);
+                cx.notify();
+                return true;
+            }
+        };
+        let connection = connection.expect("validated saved connection");
+        self.remote_desktop.routes.remove(session_id);
+        match &mut config {
+            crate::models::SessionLaunchConfig::Rdp(config) => config.relay = None,
+            crate::models::SessionLaunchConfig::Vnc(config) => config.relay = None,
+            _ => unreachable!("remote desktop protocol"),
+        }
+        if let Some(metadata) = self.session.metadata_mut(session_id) {
+            metadata.launch_config = config;
+        }
+        if let Some(session) = self.remote_desktop.sessions.get_mut(session_id) {
+            session.state = RemoteDesktopViewState::Connecting;
+            session.reconnect_at = None;
+        }
+        if connection
+            .network
+            .as_ref()
+            .is_some_and(|network| network.proxy_id.is_some() || network.proxy_jump_id.is_some())
+        {
+            let session_id = session_id.to_string();
+            self.prepare_remote_route(
+                connection,
+                move |app, result, cx| {
+                    if !app.session.has_session(&session_id) {
+                        return;
+                    }
+                    match result {
+                        Ok(route) => {
+                            if let Some(metadata) = app.session.metadata_mut(&session_id) {
+                                match &mut metadata.launch_config {
+                                    crate::models::SessionLaunchConfig::Rdp(config) => {
+                                        config.relay = Some(route.endpoint.clone())
+                                    }
+                                    crate::models::SessionLaunchConfig::Vnc(config) => {
+                                        config.relay = Some(route.endpoint.clone())
+                                    }
+                                    _ => return,
+                                }
+                            }
+                            app.remote_desktop.routes.insert(session_id.clone(), route);
+                            app.restart_remote_desktop_runtime(&session_id, reset_attempts, cx);
+                        }
+                        Err(error) => {
+                            app.remote_desktop.insert_failed_session(
+                                session_id.clone(),
+                                RdpErrorKind::Transport,
+                                error.clone(),
+                            );
+                            app.shell.set_status(error);
+                            app.settle_remote_desktop_restore(cx);
+                            cx.notify();
+                        }
+                    }
+                },
+                cx,
+            );
+        } else {
+            self.restart_remote_desktop_runtime(session_id, reset_attempts, cx);
+        }
+        true
+    }
+
+    fn restart_remote_desktop_runtime(
+        &mut self,
+        session_id: &str,
+        reset_attempts: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.metadata(session_id).is_some_and(|metadata| {
+            matches!(
+                metadata.launch_config,
+                crate::models::SessionLaunchConfig::Vnc(_)
+            )
+        }) {
+            self.restart_vnc_runtime(session_id, reset_attempts, cx);
+        } else {
+            self.restart_rdp_runtime(session_id, reset_attempts, cx);
+        }
+    }
+
     pub(super) fn restart_rdp_runtime(
         &mut self,
         session_id: &str,
         reset_attempts: bool,
         cx: &mut Context<Self>,
     ) {
+        if self.remote_start_blocked_by_configuration_replacement(cx) {
+            return;
+        }
+
         let Some(metadata) = self.session.metadata(session_id).cloned() else {
             return;
         };
@@ -268,6 +449,18 @@ impl ZzClawTermApp {
             crate::models::SessionLaunchConfig::Rdp(config) => config,
             _ => return,
         };
+        config.normalize_backend_settings();
+        if let Err(error) = config.backend.validate_config(&config) {
+            self.remote_desktop.insert_failed_session(
+                session_id.to_string(),
+                error.kind,
+                error.message,
+            );
+            self.settle_remote_desktop_restore(cx);
+            cx.notify();
+            return;
+        }
+        let mut authentication_disabled = false;
         if config.password.is_none()
             && let Some(connection_id) = metadata.source_connection_id.as_deref()
             && let Some(connection) = self
@@ -276,6 +469,8 @@ impl ZzClawTermApp {
                 .iter()
                 .find(|connection| connection.id == connection_id)
         {
+            authentication_disabled =
+                remote_desktop_authentication_disabled(connection.auth.as_ref());
             config.password = inline_remote_desktop_password(connection.auth.as_ref());
             if config.password.is_none()
                 && let Some(password_id) = remote_desktop_password_id(connection.auth.as_ref())
@@ -290,7 +485,9 @@ impl ZzClawTermApp {
                 return;
             }
         }
-        if config.password.is_none() {
+        // "No authentication" connects with an empty password (and without NLA) instead of
+        // asking for one, e.g. for passwordless Windows accounts.
+        if config.password.is_none() && !authentication_disabled {
             self.prompt_remote_desktop_password(session_id, reset_attempts, cx);
             return;
         }
@@ -307,6 +504,11 @@ impl ZzClawTermApp {
             .sessions
             .get(session_id)
             .is_some_and(|session| session.dynamic_resize_disabled);
+        let measured = self
+            .remote_desktop
+            .sessions
+            .get(session_id)
+            .map(|session| (session.viewport, session.viewport_scale_factor));
         let route = self.remote_desktop.routes.remove(session_id);
         let _ = self.close_rdp_runtime(session_id);
         if let Some(route) = route {
@@ -314,31 +516,42 @@ impl ZzClawTermApp {
                 .routes
                 .insert(session_id.to_string(), route);
         }
-        match self
-            .remote_desktop
-            .manager
-            .create_session_with_id(session_id.to_string(), config)
-        {
-            Ok(_) => {
-                self.remote_desktop
-                    .insert_connecting(session_id.to_string());
-                if let Some(session) = self.remote_desktop.sessions.get_mut(session_id) {
-                    session.reconnect_attempts = reconnect_attempts;
-                    session.dynamic_resize_disabled = dynamic_resize_disabled;
-                }
-                if let Some(metadata) = self.session.metadata_mut(session_id) {
-                    metadata.disconnected = false;
-                }
-                self.shell.set_status("RDP reconnecting".to_string());
-            }
-            Err(error) => {
-                self.remote_desktop
-                    .insert_connecting(session_id.to_string());
-                if let Some(session) = self.remote_desktop.sessions.get_mut(session_id) {
-                    set_rdp_view_error(session, error.kind, error.message);
-                }
+        self.remote_desktop
+            .insert_connecting(session_id.to_string());
+        if let Some(session) = self.remote_desktop.sessions.get_mut(session_id) {
+            session.reconnect_attempts = reconnect_attempts;
+            session.dynamic_resize_disabled = dynamic_resize_disabled;
+            // The panel this tab draws into has not changed shape, and the next
+            // connect should not have to rediscover it.
+            if let Some((viewport, viewport_scale_factor)) = measured {
+                session.viewport = viewport;
+                session.viewport_scale_factor = viewport_scale_factor;
             }
         }
+        self.shell.set_status("RDP reconnecting".to_string());
+        self.begin_rdp_runtime(session_id, config, cx);
+    }
+
+    pub(super) fn resolve_vnc_restart_config(
+        &self,
+        session_id: &str,
+    ) -> Option<(VncSessionConfig, Option<String>)> {
+        let metadata = self.session.metadata(session_id)?;
+        let crate::models::SessionLaunchConfig::Vnc(config) = &metadata.launch_config else {
+            return None;
+        };
+        let mut config = config.clone();
+        let mut password_id = None;
+        if config.password.is_none()
+            && let Some(connection_id) = metadata.source_connection_id.as_deref()
+            && let Some(connection) = self.connection_state.connection_by_id(connection_id)
+        {
+            config.password = inline_remote_desktop_password(connection.auth.as_ref());
+            if config.password.is_none() {
+                password_id = remote_desktop_password_id(connection.auth.as_ref());
+            }
+        }
+        Some((config, password_id))
     }
 
     pub(super) fn restart_vnc_runtime(
@@ -347,38 +560,24 @@ impl ZzClawTermApp {
         reset_attempts: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(metadata) = self.session.metadata(session_id).cloned() else {
+        if self.remote_start_blocked_by_configuration_replacement(cx) {
+            return;
+        }
+
+        let Some((config, password_id)) = self.resolve_vnc_restart_config(session_id) else {
             return;
         };
-        let mut config = match metadata.launch_config {
-            crate::models::SessionLaunchConfig::Vnc(config) => config,
-            _ => return,
-        };
-        if config.password.is_none()
-            && let Some(connection_id) = metadata.source_connection_id.as_deref()
-            && let Some(connection) = self
-                .connection_state
-                .connections()
-                .iter()
-                .find(|connection| connection.id == connection_id)
-        {
-            config.password = inline_remote_desktop_password(connection.auth.as_ref());
-            if config.password.is_none()
-                && let Some(password_id) = remote_desktop_password_id(connection.auth.as_ref())
-            {
-                self.request_remote_desktop_restart_password(
-                    session_id.to_string(),
-                    password_id,
-                    reset_attempts,
-                    true,
-                    cx,
-                );
-                return;
-            }
+        if let Some(password_id) = password_id {
+            self.request_remote_desktop_restart_password(
+                session_id.to_string(),
+                password_id,
+                reset_attempts,
+                true,
+                cx,
+            );
+            return;
         }
-        if config.password.is_none()
-            && config.security.mode != zzclawterm_remote_desktop::VncSecurityMode::None
-        {
+        if vnc_retry_requires_password(&config) {
             self.prompt_remote_desktop_password(session_id, reset_attempts, cx);
             return;
         }
@@ -518,7 +717,21 @@ impl ZzClawTermApp {
             );
             self.release_remote_keys(session_id);
         }
+        // ActiveX sessions use their own isolated host, not the IronRDP manager;
+        // asking the manager to close one would fail and leave the tab behind.
+        #[cfg(windows)]
+        let native = self
+            .remote_desktop
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| {
+                session.native_rdp.is_some() || session.native_rdp_config.is_some()
+            });
         self.remote_desktop.remove_session(session_id);
+        #[cfg(windows)]
+        if native {
+            return Ok(());
+        }
         self.remote_desktop.manager.close_detached(session_id)
     }
 
@@ -612,6 +825,12 @@ impl ZzClawTermApp {
             .map(|(session_id, _)| session_id.clone())
             .collect::<Vec<_>>();
         for session_id in &due {
+            if self.remote_start_blocked_by_configuration_replacement(cx) {
+                break;
+            }
+            if self.retry_saved_remote_desktop(session_id, false, cx) {
+                continue;
+            }
             if let Some(session) = self.remote_desktop.sessions.get_mut(session_id) {
                 session.reconnect_at = None;
             }
@@ -630,6 +849,12 @@ impl ZzClawTermApp {
     }
 }
 
+/// Only a connection that was lost may be retried automatically.
+///
+/// A session the server ended -- most often because another connection took it over --
+/// ends its replacement for the same reason, so two ZzClawTerm clients chasing each other
+/// never settles and neither side gets a usable desktop. Those arrive as
+/// [`RdpErrorKind::Session`] and wait for the view's manual retry instead.
 pub(super) fn rdp_error_is_retryable(kind: RdpErrorKind) -> bool {
     matches!(
         kind,
@@ -637,8 +862,31 @@ pub(super) fn rdp_error_is_retryable(kind: RdpErrorKind) -> bool {
             | RdpErrorKind::ConnectionRefused
             | RdpErrorKind::Tls
             | RdpErrorKind::Transport
-            | RdpErrorKind::Session
     )
+}
+
+/// Whether a retry has to ask for a VNC password before it can start.
+///
+/// `auto` without a password is a working configuration, not a missing one: the
+/// helper lets the server select the `None` security type, which is exactly how a
+/// passwordless first connection succeeds. Only an explicit `vnc-auth` connection
+/// needs a password up front; an `auto` connection asks for one when the server's
+/// security selection actually demands credentials, which the helper reports as a
+/// fatal authentication error with `password_required` set (see
+/// `events::apply_vnc_control_event`).
+pub(super) fn vnc_retry_requires_password(config: &VncSessionConfig) -> bool {
+    config.password.is_none()
+        && config.security.mode == zzclawterm_remote_desktop::VncSecurityMode::VncAuth
+}
+
+/// Whether prompting for a password can resolve a VNC authentication failure.
+///
+/// `none` is excluded: a password could never satisfy that policy. A session that
+/// already holds a password is also excluded, so a rejected password reports the
+/// failure instead of asking for the same credential again.
+pub(super) fn vnc_auth_failure_accepts_password_prompt(config: &VncSessionConfig) -> bool {
+    config.password.is_none()
+        && config.security.mode != zzclawterm_remote_desktop::VncSecurityMode::None
 }
 
 pub(super) fn rdp_reconnect_delay(attempt: u32, jitter_ms: u64) -> Duration {
@@ -648,12 +896,24 @@ pub(super) fn rdp_reconnect_delay(attempt: u32, jitter_ms: u64) -> Duration {
         + Duration::from_millis(jitter_ms.min(249))
 }
 
-pub(super) fn clear_rdp_reconnect_after_frame(
+pub(super) fn cancel_rdp_reconnect_schedule(
     session: &mut crate::features::remote_desktop::state::RemoteDesktopSessionState,
 ) {
     session.reconnect_attempts = 0;
     session.reconnect_at = None;
+}
+
+pub(super) fn clear_rdp_reconnect_after_frame(
+    session: &mut crate::features::remote_desktop::state::RemoteDesktopSessionState,
+) {
+    cancel_rdp_reconnect_schedule(session);
     session.error = None;
+}
+
+pub(super) fn remote_desktop_authentication_disabled(
+    auth: Option<&zzclawterm_core::ConnectionAuth>,
+) -> bool {
+    auth.is_some_and(|auth| auth.mode == "none")
 }
 
 pub(super) fn inline_remote_desktop_password(
@@ -666,7 +926,7 @@ pub(super) fn inline_remote_desktop_password(
     if let Some(password) = auth
         .password
         .as_deref()
-        .filter(|password| !password.trim().is_empty())
+        .filter(|password| !password.is_empty())
     {
         return (!auth.has_password).then(|| password.to_owned().into());
     }
@@ -681,7 +941,7 @@ pub(super) fn remote_desktop_password_id(
         || auth
             .password
             .as_deref()
-            .is_some_and(|password| !password.trim().is_empty() && !auth.has_password)
+            .is_some_and(|password| !password.is_empty() && !auth.has_password)
     {
         return None;
     }

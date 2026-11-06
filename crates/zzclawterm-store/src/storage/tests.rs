@@ -1,6 +1,11 @@
+use crate::storage::ThemeCommitOutcome;
+use crate::{LoadBootstrap, StoreRequest as _};
 use aes_gcm::{Aes256Gcm, Key, KeyInit, aead::Aead};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use zzclawterm_core::models::window_decoration::WindowDecoration;
+use zzclawterm_core::models::window_material::WindowMaterial;
 use zzclawterm_core::test_support::TestTempDir;
+use zzclawterm_core::themes::management::{ThemeApplyTarget, ThemeMutation, ThemeSettings};
 use zzclawterm_core::{
     AccountAuthError, AiExecutionProfile, AssetAccelerator, AssetAcceleratorType, AssetDeviceType,
     AssetMetadata, CloudSyncSettings, CloudSyncState, CommandHistoryEntry, ConnectionAuth,
@@ -86,8 +91,6 @@ fn theme_commits_are_atomic_and_preserve_unrelated_settings_and_unknown_fields()
 
 #[test]
 fn applying_themes_preserves_an_unsupported_catalog_and_concurrent_unrelated_edits() {
-    use crate::storage::ThemeCommitOutcome;
-    use zzclawterm_core::themes::management::{ThemeApplyTarget, ThemeMutation, ThemeSettings};
     let dir = unique_temp_dir("theme-only-future");
     let store = ConnectionStore::open(&dir).unwrap();
     let future = serde_json::json!({"format": 99});
@@ -339,6 +342,49 @@ use super::{
     TunnelGroup, current_time_ms, default_settings_value, deserialize_json, entity_key, json_path,
     set_nested_json_value, stable_id, write_json_in_txn,
 };
+
+#[test]
+fn proxy_ciphertext_round_trips_and_keeps_released_backup_password_contract() {
+    let dir = TestTempDir::new("zzclawterm-proxy-encryption-contract");
+    let store = ConnectionStore::open(dir.path()).unwrap();
+    store
+        .save_master_password(Some("fixture-master-password"))
+        .unwrap();
+    let key = entity_key(super::PROXY_PREFIX, "proxy");
+    let txn = store.db.begin_write().unwrap();
+    write_json_in_txn(&txn, super::PROXIES_TABLE, &key, &serde_json::json!({"id":"proxy","name":"Proxy","password":"legacy-fixture-password","future":{"keep":true}})).unwrap();
+    txn.commit().unwrap();
+    let legacy = store.list_proxies().unwrap();
+    assert_eq!(
+        legacy[0].password.as_deref(),
+        Some("legacy-fixture-password")
+    );
+    store.replace_proxies(&legacy).unwrap();
+    let raw: serde_json::Value = store
+        .read_json_table(super::PROXIES_TABLE, &key)
+        .unwrap()
+        .unwrap();
+    assert_ne!(raw["password"], "legacy-fixture-password");
+    assert_eq!(
+        store.list_proxies().unwrap()[0].password.as_deref(),
+        Some("legacy-fixture-password")
+    );
+    let backup = store
+        .build_raw_portable_snapshot(
+            zzclawterm_core::PortableSnapshotKind::Backup,
+            "device",
+            "test",
+        )
+        .unwrap();
+    let proxies: serde_json::Value = serde_json::from_str(&backup.entities["proxies"]).unwrap();
+    assert_eq!(proxies[0]["password"], "legacy-fixture-password");
+    let mut corrupted = raw;
+    corrupted["password"] = serde_json::json!(format!("{}invalid", super::PROXY_SECRET_PREFIX));
+    let txn = store.db.begin_write().unwrap();
+    write_json_in_txn(&txn, super::PROXIES_TABLE, &key, &corrupted).unwrap();
+    txn.commit().unwrap();
+    assert!(store.list_proxies().is_err());
+}
 
 #[test]
 fn accounts_preserve_masking_legacy_references_and_portable_snapshot_contracts() {
@@ -768,7 +814,7 @@ fn exports_and_imports_portable_snapshot() {
     let source_dir = unique_temp_dir("portable-source");
     let target_dir = unique_temp_dir("portable-target");
     let snapshot_dir = unique_temp_dir("portable-output");
-    let snapshot_path = snapshot_dir.join("zzclawterm.nya");
+    let snapshot_path = snapshot_dir.join("zzclawterm.zz");
 
     let source_store = ConnectionStore::open(&source_dir).expect("source store");
     source_store
@@ -1059,7 +1105,7 @@ fn encrypted_portable_snapshot_requires_master_password() {
     let target_dir = unique_temp_dir("portable-encrypted-target");
     let wrong_target_dir = unique_temp_dir("portable-encrypted-wrong-target");
     let snapshot_dir = unique_temp_dir("portable-encrypted-output");
-    let snapshot_path = snapshot_dir.join("zzclawterm.nya");
+    let snapshot_path = snapshot_dir.join("zzclawterm.zz");
 
     let source_store = ConnectionStore::open(&source_dir).expect("source store");
     source_store
@@ -1182,7 +1228,7 @@ fn encrypted_portable_snapshot_requires_master_password() {
         safety_backup_path
             .extension()
             .and_then(std::ffi::OsStr::to_str),
-        Some("nya")
+        Some("zz")
     );
     let safety_snapshot = crate::decode_encrypted_raw_portable_snapshot(
         &std::fs::read(&safety_backup_path).expect("read safety backup"),
@@ -1218,7 +1264,7 @@ fn legacy_tauri_snapshot_reencrypts_settings_and_rewraps_master_key() {
 
     let source_dir = unique_temp_dir("legacy-tauri-portable-source");
     let snapshot_dir = unique_temp_dir("legacy-tauri-portable-output");
-    let snapshot_path = snapshot_dir.join("legacy.nya");
+    let snapshot_path = snapshot_dir.join("legacy.zz");
     let source = ConnectionStore::open(&source_dir).expect("source store");
     source
         .save_master_password(Some(SNAPSHOT_PASSWORD))
@@ -1650,7 +1696,7 @@ fn cloud_pull_rejects_invalid_local_secrets_without_overwriting_database() {
 
 #[test]
 fn cloud_pull_store_worker_flushes_and_reopens_with_local_provider_secrets() {
-    use crate::runtime::{FlushBarrier, LoadBootstrap, StoreConfig, StoreRuntime};
+    use crate::runtime::{FlushBarrier, StoreConfig, StoreRuntime};
     use zzclawterm_core::{CloudLocalStore, LocalCloudSyncOptions};
 
     let source_dir = unique_temp_dir("worker-cloud-source");
@@ -1733,8 +1779,6 @@ fn cloud_pull_store_worker_flushes_and_reopens_with_local_provider_secrets() {
 
 #[test]
 fn cloud_pull_reencrypts_secrets_retained_from_partial_settings() {
-    use crate::runtime::{LoadBootstrap, StoreRequest};
-
     let source_dir = unique_temp_dir("partial-rekey-source");
     let target_dir = unique_temp_dir("partial-rekey-target");
     let source = ConnectionStore::open(&source_dir).unwrap();
@@ -1827,6 +1871,62 @@ fn cloud_pull_without_source_key_keeps_local_key_for_inline_passwords() {
     );
 }
 
+/// The export dialog asks for "a password", so it must be enough on its own: a source
+/// without a master password used to leave the vault key wrapped by the device key, and
+/// importing with the very password typed at export failed to unwrap it.
+#[test]
+fn encrypted_backup_opens_with_its_own_password_without_a_source_master_password() {
+    let source_dir = unique_temp_dir("backup-own-password-source");
+    let target_dir = unique_temp_dir("backup-own-password-target");
+    let source = ConnectionStore::open(&source_dir).unwrap();
+    let mut saved: SavedConnection = serde_json::from_value(serde_json::json!({
+        "id": "server", "name": "Server", "type": "ssh",
+        "host": "server.example", "port": 22, "username": "root"
+    }))
+    .unwrap();
+    saved.auth = Some(zzclawterm_core::ConnectionAuth {
+        mode: "password".into(),
+        password: Some("fixture-backup-password".into()),
+        ..Default::default()
+    });
+    source.save_connection(&saved).unwrap();
+    let backup_path = source_dir.join("encrypted.zz");
+    source
+        .export_encrypted_portable_snapshot_from_open_store(
+            &backup_path,
+            "source",
+            "2.0.0",
+            "backup-password",
+        )
+        .unwrap();
+
+    let target = ConnectionStore::open(&target_dir).unwrap();
+    assert!(
+        target
+            .import_encrypted_portable_snapshot_into_open_store(&backup_path, "wrong-password")
+            .is_err()
+    );
+    target
+        .import_encrypted_portable_snapshot_into_open_store(&backup_path, "backup-password")
+        .unwrap();
+    assert_eq!(
+        target
+            .get_connection("server")
+            .unwrap()
+            .unwrap()
+            .auth
+            .unwrap()
+            .password
+            .unwrap()
+            .expose_secret(),
+        "fixture-backup-password"
+    );
+    drop(target);
+    drop(source);
+    std::fs::remove_dir_all(target_dir).unwrap();
+    std::fs::remove_dir_all(source_dir).unwrap();
+}
+
 #[test]
 fn encrypted_backup_import_reencrypts_retained_standalone_cloud_settings() {
     let source_dir = unique_temp_dir("backup-rekey-source");
@@ -1838,7 +1938,7 @@ fn encrypted_backup_import_reencrypts_retained_standalone_cloud_settings() {
     let mut imported = CloudSyncSettings::default();
     imported.webdav.password = Some("imported-webdav".into());
     source.save_cloud_sync_settings(imported.clone()).unwrap();
-    let backup_path = source_dir.join("encrypted.nya");
+    let backup_path = source_dir.join("encrypted.zz");
     source
         .export_encrypted_portable_snapshot_from_open_store(
             &backup_path,
@@ -2882,7 +2982,6 @@ fn window_material_defaults_ignore_legacy_preferences_and_preserve_unknown_field
 
 #[test]
 fn native_window_material_is_restored_from_backup_and_preserved_during_sync() {
-    use zzclawterm_core::models::window_material::WindowMaterial;
     use zzclawterm_core::portable_snapshot::PortableSnapshotKind;
     let dir = unique_temp_dir("native-material-snapshots");
     let store = ConnectionStore::open(&dir).unwrap();
@@ -2957,9 +3056,6 @@ fn window_decorations_default_and_roundtrip_without_discarding_future_data() {
 
 #[test]
 fn window_decorations_restore_from_backups_and_remain_local_during_sync() {
-    use zzclawterm_core::models::window_decoration::WindowDecoration;
-    use zzclawterm_core::portable_snapshot::PortableSnapshotKind;
-
     let dir = unique_temp_dir("window-decorations-snapshots");
     let store = ConnectionStore::open(&dir).unwrap();
     let mut settings = store.load_app_settings_summary().unwrap();
@@ -3069,11 +3165,13 @@ fn save_general_and_diagnostics_settings_roundtrip() {
     summary = saved;
     summary.diagnostics_level = "debug".to_string();
     summary.diagnostics_retention_days = 14;
+    summary.diagnostics_log_shard_bytes = 20 * 1024 * 1024;
     let saved = store
         .save_diagnostics_settings(&summary)
         .expect("save diagnostics");
     assert_eq!(saved.diagnostics_level, "debug");
     assert_eq!(saved.diagnostics_retention_days, 14);
+    assert_eq!(saved.diagnostics_log_shard_bytes, 20 * 1024 * 1024);
 
     let raw = store.load_settings_value().expect("raw");
     assert_eq!(
@@ -3091,6 +3189,20 @@ fn save_general_and_diagnostics_settings_roundtrip() {
     assert_eq!(
         raw["diagnostics"]["retention_days"],
         serde_json::Value::from(14)
+    );
+    assert_eq!(
+        raw["diagnostics"]["shard_bytes"],
+        serde_json::Value::from(20 * 1024 * 1024)
+    );
+
+    // An extreme persisted value is clamped instead of breaking logging.
+    summary.diagnostics_log_shard_bytes = 4096;
+    let saved = store
+        .save_diagnostics_settings(&summary)
+        .expect("save clamped diagnostics");
+    assert_eq!(
+        saved.diagnostics_log_shard_bytes,
+        zzclawterm_core::diagnostics::MIN_LOG_SHARD_BYTES
     );
 
     std::fs::remove_dir_all(dir).ok();
@@ -3175,6 +3287,47 @@ fn command_send_preferences_load_legacy_defaults_and_preserve_unknown_settings()
             .ui_serial_send_clear_after_send
     );
     std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn mac_matcher_loads_legacy_defaults_and_round_trips_without_losing_unknown_options() {
+    let dir = unique_temp_dir("mac-matcher-settings");
+    let store = ConnectionStore::open(&dir).unwrap();
+    for terminal in [
+        serde_json::json!({}),
+        serde_json::json!({"action_links_matchers": {"ipv4": false, "archive": false, "host_port": false}}),
+    ] {
+        store
+            .save_settings_value(&serde_json::json!({"terminal": terminal}))
+            .unwrap();
+        let summary = store.load_app_settings_summary().unwrap();
+        assert!(summary.terminal_action_links_matchers.mac);
+        assert!(!summary.terminal_action_links_enabled);
+    }
+    store.save_settings_value(&serde_json::json!({"terminal": {
+        "future_terminal_option": "keep",
+        "action_links_enabled": true,
+        "action_links_matchers": {"ipv4": false, "mac": false, "future_matcher": {"enabled": true}}
+    }})).unwrap();
+    let mut summary = store.load_app_settings_summary().unwrap();
+    assert!(!summary.terminal_action_links_matchers.mac);
+    assert!(!summary.terminal_action_links_matchers.ipv4);
+    for mac in [true, false] {
+        summary.terminal_action_links_matchers.mac = mac;
+        let loaded = store.save_terminal_settings(&summary).unwrap();
+        assert_eq!(loaded.terminal_action_links_matchers.mac, mac);
+        assert!(loaded.terminal_action_links_enabled);
+        assert!(!loaded.terminal_action_links_matchers.ipv4);
+        let raw = store.load_settings_value().unwrap();
+        assert_eq!(raw["terminal"]["action_links_matchers"]["mac"], mac);
+        assert_eq!(
+            raw["terminal"]["action_links_matchers"]["future_matcher"],
+            serde_json::json!({"enabled": true})
+        );
+        assert_eq!(raw["terminal"]["future_terminal_option"], "keep");
+    }
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -3639,11 +3792,14 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     assert!(summary.terminal_low_latency_mode);
     // Legacy settings omit the new field and must keep zebra stripes enabled.
     assert!(summary.terminal_zebra_stripes_enabled);
+    assert!(!summary.terminal_zebra_stripes_by_row);
     assert_eq!(
         summary.ui_file_manager,
         zzclawterm_core::FileManagerUiSettings::default()
     );
     assert_eq!(summary.ui_remote_stats_interval, 9);
+    // Documents written before the logged-in users reading keep it hidden.
+    assert!(!summary.ui_remote_stats_show_users);
     assert_eq!(summary.ui_gpu_monitor_interval, 7);
     assert_eq!(summary.ui_ascend_npu_monitor_interval, 8);
     assert_eq!(summary.ui_process_manager_interval, 11);
@@ -3741,6 +3897,11 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     assert_eq!(summary.recording_memory_limit_bytes, 1048576);
     assert_eq!(summary.diagnostics_level, "debug");
     assert_eq!(summary.diagnostics_retention_days, 3);
+    assert_eq!(
+        summary.diagnostics_log_shard_bytes,
+        zzclawterm_core::diagnostics::DEFAULT_LOG_SHARD_BYTES,
+        "legacy documents without diagnostics.shard_bytes keep the 10 MiB default"
+    );
     assert!(summary.startup_restore);
     assert!(summary.minimize_to_tray);
     assert!(!summary.confirm_on_close);
@@ -4066,7 +4227,9 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     terminal_update.terminal_show_multi_line_paste_dialog = true;
     terminal_update.terminal_low_latency_mode = true;
     terminal_update.terminal_zebra_stripes_enabled = false;
+    terminal_update.terminal_zebra_stripes_by_row = true;
     terminal_update.ui_remote_stats_interval = 4;
+    terminal_update.ui_remote_stats_show_users = true;
     terminal_update.ui_gpu_monitor_interval = 10;
     terminal_update.ui_ascend_npu_monitor_interval = 12;
     let saved_terminal = store
@@ -4079,7 +4242,9 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     assert!(saved_terminal.terminal_show_multi_line_paste_dialog);
     assert!(saved_terminal.terminal_low_latency_mode);
     assert!(!saved_terminal.terminal_zebra_stripes_enabled);
+    assert!(saved_terminal.terminal_zebra_stripes_by_row);
     assert_eq!(saved_terminal.ui_remote_stats_interval, 4);
+    assert!(saved_terminal.ui_remote_stats_show_users);
     assert_eq!(saved_terminal.ui_gpu_monitor_interval, 10);
     assert_eq!(saved_terminal.ui_ascend_npu_monitor_interval, 12);
     let stored = store
@@ -4092,6 +4257,10 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
     assert_eq!(
         json_path(&stored, &["ui", "remote_stats_interval"]).and_then(|value| value.as_u64()),
         Some(4)
+    );
+    assert_eq!(
+        json_path(&stored, &["ui", "remote_stats_show_users"]).and_then(|value| value.as_bool()),
+        Some(true)
     );
     assert_eq!(
         json_path(&stored, &["terminal", "keep_alive_mode"]).and_then(|value| value.as_str()),
@@ -4114,6 +4283,12 @@ fn app_settings_summary_reads_and_updates_host_key_policy() {
             .and_then(|value| value.as_bool()),
         Some(false)
     );
+
+    assert_eq!(stored["terminal"]["zebra_stripes_by_row"], true);
+    assert_eq!(stored["unrelated"]["preserve"], true);
+    let reloaded = store.load_app_settings_summary().unwrap();
+    assert!(reloaded.terminal_zebra_stripes_by_row);
+    assert!(!reloaded.terminal_zebra_stripes_enabled);
 
     let mut quick_command_update = saved_terminal.clone();
     quick_command_update.ui_quick_cmd_view_mode = "list".to_string();
@@ -4326,6 +4501,7 @@ fn workspace_pane_layout_roundtrip() {
 #[test]
 fn open_tab_pane_root_expands_and_maps_layout() {
     let tab = zzclawterm_core::models::RestorableOpenTab {
+        ssh_runtime_mode: None,
         title: "split".to_string(),
         session_type: "SSH".to_string(),
         connection_id: Some("c1".to_string()),
@@ -4389,6 +4565,7 @@ fn open_tabs_roundtrip() {
             Some("#22c55e".to_string()),
         ),
         zzclawterm_core::models::RestorableOpenTab {
+            ssh_runtime_mode: None,
             title: "prod".to_string(),
             session_type: "SSH".to_string(),
             connection_id: Some("conn-1".to_string()),
@@ -4418,6 +4595,36 @@ fn open_tabs_roundtrip() {
     assert_eq!(loaded, tabs);
     store.save_open_tabs(&[]).expect("clear");
     assert!(store.load_open_tabs().expect("load empty").is_empty());
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn open_tabs_preserve_legacy_and_tauri_ssh_modes_in_the_existing_document() {
+    let dir = unique_temp_dir("open-tabs-ssh-modes");
+    let store = ConnectionStore::open(&dir).unwrap();
+    let tabs: Vec<zzclawterm_core::models::RestorableOpenTab> = serde_json::from_value(serde_json::json!([
+        {"title":"legacy", "session_type":"SSH", "connection_id":"saved"},
+        {"title":"Tauri split", "session_type":"SSH", "ssh_runtime_mode":"standard", "root":{
+            "kind":"split", "id":"split", "direction":"vertical", "ratio":0.5,
+            "first":{"kind":"leaf", "id":"a", "session_type":"SSH", "connection_id":"a", "ssh_runtime_mode":"sftp"},
+            "second":{"kind":"leaf", "id":"b", "session_type":"SSH", "connection_id":"b", "ssh_runtime_mode":"future-mode"}
+        }}
+    ])).unwrap();
+    store.save_open_tabs(&tabs).unwrap();
+    let restored = store.load_open_tabs().unwrap();
+    assert_eq!(restored, tabs);
+    assert!(restored[0].ssh_runtime_modes_supported());
+    assert!(!restored[1].ssh_runtime_modes_supported());
+    assert_eq!(
+        restored[1].expanded_sessions()[1]
+            .ssh_runtime_mode
+            .as_deref(),
+        Some("future-mode")
+    );
+    drop(store);
+    let reopened = ConnectionStore::open(&dir).unwrap();
+    assert_eq!(reopened.load_open_tabs().unwrap(), tabs);
+    drop(reopened);
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -5857,6 +6064,7 @@ fn quick_commands_round_trip_and_upsert_preserves_created_use_count() {
                 icon_tag: Some("terminal".to_string()),
                 pinned: Some(false),
                 execution_mode: Some("append".to_string()),
+                raw_send: None,
                 source: Some("ai".to_string()),
                 risk_level: Some(zzclawterm_core::RiskLevel::Low),
                 updated_at: None,
@@ -5889,6 +6097,7 @@ fn quick_commands_round_trip_and_upsert_preserves_created_use_count() {
                 icon_tag: Some("terminal".to_string()),
                 pinned: Some(true),
                 execution_mode: Some("append".to_string()),
+                raw_send: None,
                 source: Some("manual".to_string()),
                 risk_level: Some(zzclawterm_core::RiskLevel::Medium),
                 updated_at: None,
@@ -5932,6 +6141,54 @@ fn quick_commands_round_trip_and_upsert_preserves_created_use_count() {
 }
 
 #[test]
+fn quick_command_literal_mode_survives_storage_backup_and_sync_with_legacy_commands() {
+    let dir = unique_temp_dir("quick-command-literal");
+    let store = ConnectionStore::open(&dir).unwrap();
+    let config: QuickCommandsConfig = serde_json::from_value(serde_json::json!({
+        "commands": [
+            {"id":"legacy", "label":"Legacy", "command":"pwd"},
+            {"id":"null", "label":"Null", "command":"pwd", "raw_send":null},
+            {"id":"literal", "label":"Literal", "command":"  {{变量}} C:\\temp\\p\n下一行  ", "raw_send":true}
+        ]
+    })).unwrap();
+    // Seed the legacy document as written by older versions, before a typed save.
+    store
+        .save_settings_doc_value(
+            SETTINGS_QUICK_COMMANDS,
+            &serde_json::json!({
+                "commands": [{"id":"old", "label":"Old", "command":"pwd"}]
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        store.load_quick_commands().unwrap().commands[0].raw_send,
+        None
+    );
+    store.save_quick_commands(config.clone()).unwrap();
+    drop(store);
+    let store = ConnectionStore::open(&dir).unwrap();
+    assert_eq!(store.load_quick_commands().unwrap(), config);
+    for kind in [
+        zzclawterm_core::portable_snapshot::PortableSnapshotKind::Backup,
+        zzclawterm_core::portable_snapshot::PortableSnapshotKind::Sync,
+    ] {
+        let mut snapshot = store
+            .build_raw_portable_snapshot(kind, "quick-test", "2.0.1")
+            .unwrap();
+        snapshot.recalculate_hash().unwrap();
+        let encoded = crate::portable_codec::encode_raw_portable_snapshot(&snapshot).unwrap();
+        let decoded = crate::portable_codec::decode_raw_portable_snapshot(&encoded).unwrap();
+        store
+            .save_quick_commands(QuickCommandsConfig::default())
+            .unwrap();
+        store.apply_raw_portable_snapshot(&decoded).unwrap();
+        assert_eq!(store.load_quick_commands().unwrap(), config);
+    }
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn quick_commands_export_matches_tauri_json_shape() {
     let raw = export_quick_commands_json(QuickCommandsConfig {
         categories: vec![QuickCommandCategory {
@@ -5950,6 +6207,7 @@ fn quick_commands_export_matches_tauri_json_shape() {
             icon_tag: Some("terminal".to_string()),
             pinned: Some(true),
             execution_mode: Some("append".to_string()),
+            raw_send: None,
             source: Some("manual".to_string()),
             risk_level: Some(zzclawterm_core::RiskLevel::Low),
             updated_at: Some(222),
@@ -7737,7 +7995,7 @@ fn editing_keywords_preserves_both_values_of_the_retired_soft_wrap_setting() {
 fn tauri_ai_extensions_follow_account_and_model_ids_through_reorder_delete_and_backup() {
     let dir = unique_temp_dir("ai-tauri-fields");
     let restore_dir = unique_temp_dir("ai-tauri-restore");
-    let backup = dir.join("tauri-ai.nya");
+    let backup = dir.join("tauri-ai.zz");
     let store = ConnectionStore::open(&dir).unwrap();
     let mut raw = default_settings_value();
     raw["ai"] = serde_json::json!({
@@ -7967,7 +8225,7 @@ fn recording_input_opt_in_preserves_legacy_unknown_fields_sync_and_backup() {
     }
     drop(source);
     let backup_dir = unique_temp_dir("recording-settings-backup");
-    let backup_path = backup_dir.join("recording.nya");
+    let backup_path = backup_dir.join("recording.zz");
     let restore_dir = unique_temp_dir("recording-settings-restore");
     ConnectionStore::export_config_database(&source_dir, None, &backup_path).unwrap();
     ConnectionStore::import_config_database(&restore_dir, None, &backup_path).unwrap();
@@ -8143,4 +8401,60 @@ fn cloud_sync_rotated_credentials_survive_restart_and_reject_stale_accounts() {
             CredentialUpdateResult::Superseded
         );
     }
+}
+
+#[test]
+fn login_monitoring_setting_roundtrips_without_losing_unknown_fields() {
+    let dir = unique_temp_dir("login-monitoring-settings");
+    let store = ConnectionStore::open(&dir).unwrap();
+    store.save_settings_value(&serde_json::json!({"ui":{"future_monitor_option":{"keep":true}},"future":{"version":99}})).unwrap();
+    let mut settings = store.load_app_settings_summary().unwrap();
+    assert!(!settings.ui_remote_stats_show_users);
+    for enabled in [true, false] {
+        settings.ui_remote_stats_show_users = enabled;
+        store.save_terminal_settings(&settings).unwrap();
+        assert_eq!(
+            store
+                .load_app_settings_summary()
+                .unwrap()
+                .ui_remote_stats_show_users,
+            enabled
+        );
+        let raw = store.load_settings_value().unwrap();
+        assert_eq!(raw["ui"]["future_monitor_option"]["keep"], true);
+        assert_eq!(raw["future"]["version"], 99);
+    }
+}
+
+#[test]
+fn terminal_wrapping_settings_load_legacy_and_round_trip_without_downgrading_unknown_values() {
+    use zzclawterm_core::models::settings::TerminalWrapMode;
+    let dir = unique_temp_dir("terminal-wrapping-settings");
+    let store = ConnectionStore::open(&dir).unwrap();
+    store
+        .save_settings_value(&serde_json::json!({"terminal": {"future": {"keep": true}}}))
+        .unwrap();
+    let mut settings = store.load_app_settings_summary().unwrap();
+    assert_eq!(settings.terminal_wrap_mode, TerminalWrapMode::Character);
+    assert!(!settings.terminal_show_wrap_markers);
+    settings.terminal_wrap_mode = TerminalWrapMode::None;
+    settings.terminal_show_wrap_markers = true;
+    let saved = store.save_terminal_settings(&settings).unwrap();
+    assert_eq!(saved.terminal_wrap_mode, TerminalWrapMode::None);
+    assert!(saved.terminal_show_wrap_markers);
+    let raw = store.load_settings_value().unwrap();
+    assert_eq!(raw["terminal"]["wrap_mode"], "none");
+    assert_eq!(raw["terminal"]["future"]["keep"], true);
+    store.save_settings_value(&serde_json::json!({"terminal": {"wrap_mode": "future_mode", "show_wrap_markers": {"future": true}, "future": 42}})).unwrap();
+    let fallback = store.load_app_settings_summary().unwrap();
+    assert_eq!(fallback.terminal_wrap_mode, TerminalWrapMode::Character);
+    assert!(!fallback.terminal_show_wrap_markers);
+    store.save_terminal_settings(&fallback).unwrap();
+    let raw = store.load_settings_value().unwrap();
+    assert_eq!(raw["terminal"]["wrap_mode"], "future_mode");
+    assert_eq!(
+        raw["terminal"]["show_wrap_markers"],
+        serde_json::json!({"future": true})
+    );
+    assert_eq!(raw["terminal"]["future"], 42);
 }

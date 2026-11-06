@@ -1,26 +1,20 @@
-use rust_i18n::t;
-
-use std::borrow::Cow;
-
-use gpui::{Context, IntoElement, ListState, SharedString, div, list, prelude::*, px, rgb, rgba};
-use zzclawterm_transport::{PROCESS_LIST_UNSUPPORTED_ERROR, RemoteProcess};
-
-use std::sync::Arc;
-
 use super::panels::{PanelChrome, RemoteMonitorPanel};
+use super::process::{
+    ProcessDetailLabels, ProcessDisplayMode, ProcessTableLabels, ProcessTableRowActions,
+    ProcessTableRowPresentation, process_column, process_details, process_display_mode,
+    process_sort_button, process_table_row,
+};
 use crate::features::remote::ProcessPresentationState;
 use crate::features::text_inputs::number_input_box_from_state;
 use crate::models::RemoteProcessSortKey;
 use crate::widgets::empty_panel_with_icon;
-use gpui::Entity;
+use gpui::{Context, Entity, IntoElement, ListState, SharedString, div, list, prelude::*, px, rgb};
+use rust_i18n::t;
+use std::borrow::Cow;
+use std::sync::Arc;
+use zzclawterm_remote_ops::remote_process::{PROCESS_LIST_UNSUPPORTED_ERROR, RemoteProcess};
 use zzclawterm_ui::{
     ZzClawInputState, ZzClawNumberInputState, ZzClawScrollable, ZzClawSearchInput,
-};
-
-use super::process::{
-    ProcessDetailLabels, ProcessDisplayMode, ProcessTableLabels, ProcessTableRowActions,
-    ProcessTableRowPresentation, process_details, process_display_mode, process_sort_button,
-    process_table_row,
 };
 
 /// The Processes panel, rendered from a snapshot.
@@ -97,10 +91,7 @@ pub(in crate::features::pages::remote) fn processes_panel(
         apply_nice: t!("processManager.applyNice"),
     };
     let mode = process_display_mode(panel_width);
-    // The sort key arrives already constrained to the columns this width can show,
-    // and the list already filtered and sorted: `RemoteOpsFeatureState` reconciles
-    // both when the data, the query, the sort or the panel width changes. This pass
-    // only reads them.
+    // Filtering and sorting are owned by the feature state, independently of width.
 
     let total_filtered = filtered_processes.len();
     let rows = if filtered_processes.is_empty() {
@@ -241,16 +232,85 @@ pub(in crate::features::pages::remote) fn processes_panel(
         .into_any_element()
     };
 
-    // Tauri ProcessManager shell: dense search toolbar + sort strip + scrollable table.
-    let count_label = process_state.items.len().to_string();
+    let sort_options = [
+        (RemoteProcessSortKey::Command, t!("processManager.process")),
+        (RemoteProcessSortKey::Pid, t!("processManager.sortPid")),
+        (RemoteProcessSortKey::Cpu, t!("processManager.sortCpu")),
+        (
+            RemoteProcessSortKey::Memory,
+            t!("processManager.sortMemory"),
+        ),
+        (RemoteProcessSortKey::User, t!("processManager.user")),
+    ];
+    let sort_label = sort_options
+        .iter()
+        .find(|(key, _)| *key == process_state.sort_key)
+        .map(|(_, label)| format!("{} {}", label, process_state.sort_direction.marker()))
+        .unwrap_or_default();
+    let sort_menu = zzclawterm_ui::ZzClawDropdownMenu::new("process-sort")
+        .label(sort_label)
+        .items(sort_options.iter().map(|(key, label)| {
+            let key = *key;
+            zzclawterm_ui::ZzClawMenuItem::action(label.to_string())
+                .checked(key == process_state.sort_key)
+                .on_click(cx.listener(move |panel, _, _, cx| {
+                    panel.with_app(cx, |app, cx| app.toggle_process_sort(key, cx));
+                }))
+        }));
+    let mut header = div()
+        .h(px(32.))
+        .flex_none()
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_1()
+        .border_b_1()
+        .border_color(rgb(palette.border));
+    for (key, label) in sort_options {
+        if key == RemoteProcessSortKey::User && mode != ProcessDisplayMode::Wide {
+            continue;
+        }
+        let width = match key {
+            RemoteProcessSortKey::Command => None,
+            RemoteProcessSortKey::Pid => Some(72.),
+            RemoteProcessSortKey::Cpu | RemoteProcessSortKey::Memory => Some(64.),
+            RemoteProcessSortKey::User => Some(72.),
+        };
+        header = header.child(process_column(
+            width,
+            process_sort_button(
+                palette,
+                format!("process-sort-{}", key.label()),
+                label,
+                key == process_state.sort_key,
+                process_state.sort_direction,
+                matches!(
+                    key,
+                    RemoteProcessSortKey::Pid
+                        | RemoteProcessSortKey::Cpu
+                        | RemoteProcessSortKey::Memory
+                ),
+                cx.listener(move |panel, _, _, cx| {
+                    panel.with_app(cx, |app, cx| app.toggle_process_sort(key, cx));
+                }),
+            ),
+        ));
+    }
+    header = header.child(process_column(Some(28.), div()));
+    let count_label = if process_state.search_draft.trim().is_empty() {
+        process_state.items.len().to_string()
+    } else {
+        format!("{} / {}", total_filtered, process_state.items.len())
+    };
     div()
         .flex()
         .flex_col()
         .size_full()
+        .min_w_0()
         .relative()
         .overflow_hidden()
         .p(px(10.))
-        .gap(px(10.))
+        .gap_2()
         .bg(chrome.transparent_surface)
         .child(
             div()
@@ -259,144 +319,41 @@ pub(in crate::features::pages::remote) fn processes_panel(
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(div().flex_1().min_w_0().child(process_search_input))
                 .child(
                     div()
-                        .h(px(32.))
-                        .px_2()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgba((palette.link << 8) | 0x4d))
-                        .bg(rgba((palette.link << 8) | 0x1a))
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(rgb(palette.link))
-                                .child(count_label),
-                        ),
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .child(process_search_input),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.))
+                        .text_color(rgb(palette.text_muted))
+                        .child(count_label),
                 ),
         )
+        .child(div().h(px(28.)).flex_none().min_w_0().child(sort_menu))
         .child(
             div()
                 .flex_1()
                 .min_h_0()
+                .min_w_0()
                 .overflow_hidden()
-                .rounded_md()
-                .border_1()
-                .border_color(rgb(palette.border))
                 .flex()
                 .flex_col()
-                .child(
-                    // Match Tauri's responsive columns and hide the header entirely in compact mode.
-                    div().when(mode != ProcessDisplayMode::Compact, |this| {
-                        let cols = match mode {
-                            ProcessDisplayMode::Narrow => 4,
-                            ProcessDisplayMode::Medium => 5,
-                            _ => 6,
-                        };
-                        this.h(px(32.))
-                            .flex_none()
-                            .px_2()
-                            .border_b_1()
-                            .border_color(rgb(palette.border))
-                            .grid()
-                            .grid_cols(cols)
-                            .gap_1()
-                            .items_center()
-                            .overflow_hidden()
-                            .child(process_sort_button(
-                                palette,
-                                "process-sort-command",
-                                t!("processManager.process"),
-                                process_state.sort_key == RemoteProcessSortKey::Command,
-                                process_state.sort_direction,
-                                false,
-                                cx.listener(|panel, _, _, cx| {
-                                    panel.with_app(cx, |this, cx| {
-                                        this.toggle_process_sort(RemoteProcessSortKey::Command, cx);
-                                    });
-                                }),
-                            ))
-                            .child(process_sort_button(
-                                palette,
-                                "process-sort-pid",
-                                t!("processManager.sortPid"),
-                                process_state.sort_key == RemoteProcessSortKey::Pid,
-                                process_state.sort_direction,
-                                true,
-                                cx.listener(|panel, _, _, cx| {
-                                    panel.with_app(cx, |this, cx| {
-                                        this.toggle_process_sort(RemoteProcessSortKey::Pid, cx);
-                                    });
-                                }),
-                            ))
-                            .child(process_sort_button(
-                                palette,
-                                "process-sort-cpu",
-                                t!("processManager.sortCpu"),
-                                process_state.sort_key == RemoteProcessSortKey::Cpu,
-                                process_state.sort_direction,
-                                true,
-                                cx.listener(|panel, _, _, cx| {
-                                    panel.with_app(cx, |this, cx| {
-                                        this.toggle_process_sort(RemoteProcessSortKey::Cpu, cx);
-                                    });
-                                }),
-                            ))
-                            .when(
-                                !matches!(
-                                    mode,
-                                    ProcessDisplayMode::Narrow | ProcessDisplayMode::Compact
-                                ),
-                                |this| {
-                                    this.child(process_sort_button(
-                                        palette,
-                                        "process-sort-memory",
-                                        t!("processManager.sortMemory"),
-                                        process_state.sort_key == RemoteProcessSortKey::Memory,
-                                        process_state.sort_direction,
-                                        true,
-                                        cx.listener(|panel, _, _, cx| {
-                                            panel.with_app(cx, |this, cx| {
-                                                this.toggle_process_sort(
-                                                    RemoteProcessSortKey::Memory,
-                                                    cx,
-                                                );
-                                            });
-                                        }),
-                                    ))
-                                },
-                            )
-                            .when(mode == ProcessDisplayMode::Wide, |this| {
-                                this.child(process_sort_button(
-                                    palette,
-                                    "process-sort-user",
-                                    t!("processManager.user"),
-                                    process_state.sort_key == RemoteProcessSortKey::User,
-                                    process_state.sort_direction,
-                                    false,
-                                    cx.listener(|panel, _, _, cx| {
-                                        panel.with_app(cx, |this, cx| {
-                                            this.toggle_process_sort(
-                                                RemoteProcessSortKey::User,
-                                                cx,
-                                            );
-                                        });
-                                    }),
-                                ))
-                            })
-                            .child(div().w_full())
-                    }),
+                .when(
+                    matches!(mode, ProcessDisplayMode::Medium | ProcessDisplayMode::Wide),
+                    |this| this.child(header),
                 )
                 .child(
                     div()
-                        .id(SharedString::from("process-list-scroll"))
+                        .id("process-list-scroll")
                         .relative()
                         .flex_1()
                         .min_h_0()
+                        .min_w_0()
                         .overflow_hidden()
                         .child(rows)
                         .when(total_filtered > 0, |this| {

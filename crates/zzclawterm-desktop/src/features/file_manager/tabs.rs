@@ -1,13 +1,12 @@
-use gpui::{Context, div, prelude::*};
-use rust_i18n::t;
-use zzclawterm_core::{FileManagerPaneRestore, FileManagerPaneSide, FileManagerSourceRestore};
-use zzclawterm_transport::RemoteFilePath;
-
 use super::pane::{PaneEndpoint, PaneId};
 use super::state::FileManagerSidebarRestore;
 use super::workspace::{FileManagerSeed, FileManagerWorkspace};
 use crate::features::ZzClawTermApp;
-use crate::models::{MainMode, NavItem, PanelSide, WorkspaceTabId};
+use crate::models::{NavItem, PanelSide, WorkspaceTabId};
+use gpui::{Context, div, prelude::*};
+use rust_i18n::t;
+use zzclawterm_core::{FileManagerPaneRestore, FileManagerPaneSide, FileManagerSourceRestore};
+use zzclawterm_files::sftp::RemoteFilePath;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn open_file_manager_tab(
@@ -86,7 +85,7 @@ impl ZzClawTermApp {
         let endpoint = if self
             .session
             .file_browser_backend_support_for_session(session_id)
-            == Some(zzclawterm_transport::FileBrowserBackendKind::Local)
+            == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Local)
         {
             PaneEndpoint::Local
         } else {
@@ -156,7 +155,6 @@ impl ZzClawTermApp {
         self.shell.workspace.focused_group = self.shell.sync_terminal_windows_active_tab(&key);
         self.shell.set_pane_focus_mode(false);
         self.shell.navigation.selected_nav = NavItem::Workspace;
-        self.shell.navigation.main_mode = MainMode::Workspace;
         self.shell.request_session_tab_scroll_into_view();
         self.close_action_link_menu(cx);
         self.collapse_sidebars_for_file_manager(cx);
@@ -197,7 +195,7 @@ impl ZzClawTermApp {
         let endpoint = if self
             .session
             .file_browser_backend_support_for_session(session_id)
-            == Some(zzclawterm_transport::FileBrowserBackendKind::Local)
+            == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Local)
         {
             PaneEndpoint::Local
         } else {
@@ -587,7 +585,7 @@ impl ZzClawTermApp {
             if self
                 .session
                 .file_browser_backend_support_for_session(session_id)
-                == Some(zzclawterm_transport::FileBrowserBackendKind::Local)
+                == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Local)
             {
                 continue;
             }
@@ -622,6 +620,58 @@ impl ZzClawTermApp {
         self.file_manager
             .workspace(id)
             .map(|view| view.into_any_element())
+            .unwrap_or_else(|| div().into_any_element())
+    }
+}
+
+impl ZzClawTermApp {
+    pub(in crate::features) fn session_is_sftp_only(&self, id: &str) -> bool {
+        self.session
+            .metadata(id)
+            .and_then(|metadata| metadata.ssh_config.as_ref())
+            .is_some_and(|config| {
+                config.effective_runtime_mode()
+                    == zzclawterm_core::models::ssh_runtime::SshRuntimeMode::Sftp
+            })
+    }
+
+    pub(in crate::features) fn ensure_sftp_session_view(
+        &mut self,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.file_manager
+            .sftp_workspaces
+            .retain(|id, _| self.session.has_session(id));
+        if !self.session_is_sftp_only(id) || self.file_manager.sftp_workspaces.contains_key(id) {
+            return;
+        }
+        if let Some(metadata) = self.session.metadata_mut(id) {
+            metadata.ai_execution_profile = zzclawterm_core::AiExecutionProfile::Disabled;
+        }
+        let app = cx.entity();
+        let seed = FileManagerSeed {
+            left: PaneEndpoint::Session(id.to_string()),
+            left_path: None,
+            right: PaneEndpoint::Local,
+            right_path: None,
+        };
+        let view = cx.new(|cx| {
+            let mut workspace = FileManagerWorkspace::new(app, format!("sftp-{id}"), seed, cx);
+            workspace.single_pane = true;
+            workspace
+        });
+        self.file_manager
+            .sftp_workspaces
+            .insert(id.to_string(), view);
+        self.refresh_file_manager_pane(format!("sftp-{id}"), PaneId::Left, cx);
+    }
+
+    pub(in crate::features) fn sftp_session_content(&self, id: &str) -> gpui::AnyElement {
+        self.file_manager
+            .sftp_workspaces
+            .get(id)
+            .map(|view| view.clone().into_any_element())
             .unwrap_or_else(|| div().into_any_element())
     }
 }

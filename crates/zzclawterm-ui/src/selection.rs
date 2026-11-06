@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::sizing::{form_control_height, form_control_size};
@@ -17,6 +18,28 @@ use gpui_kit::component::{
 type ZzClawToggleHandler = Box<dyn Fn(&bool, &mut Window, &mut App)>;
 type ZzClawIndexSelectHandler = Box<dyn Fn(&usize, &mut Window, &mut App)>;
 type ZzClawSelectOpenHandler = Box<dyn Fn(&mut Window, &mut App)>;
+
+#[derive(Default)]
+struct SelectPopupRegistry(HashMap<gpui::WindowId, Vec<gpui::WeakEntity<ZzClawSelectState>>>);
+
+impl gpui::Global for SelectPopupRegistry {}
+
+pub(crate) fn select_popup_is_active(window: &Window, cx: &mut App) -> bool {
+    let registry = cx.default_global::<SelectPopupRegistry>();
+    registry.0.retain(|_, entries| {
+        entries.retain(|select| select.upgrade().is_some());
+        !entries.is_empty()
+    });
+    let selects = registry
+        .0
+        .get(&window.window_handle().window_id())
+        .cloned()
+        .unwrap_or_default();
+    selects
+        .iter()
+        .filter_map(|select| select.upgrade())
+        .any(|select| select.read(cx).is_menu_focused(window, cx))
+}
 
 #[derive(IntoElement)]
 pub struct ZzClawSwitch {
@@ -198,6 +221,7 @@ pub struct ZzClawSelectOption {
     search_text: Option<SharedString>,
     subtitle: Option<SharedString>,
     font_family: Option<SharedString>,
+    disabled: bool,
 }
 
 impl ZzClawSelectOption {
@@ -208,7 +232,14 @@ impl ZzClawSelectOption {
             search_text: None,
             subtitle: None,
             font_family: None,
+            disabled: false,
         }
+    }
+
+    /// Disable new selection while retaining an existing saved value for display.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
     }
 
     pub fn search_text(mut self, search_text: impl Into<SharedString>) -> Self {
@@ -243,6 +274,7 @@ struct ZzClawSelectItem {
     search_text: Option<SharedString>,
     subtitle: Option<SharedString>,
     font_family: Option<SharedString>,
+    disabled: bool,
 }
 
 impl ZzClawSelectItem {
@@ -278,6 +310,10 @@ impl ZzClawSelectItem {
 }
 
 impl gpui_kit::component::select::SelectItem for ZzClawSelectItem {
+    fn disabled(&self) -> bool {
+        self.disabled
+    }
+
     type Value = String;
 
     fn title(&self) -> SharedString {
@@ -530,6 +566,7 @@ impl ZzClawSelectState {
                 search_text: option.search_text.clone(),
                 subtitle: option.subtitle.clone(),
                 font_family: option.font_family.clone(),
+                disabled: option.disabled,
             })
             .collect()
     }
@@ -572,6 +609,16 @@ impl ZzClawSelectState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<SelectState<SearchableVec<ZzClawSelectItem>>> {
+        let weak = cx.entity().downgrade();
+        let entries = cx
+            .default_global::<SelectPopupRegistry>()
+            .0
+            .entry(window.window_handle().window_id())
+            .or_default();
+        entries.retain(|select| select.upgrade().is_some());
+        if !entries.contains(&weak) {
+            entries.push(weak);
+        }
         if let Some(state) = self.state.clone() {
             return state;
         }
@@ -737,6 +784,60 @@ mod tests {
     use super::{ZzClawSelectOption, ZzClawSelectState};
     use crate::sizing::{NYA_FORM_CONTROL_HEIGHT_PX, form_control_size};
     use gpui_kit::component::select::SelectItem as _;
+
+    #[gpui::test]
+    fn popup_query_tracks_select_close_rebuild_and_window_isolation(cx: &mut TestAppContext) {
+        use crate::menu::nya_popup_is_active;
+        use gpui::{point, px};
+        cx.update(gpui_kit::init);
+        let (select, first) = cx.add_window_view(|_, cx| {
+            ZzClawSelectState::new(cx, vec![ZzClawSelectOption::new("one", "One")], None)
+        });
+        first.run_until_parked();
+        first.update(|window, cx| {
+            _ = window.draw(cx);
+            assert!(!nya_popup_is_active(window, cx));
+        });
+        first.simulate_click(point(px(10.), px(10.)), Default::default());
+        first.run_until_parked();
+        first.update(|window, cx| {
+            _ = window.draw(cx);
+            assert!(nya_popup_is_active(window, cx));
+        });
+        // The same global registry is queried from another window.
+        let handle = first.add_window(|_, _| gpui::EmptyView);
+        let mut second = gpui::VisualTestContext::from_window(handle.into(), first);
+        second.update(|window, cx| assert!(!nya_popup_is_active(window, cx)));
+        first.simulate_keystrokes("escape");
+        first.run_until_parked();
+        first.update(|window, cx| {
+            _ = window.draw(cx);
+            assert!(!nya_popup_is_active(window, cx));
+        });
+        first.simulate_click(point(px(10.), px(10.)), Default::default());
+        first.run_until_parked();
+        first.update(|window, cx| {
+            assert!(nya_popup_is_active(window, cx));
+            select.update(cx, |select, cx| select.dismiss_menu(cx));
+            assert!(!nya_popup_is_active(window, cx));
+            _ = window.draw(cx);
+            assert!(
+                !nya_popup_is_active(window, cx),
+                "rebuilt component is closed"
+            );
+        });
+        first.simulate_click(point(px(10.), px(10.)), Default::default());
+        first.run_until_parked();
+        first.update(|window, cx| assert!(nya_popup_is_active(window, cx)));
+        let weak = select.downgrade();
+        drop(select);
+        first.update(|window, _| window.remove_window());
+        first.run_until_parked();
+        second.update(|window, cx| {
+            assert!(weak.upgrade().is_none());
+            assert!(!nya_popup_is_active(window, cx));
+        });
+    }
 
     #[test]
     fn selected_value_tracks_pre_render_updates() {

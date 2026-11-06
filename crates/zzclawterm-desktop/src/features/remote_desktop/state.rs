@@ -40,6 +40,8 @@ pub(in crate::features) struct RemoteDesktopFeatureState {
     wake_rx: Option<UnboundedReceiver<()>>,
     /// True while the periodic-maintenance clock task is alive.
     periodic_clock_armed: bool,
+    #[cfg(windows)]
+    pub(super) native_shutting_down: bool,
 }
 
 #[derive(Clone)]
@@ -64,6 +66,8 @@ pub(super) struct RemoteDesktopSessionState {
     pub(super) cursor_position: CursorPosition,
     pub(super) cursor_visible: bool,
     pub(super) cursor_texture: Option<DynamicTexture>,
+    pub(super) cursor_repaint_pending: bool,
+    pub(super) last_cursor_repaint_at: Option<Instant>,
     pub(super) certificate_request: Option<RdpCertificatePrompt>,
     pub(super) vnc_key_request: Option<(
         zzclawterm_remote_desktop::VncServerKeyRequest,
@@ -87,8 +91,21 @@ pub(super) struct RemoteDesktopSessionState {
     pub(super) pending_resize: Option<(RdpDisplayMetrics, Instant)>,
     pub(super) dynamic_resize_disabled: bool,
     pub(super) viewport: Option<Bounds<Pixels>>,
+    /// Window scale factor that `viewport` was measured with, so a reconnect can
+    /// ask for the same desktop without waiting for a fresh layout.
+    pub(super) viewport_scale_factor: f32,
+    /// A fit-window session waiting for its panel to be measured.
+    ///
+    /// This is the launch request, not a second copy of the live configuration:
+    /// it is taken by whoever starts the helper, and it is dropped if the tab
+    /// goes away first.
+    pub(super) deferred_start: Option<(RdpSessionConfig, Instant)>,
     pub(super) reconnect_attempts: u32,
     pub(super) reconnect_at: Option<Instant>,
+    #[cfg(windows)]
+    pub(super) native_rdp_config: Option<RdpSessionConfig>,
+    #[cfg(windows)]
+    pub(super) native_rdp: Option<zzclawterm_windows_rdp::NativeRdpControl>,
 }
 
 impl Default for RemoteDesktopSessionState {
@@ -103,6 +120,8 @@ impl Default for RemoteDesktopSessionState {
             cursor_position: CursorPosition::default(),
             cursor_visible: true,
             cursor_texture: None,
+            cursor_repaint_pending: false,
+            last_cursor_repaint_at: None,
             certificate_request: None,
             vnc_key_request: None,
             vnc_trust_previous: None,
@@ -123,13 +142,40 @@ impl Default for RemoteDesktopSessionState {
             pending_resize: None,
             dynamic_resize_disabled: false,
             viewport: None,
+            viewport_scale_factor: 1.0,
+            deferred_start: None,
             reconnect_attempts: 0,
             reconnect_at: None,
+            #[cfg(windows)]
+            native_rdp_config: None,
+            #[cfg(windows)]
+            native_rdp: None,
         }
     }
 }
 
 impl RemoteDesktopFeatureState {
+    #[cfg(windows)]
+    pub(in crate::features) fn take_native_hosts_for_shutdown(
+        &mut self,
+    ) -> Vec<zzclawterm_windows_rdp::NativeRdpControl> {
+        // Latch before taking owners: COM shutdown may pump the UI queue and
+        // re-enter maintenance or complete an asynchronous reconnect.
+        self.native_shutting_down = true;
+        self.sessions
+            .values_mut()
+            .filter_map(|session| {
+                session.native_rdp_config = None;
+                if session.deferred_start.as_ref().is_some_and(|(config, _)| {
+                    config.backend == zzclawterm_remote_desktop::RdpBackend::Windows
+                }) {
+                    session.deferred_start = None;
+                }
+                session.native_rdp.take()
+            })
+            .collect()
+    }
+
     pub(in crate::features) fn release_inactive_textures(&mut self, active: &str) {
         for (id, session) in &mut self.sessions {
             if id == active {
@@ -141,6 +187,11 @@ impl RemoteDesktopFeatureState {
             if let Some(texture) = session.cursor_texture.take() {
                 self.pending_texture_removals.push(texture);
             }
+            session.cursor_repaint_pending = false;
+            #[cfg(windows)]
+            if let Some(native) = session.native_rdp.as_mut() {
+                native.set_visible(false);
+            }
             session.texture_dirty = session.framebuffer.is_some();
         }
         if !self.pending_texture_removals.is_empty() {
@@ -148,9 +199,34 @@ impl RemoteDesktopFeatureState {
         }
     }
 
-    pub(in crate::features) fn has_active_sessions(&self) -> bool {
-        !self.sessions.is_empty()
+    pub(in crate::features) fn blocks_configuration_replacement(&self) -> bool {
+        self.restore_pending.is_some()
+            || !self.prepared_routes.is_empty()
+            || !self.routes.is_empty()
+            || self.sessions.iter().any(|(id, session)| {
+                let pending = session.deferred_start.is_some()
+                    || session.reconnect_at.is_some()
+                    || session.certificate_request.is_some()
+                    || session.vnc_key_request.is_some();
+                #[cfg(windows)]
+                let pending =
+                    pending || session.native_rdp.is_some() || session.native_rdp_config.is_some();
+                pending
+                    || matches!(
+                        session.state,
+                        RemoteDesktopViewState::Connecting
+                            | RemoteDesktopViewState::Connected
+                            | RemoteDesktopViewState::Reconnecting
+                            | RemoteDesktopViewState::Disconnecting
+                    )
+                    // A terminal state can arrive before the helper is reaped.
+                    // Production teardown removes the manager record through
+                    // close_detached; until then it still owns backend resources.
+                    || self.manager.state(id).is_some()
+                    || self.vnc_manager.state(id).is_some()
+            })
     }
+
     pub(in crate::features) fn new(focus: FocusHandle) -> Self {
         let (wake, wake_rx) = EventWake::new();
         let manager = Arc::new(RdpSessionManager::new());
@@ -187,6 +263,8 @@ impl RemoteDesktopFeatureState {
             wake,
             wake_rx: Some(wake_rx),
             periodic_clock_armed: false,
+            #[cfg(windows)]
+            native_shutting_down: false,
         }
     }
 
@@ -237,15 +315,6 @@ impl RemoteDesktopFeatureState {
         &self.focus
     }
 
-    pub(in crate::features) fn create_rdp_session(
-        &mut self,
-        config: RdpSessionConfig,
-    ) -> Result<String, RdpError> {
-        let session_id = self.manager.create_session(config)?;
-        self.insert_connecting(session_id.clone());
-        Ok(session_id)
-    }
-
     pub(in crate::features) fn create_vnc_session(
         &mut self,
         config: VncSessionConfig,
@@ -291,8 +360,19 @@ impl RemoteDesktopFeatureState {
     }
 
     pub(super) fn insert_connecting(&mut self, session_id: String) {
-        self.sessions
-            .insert(session_id, RemoteDesktopSessionState::default());
+        let measured = self
+            .sessions
+            .get(&session_id)
+            .map(|session| (session.viewport, session.viewport_scale_factor));
+        let mut session = RemoteDesktopSessionState::default();
+        if let Some((viewport, viewport_scale_factor)) = measured {
+            // The panel belongs to the tab, not to the connection: a failed or
+            // restarted session is still shown in the same place, so forgetting
+            // the measurement would make the next connect guess again.
+            session.viewport = viewport;
+            session.viewport_scale_factor = viewport_scale_factor;
+        }
+        self.sessions.insert(session_id, session);
     }
 
     pub(in crate::features) fn insert_disconnected(&mut self, session_id: String) {
@@ -308,6 +388,37 @@ mod tests {
     use zzclawterm_remote_desktop::{RdpErrorKind, RemoteDesktopViewState};
 
     use super::RemoteDesktopFeatureState;
+
+    #[test]
+    fn configuration_replacement_ignores_display_only_tabs_but_protects_pending_work() {
+        let cx = gpui::TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let focus = cx.update(|cx| cx.focus_handle());
+        let mut state = RemoteDesktopFeatureState::new(focus);
+        state.insert_disconnected("disconnected".into());
+        state.insert_failed_session(
+            "failed".into(),
+            RdpErrorKind::HelperMissing,
+            "fixture".into(),
+        );
+        assert!(!state.blocks_configuration_replacement());
+        state.sessions.get_mut("failed").unwrap().reconnect_at = Some(std::time::Instant::now());
+        assert!(state.blocks_configuration_replacement());
+        state.sessions.get_mut("failed").unwrap().reconnect_at = None;
+        assert!(!state.blocks_configuration_replacement());
+        for view in [
+            RemoteDesktopViewState::Connecting,
+            RemoteDesktopViewState::Connected,
+            RemoteDesktopViewState::Reconnecting,
+            RemoteDesktopViewState::Disconnecting,
+        ] {
+            state.sessions.get_mut("failed").unwrap().state = view;
+            assert!(state.blocks_configuration_replacement(), "{view:?}");
+        }
+        state.sessions.get_mut("failed").unwrap().state = RemoteDesktopViewState::Failed;
+        state.restore_pending = Some("failed".into());
+        assert!(state.blocks_configuration_replacement());
+    }
 
     #[test]
     fn removing_the_last_session_wakes_disposal_without_protocol_events() {

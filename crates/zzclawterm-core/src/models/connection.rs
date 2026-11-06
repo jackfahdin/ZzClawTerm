@@ -3,13 +3,14 @@ use serde::{Deserialize, Serialize};
 use super::{
     SavedConnection, default_backspace_mode_serial, default_backspace_mode_ssh,
     default_backspace_mode_telnet, default_baud_rate, default_data_bits, default_parity,
-    default_rdp_certificate_policy, default_rdp_clipboard_mode, default_rdp_color_depth,
-    default_rdp_display_mode, default_rdp_height, default_rdp_port, default_rdp_reconnect_attempts,
-    default_rdp_width, default_sftp_shell_detection_timeout_ms, default_ssh_port, default_ssh_user,
-    default_stop_bits, default_telnet_auto_login_timeout_ms, default_telnet_enter_mode,
-    default_telnet_port, default_true, default_vnc_port, default_vnc_reconnect_attempts,
-    default_vnc_scale_mode, default_vnc_security_mode, is_default_sftp_shell_detection_timeout_ms,
-    is_default_telnet_auto_login_config,
+    default_rdp_backend, default_rdp_certificate_policy, default_rdp_clipboard_mode,
+    default_rdp_color_depth, default_rdp_display_mode, default_rdp_height, default_rdp_port,
+    default_rdp_reconnect_attempts, default_rdp_width, default_sftp_shell_detection_timeout_ms,
+    default_ssh_port, default_ssh_user, default_stop_bits, default_telnet_auto_login_timeout_ms,
+    default_telnet_enter_mode, default_telnet_port, default_true, default_vnc_port,
+    default_vnc_reconnect_attempts, default_vnc_scale_mode, default_vnc_security_mode,
+    deserialize_rdp_backend, is_default_sftp_shell_detection_timeout_ms,
+    is_default_telnet_auto_login_config, serialize_rdp_backend,
 };
 
 /// Default outbound idle interval for Telnet NOP keepalive, in seconds.
@@ -600,6 +601,13 @@ pub enum ConnectionType {
         username: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         domain: String,
+        /// Explicit client: `builtin`, `windows`, or external `mstsc`; unknown names are retained.
+        #[serde(
+            default = "default_rdp_backend",
+            deserialize_with = "deserialize_rdp_backend",
+            serialize_with = "serialize_rdp_backend"
+        )]
+        backend: String,
         #[serde(default)]
         security: RdpSecuritySettings,
         #[serde(default)]
@@ -636,6 +644,11 @@ pub struct RdpSecuritySettings {
     pub use_nla: bool,
     #[serde(default = "default_rdp_certificate_policy")]
     pub certificate_policy: String,
+    /// System authentication marker for the explicitly selected Windows backend.
+    /// Older data may omit it; runtime policy supplies it without changing stored data.
+    /// Unknown modes are preserved and rejected, never inferred from fingerprint policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_authentication: Option<String>,
     /// Request an administrative session. The server determines the actual
     /// session assignment; this does not guarantee access to a console session.
     #[serde(default)]
@@ -647,6 +660,7 @@ impl Default for RdpSecuritySettings {
         Self {
             use_nla: true,
             certificate_policy: default_rdp_certificate_policy(),
+            windows_authentication: None,
             administrative_session: false,
         }
     }
@@ -711,6 +725,7 @@ impl Default for RdpDisplaySettings {
     }
 }
 
+/// Retained for saved-connection and backup compatibility; runtime always enables RDP clipboard.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RdpClipboardSettings {
     #[serde(default = "default_rdp_clipboard_mode")]
@@ -1005,4 +1020,27 @@ where
             .map(|number| number.clamp(4, 64) as u32)
             .or_else(|| value.as_u64().map(|number| number.clamp(4, 64) as u32))
     }))
+}
+
+#[cfg(test)]
+mod rdp_clipboard_compatibility_tests {
+    use super::RdpClipboardSettings;
+
+    #[test]
+    fn legacy_clipboard_modes_round_trip_and_new_settings_enable_text_and_files() {
+        assert_eq!(RdpClipboardSettings::default().mode, "text-and-files");
+        let missing: RdpClipboardSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(missing.mode, "text-and-files");
+        for mode in [
+            "disabled",
+            "off",
+            "text-only",
+            "text-and-files",
+            "future-mode",
+        ] {
+            let value = serde_json::json!({"mode": mode});
+            let settings: RdpClipboardSettings = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(settings).unwrap(), value);
+        }
+    }
 }

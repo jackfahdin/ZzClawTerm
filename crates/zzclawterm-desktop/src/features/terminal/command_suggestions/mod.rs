@@ -4,28 +4,34 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zzclawterm_ui::{ZzClawScrollable, ZzClawTooltip};
 
+use crate::features::commands::completion_runtime::{CompletionQuery, CompletionRuntime};
 use gpui::{
     Bounds, Context, FontWeight, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, Pixels,
     SharedString, div, prelude::*, px, rgb, rgba, svg,
 };
-use zzclawterm_core::{
-    CommandHistoryEntry, QuickCommand, TerminalInputState, apply_terminal_input_data,
-    can_suggest_from_tracked_command, get_tracked_command, manual_empty_command_suggestions,
-    search_command_sources, terminal_input_tracker_below_min_chars,
+use zzclawterm_core::completion::types::{
+    CandidateKind, CandidateSource, CompletionCandidate, CompletionMode, CompletionResult,
+    CompletionScope, ShellCommandContext, ShellDialect,
 };
-use zzclawterm_store::{StoreDomain, store_request};
+use zzclawterm_core::terminal::editing::{EDIT_CONFIRMATION_TIMEOUT, EditPhase};
+use zzclawterm_core::{QuickCommand, TerminalInputState, terminal_input_tracker_below_min_chars};
+use zzclawterm_terminal::editing::resolve_input;
 
 use crate::features::ZzClawTermApp;
+use crate::features::terminal::editing_state::SuggestionFillRequest;
 use crate::features::terminal::terminal_runtime::TERMINAL_INPUT_LATENCY_WINDOW;
 use crate::features::terminal::terminal_surface_entity::terminal_snapshot_anchor_row_for_display_offset;
 use crate::models::{CommandSuggestionItem, CommandSuggestionState};
 use crate::terminal::terminal_byte_index_for_cell_col;
 
+mod fill;
+#[cfg(test)]
+mod fill_tests;
 mod helpers;
 
 #[cfg(test)]
 mod dismissal_tests;
-
+use self::fill::{SuggestionFill, SuggestionSubmitResult, plan_suggestion_fill};
 use self::helpers::command_suggestion_highlight_parts;
 
 const COMMAND_SUGGESTION_INPUT_SLOW_THRESHOLD: Duration = Duration::from_millis(4);
@@ -86,11 +92,15 @@ struct CommandSuggestionRefreshTiming {
 struct CommandSuggestionSearchRequest {
     request_id: u64,
     session_id: String,
+    input_version: u64,
+    sync_revision: u64,
     pattern: String,
     pattern_chars: usize,
     min_chars: usize,
     max_chars: usize,
-    history: Arc<[CommandHistoryEntry]>,
+    mode: CompletionMode,
+    context: ShellCommandContext,
+    completion: CompletionRuntime,
     quick_commands: Arc<[QuickCommand]>,
     started_at: Instant,
     popup_visible_at_start: bool,
@@ -148,15 +158,15 @@ fn command_history_input_update(state: &mut TerminalInputState, text: &str) -> O
     submitted
 }
 
-fn command_suggestion_input(command: &str, execute: bool) -> (Vec<u8>, Option<String>) {
-    let mut payload = format!("\u{05}\u{15}{command}");
-    if execute {
-        payload.push('\r');
-    }
-    (payload.into_bytes(), execute.then(|| command.to_string()))
-}
-
 impl ZzClawTermApp {
+    pub(in crate::features) fn completion_has_marked_shell(&self, session_id: &str) -> bool {
+        self.terminal
+            .editing
+            .sessions
+            .get(session_id)
+            .is_some_and(|state| state.observed_anchor.flatten().is_some())
+    }
+
     /// Whether the active session's program is driving the alternate screen.
     ///
     /// Full-screen programs such as vim, less, top and nano own the keyboard
@@ -174,6 +184,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn dismiss_command_suggestions(&mut self, cx: &mut Context<Self>) {
+        self.terminal.assist.command_suggestion_mode = CompletionMode::Token;
         self.terminal.assist.command_suggestion_search_gen = self
             .terminal
             .assist
@@ -191,6 +202,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn clear_command_suggestion_draft(&mut self, cx: &mut Context<Self>) {
+        self.terminal.assist.command_suggestion_mode = CompletionMode::Token;
         self.terminal.assist.command_suggestion_search_gen = self
             .terminal
             .assist
@@ -267,6 +279,14 @@ impl ZzClawTermApp {
             finish!("empty_text", 0);
         }
 
+        // Typing invalidates an explicit choice before the debounced search can
+        // publish its replacement. Enter/Tab must not accept the old selection.
+        if let Some(popup) = self.terminal.assist.command_suggestions.as_mut()
+            && popup.selected_index.take().is_some()
+        {
+            cx.notify();
+        }
+
         if self.terminal.assist.command_suggestions_suppressed {
             let hide_started_at = Instant::now();
             self.terminal.assist.command_suggestion_search_gen = self
@@ -287,8 +307,17 @@ impl ZzClawTermApp {
             .summary()
             .interaction_command_suggestion_min_chars
             .max(1) as usize;
-        let below_min_chars =
-            terminal_input_tracker_below_min_chars(self.terminal.editing.assist_input(), min_chars);
+        let below_min_chars = self.terminal.assist.command_suggestion_mode == CompletionMode::Token
+            && terminal_input_tracker_below_min_chars(
+                self.terminal.editing.assist_input(),
+                min_chars,
+            )
+            && !self
+                .terminal
+                .editing
+                .assist_input()
+                .value
+                .contains(char::is_whitespace);
         timing.min_chars = min_chars_started_at.elapsed();
         if below_min_chars {
             let hide_started_at = Instant::now();
@@ -313,7 +342,7 @@ impl ZzClawTermApp {
         let pager_input =
             command_suggestion_input_obvious_pager_prefix(self.terminal.editing.assist_input());
         timing.pager = pager_started_at.elapsed();
-        if pager_input {
+        if pager_input && self.terminal.assist.command_suggestion_mode == CompletionMode::Token {
             let hide_started_at = Instant::now();
             self.terminal.assist.command_suggestion_search_gen = self
                 .terminal
@@ -363,6 +392,16 @@ impl ZzClawTermApp {
         delay: Duration,
         cx: &mut Context<Self>,
     ) {
+        let mode = self.terminal.assist.command_suggestion_mode;
+        self.schedule_command_suggestion_search_mode(delay, mode, cx);
+    }
+
+    fn schedule_command_suggestion_search_mode(
+        &mut self,
+        delay: Duration,
+        mode: CompletionMode,
+        cx: &mut Context<Self>,
+    ) {
         self.terminal.assist.command_suggestion_search_gen = self
             .terminal
             .assist
@@ -392,28 +431,23 @@ impl ZzClawTermApp {
                         );
                         return None;
                     }
-                    this.prepare_command_suggestion_search(request_id, cx)
+                    this.prepare_command_suggestion_search(request_id, mode, cx)
                 });
                 let Ok(Some(request)) = request else {
                     return;
                 };
                 let search_started_at = Instant::now();
-                let pattern = request.pattern.clone();
-                let min_chars = request.min_chars;
-                let max_chars = request.max_chars;
-                let history = request.history.clone();
-                let quick_commands = request.quick_commands.clone();
-                let search_task = cx.background_spawn(async move {
-                    search_command_sources(
-                        &history,
-                        &quick_commands,
-                        &pattern,
-                        12,
-                        Some(min_chars),
-                        Some(max_chars),
-                    )
-                });
-                let results = search_task.await;
+                let results = request
+                    .completion
+                    .search(CompletionQuery {
+                        context: request.context.clone(),
+                        input: request.pattern.clone(),
+                        mode: request.mode,
+                        quick: request.quick_commands.clone(),
+                        min: request.min_chars,
+                        max: request.max_chars,
+                    })
+                    .await;
                 let search_duration = search_started_at.elapsed();
                 let _ = this.update(cx, |this, cx| {
                     this.publish_command_suggestion_search(request, results, search_duration, cx);
@@ -449,7 +483,7 @@ impl ZzClawTermApp {
             self.hide_command_suggestions_if_present(cx);
             return;
         }
-        let Some(session_id) = self
+        let Some(_session_id) = self
             .session
             .active_id()
             .filter(|session_id| !session_id.is_empty())
@@ -467,75 +501,29 @@ impl ZzClawTermApp {
             return;
         }
 
-        self.terminal.assist.command_suggestion_search_gen = self
-            .terminal
-            .assist
-            .command_suggestion_search_gen
-            .saturating_add(1);
-        self.terminal.assist.command_suggestion_refresh_task = None;
-        let min_chars = self
-            .settings
-            .summary()
-            .interaction_command_suggestion_min_chars
-            .max(1) as usize;
-        let max_chars = self
-            .settings
-            .summary()
-            .interaction_command_suggestion_max_chars
-            .max(min_chars as u32) as usize;
-        let pattern = get_tracked_command(self.terminal.editing.assist_input());
-        let pattern_chars = pattern.chars().count();
-        let results = if pattern.trim().is_empty() {
-            manual_empty_command_suggestions(
-                &self.commands.command_history_snapshot(),
-                &self.commands.quick_commands_snapshot(),
-                12,
-                Some(min_chars),
-                Some(max_chars),
-            )
-        } else if can_suggest_from_tracked_command(self.terminal.editing.assist_input(), &pattern) {
-            search_command_sources(
-                &self.commands.command_history_snapshot(),
-                &self.commands.quick_commands_snapshot(),
-                &pattern,
-                12,
-                Some(min_chars),
-                Some(max_chars),
-            )
-        } else {
-            Vec::new()
-        };
-        if results.is_empty() {
-            self.hide_command_suggestions_if_present(cx);
-            return;
-        }
+        self.terminal.assist.command_suggestion_mode = CompletionMode::History;
+        self.schedule_command_suggestion_search_mode(
+            COMMAND_SUGGESTION_REFRESH_DEBOUNCE,
+            CompletionMode::History,
+            cx,
+        );
+    }
 
-        let (cursor_row, cursor_col) = self.active_terminal_cursor_cell();
-        self.terminal.assist.command_suggestions = Some(CommandSuggestionState {
-            session_id,
-            draft: pattern,
-            items: results
-                .into_iter()
-                .map(|item| CommandSuggestionItem {
-                    command: item.command,
-                    display: item.display,
-                    source: item.source,
-                    score: item.score,
-                    indices: item.indices,
-                })
-                .collect(),
-            selected_index: None,
-            cursor_row,
-            cursor_col,
-        });
-        self.shell
-            .set_status(format!("showing {pattern_chars}-char command suggestions"));
-        cx.notify();
+    fn command_suggestion_context(&self, session: &str) -> ShellCommandContext {
+        self.commands
+            .command_context(session)
+            .cloned()
+            .unwrap_or(ShellCommandContext {
+                scope: CompletionScope::legacy(),
+                dialect: ShellDialect::Unknown,
+                command_events: false,
+            })
     }
 
     fn prepare_command_suggestion_search(
         &mut self,
         request_id: u64,
+        mode: CompletionMode,
         cx: &mut Context<Self>,
     ) -> Option<CommandSuggestionSearchRequest> {
         let started_at = Instant::now();
@@ -604,23 +592,30 @@ impl ZzClawTermApp {
             .interaction_command_suggestion_max_chars
             .max(min_chars as u32) as usize;
         let pattern_started_at = Instant::now();
-        let pattern = get_tracked_command(self.terminal.editing.assist_input());
+        let pattern = self.terminal.editing.assist_input().value.clone();
         let pattern_chars = pattern.chars().count();
         timing.pattern = pattern_started_at.elapsed();
-        if !can_suggest_from_tracked_command(self.terminal.editing.assist_input(), &pattern) {
+        if !command_suggestion_input_can_defer_refresh(self.terminal.editing.assist_input())
+            || (mode == CompletionMode::Token && pattern.is_empty())
+        {
             let hide_started_at = Instant::now();
             self.hide_command_suggestions_if_present(cx);
             timing.hide_popup = hide_started_at.elapsed();
             finish_refresh!("not_eligible", pattern_chars, 0);
         }
-        if pattern_chars < min_chars {
+        if mode == CompletionMode::Token
+            && pattern_chars < min_chars
+            && !pattern.contains(char::is_whitespace)
+        {
             let hide_started_at = Instant::now();
             self.hide_command_suggestions_if_present(cx);
             timing.hide_popup = hide_started_at.elapsed();
             finish_refresh!("below_min_chars", pattern_chars, 0);
         }
         // Pager/search-like prefixes: hide suggestions.
-        if pattern.starts_with('/') || pattern.starts_with('?') || pattern.starts_with(':') {
+        if mode == CompletionMode::Token
+            && (pattern.starts_with('/') || pattern.starts_with('?') || pattern.starts_with(':'))
+        {
             let hide_started_at = Instant::now();
             self.hide_command_suggestions_if_present(cx);
             timing.hide_popup = hide_started_at.elapsed();
@@ -628,12 +623,16 @@ impl ZzClawTermApp {
         }
         Some(CommandSuggestionSearchRequest {
             request_id,
-            session_id,
+            session_id: session_id.clone(),
+            input_version: self.terminal.editing.state()?.model.version,
+            sync_revision: self.sync_input.revision(),
             pattern,
             pattern_chars,
             min_chars,
             max_chars,
-            history: self.commands.command_history_snapshot(),
+            mode,
+            context: self.command_suggestion_context(&session_id),
+            completion: self.commands.completion_runtime(),
             quick_commands: self.commands.quick_commands_snapshot(),
             started_at,
             popup_visible_at_start,
@@ -644,12 +643,21 @@ impl ZzClawTermApp {
     fn publish_command_suggestion_search(
         &mut self,
         request: CommandSuggestionSearchRequest,
-        results: Vec<zzclawterm_core::FuzzyResult>,
+        result: CompletionResult,
         search_duration: Duration,
         cx: &mut Context<Self>,
     ) {
-        if self.terminal.assist.command_suggestion_search_gen != request.request_id
+        if self.commands.completion_runtime().revision() != result.revision
+            || self.command_suggestion_context(&request.session_id).scope != request.context.scope
+            || self.terminal.assist.command_suggestion_search_gen != request.request_id
             || self.session.active_id() != Some(request.session_id.as_str())
+            || self
+                .terminal
+                .editing
+                .state()
+                .map(|state| state.model.version)
+                != Some(request.input_version)
+            || self.sync_input.revision() != request.sync_revision
             || self.terminal.assist.credential_suggestions.is_some()
             || self.is_credential_prompt_input_mode()
             || self.terminal.assist.command_suggestions_suppressed
@@ -657,7 +665,7 @@ impl ZzClawTermApp {
                 .settings
                 .summary()
                 .interaction_command_suggestions_enabled
-            || get_tracked_command(self.terminal.editing.assist_input()) != request.pattern
+            || self.terminal.editing.assist_input().value != request.pattern
         {
             return;
         }
@@ -667,8 +675,14 @@ impl ZzClawTermApp {
             self.hide_command_suggestions_if_present(cx);
             return;
         }
+        let results = result.candidates;
+        let completion_revision = result.revision;
+        let scope = Some(request.context.scope.clone());
+        let mode = request.mode;
         let CommandSuggestionSearchRequest {
             session_id,
+            input_version,
+            sync_revision,
             pattern,
             pattern_chars,
             started_at,
@@ -697,17 +711,16 @@ impl ZzClawTermApp {
         timing.cursor = cursor_started_at.elapsed();
         let update_started_at = Instant::now();
         let next_state = CommandSuggestionState {
+            mode,
+            completion_revision,
+            scope,
             session_id,
-            draft: pattern,
+            input_version,
+            sync_revision,
+            draft: pattern.clone(),
             items: results
                 .into_iter()
-                .map(|item| CommandSuggestionItem {
-                    command: item.command,
-                    display: item.display,
-                    source: item.source,
-                    score: item.score,
-                    indices: item.indices,
-                })
+                .map(|item| completion_suggestion_item(item, &pattern, mode))
                 .collect(),
             selected_index: None,
             cursor_row,
@@ -874,18 +887,38 @@ impl ZzClawTermApp {
             return false;
         }
         let session_id = state.session_id.clone();
+        let accepting = command_suggestion_item_for_selection(&state.items, state.selected_index)
+            .is_some()
+            && matches!(event.keystroke.key.as_str(), "tab" | "enter")
+            && !event.keystroke.modifiers.modified();
         if self.session.active_id() != Some(session_id.as_str())
             || self
                 .terminal_surface_bounds_for_session(Some(&session_id))
                 .is_none()
         {
+            if accepting {
+                return self
+                    .reject_command_suggestion(
+                        "Suggestion session or terminal surface changed; select it again",
+                        cx,
+                    )
+                    .handled();
+            }
             self.terminal.assist.command_suggestions = None;
             cx.notify();
             return false;
         }
         if self.active_terminal_uses_alternate_screen() {
-            // The popup describes the shell line a full-screen program replaced.
-            // Drop it and let the program own every keystroke, including Escape.
+            // A stale shell suggestion must not submit to the TUI. Other keys,
+            // including Escape, still belong to the foreground program.
+            if accepting {
+                return self
+                    .reject_command_suggestion(
+                        "Cannot fill a shell suggestion in the alternate screen",
+                        cx,
+                    )
+                    .handled();
+            }
             self.terminal.assist.command_suggestions = None;
             cx.notify();
             return false;
@@ -893,6 +926,16 @@ impl ZzClawTermApp {
         let keystroke = &event.keystroke;
         if keystroke.modifiers.platform || keystroke.modifiers.alt || keystroke.modifiers.control {
             return false;
+        }
+        if accepting {
+            // A consumed suggestion key has no remote press owner. Its repeats
+            // and Kitty release must not turn into a later command submission.
+            if let Some(view) = self.terminal.view.views.get_mut(&session_id) {
+                view.pressed_keys.remove(&keystroke.key);
+            }
+            if event.is_held {
+                return true;
+            }
         }
         match keystroke.key.as_str() {
             "escape" => {
@@ -932,49 +975,139 @@ impl ZzClawTermApp {
         execute: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.terminal.editing.assist_input().desynced {
-            self.hide_command_suggestions_if_present(cx);
-            return false;
-        }
-        let Some(state) = self.terminal.assist.command_suggestions.clone() else {
-            return false;
+        self.submit_selected_command_suggestion(execute, cx)
+            .handled()
+    }
+
+    fn reject_command_suggestion(
+        &mut self,
+        message: &'static str,
+        cx: &mut Context<Self>,
+    ) -> SuggestionSubmitResult {
+        self.dismiss_command_suggestions(cx);
+        self.shell.set_status(message);
+        cx.notify();
+        SuggestionSubmitResult::Rejected
+    }
+
+    fn submit_selected_command_suggestion(
+        &mut self,
+        execute_requested: bool,
+        cx: &mut Context<Self>,
+    ) -> SuggestionSubmitResult {
+        let Some(popup) = self.terminal.assist.command_suggestions.clone() else {
+            return SuggestionSubmitResult::NotHandled;
         };
-        let Some(item) =
-            command_suggestion_item_for_selection(&state.items, state.selected_index).cloned()
+        let execute_requested = execute_requested && popup.mode == CompletionMode::History;
+        let Some(item) = command_suggestion_item_for_selection(&popup.items, popup.selected_index)
         else {
-            return false;
+            return SuggestionSubmitResult::NotHandled;
         };
-        let source = item.source.clone();
-        let command = item.command;
-        let (payload, submission) = command_suggestion_input(&command, execute);
-        self.terminal.assist.command_suggestions = None;
-        self.terminal.assist.pending_command_history_entry = submission;
-        let sent = self.send_terminal_input_without_suggestion_track(payload, cx);
-        // A successful write consumes this in record_command_history_for_sessions.
-        // A failed primary write must not attach it to the next Enter.
-        self.terminal.assist.pending_command_history_entry = None;
-        if !sent {
-            return true;
+        if !item.fillable {
+            return self.reject_command_suggestion(
+                "Cannot safely append this match; edit the command manually",
+                cx,
+            );
         }
-        if !execute {
-            // After fill, tracker becomes the filled command for continued typing.
-            let evidence = self.terminal.editing.state_mut().pending_evidence.take();
-            *self.terminal.editing.input_mut() =
-                apply_terminal_input_data(&TerminalInputState::new(), &command);
-            self.terminal.editing.state_mut().pending_evidence = evidence;
-            self.terminal.editing.state_mut().model.phase =
-                zzclawterm_core::terminal::editing::EditPhase::Pending;
-            self.terminal.editing.state_mut().model.last_input_at = Some(Instant::now());
-            self.schedule_shell_edit_confirmation_timeout(cx);
-            self.refresh_command_suggestions(cx);
+        if popup.scope.as_ref().is_some_and(|scope| {
+            *scope != self.command_suggestion_context(&popup.session_id).scope
+                || self.commands.completion_runtime().revision() != popup.completion_revision
+        }) {
+            return self.reject_command_suggestion(
+                "Completion context changed; select a current suggestion",
+                cx,
+            );
         }
-        self.shell.set_status(if execute {
-            format!("executed suggestion from {source}")
+        if self.session.active_id() != Some(popup.session_id.as_str())
+            || self.session.is_disconnected(&popup.session_id)
+            || self.active_terminal_input_blocked()
+            || self.security.screen_locked()
+            || self.active_terminal_uses_alternate_screen()
+            || self.is_credential_prompt_input_mode()
+            || self.terminal.assist.credential_suggestions.is_some()
+            || self.terminal.assist.command_suggestions_suppressed
+            || self
+                .terminal_protocol_state_for_session(&popup.session_id)
+                .mouse_reporting
+            || self.active_terminal_display_offset() != 0
+            || !self
+                .settings
+                .summary()
+                .interaction_command_suggestions_enabled
+            || self.sync_input.may_fan_out_from(&popup.session_id)
+            || self.sync_input.revision() != popup.sync_revision
+        {
+            return self.reject_command_suggestion(
+                "Cannot safely fill this suggestion in the current terminal state",
+                cx,
+            );
+        }
+        // Reconcile against the latest live frame; a typing prediction or an old
+        // matching search pattern is never sufficient evidence for a write.
+        self.reconcile_shell_editing(&popup.session_id, cx);
+        let snapshot = self.terminal_snapshot_for_session(Some(&popup.session_id), 0);
+        let Some(state) = self.terminal.editing.state() else {
+            return self
+                .reject_command_suggestion("Wait for the terminal to confirm the input", cx);
+        };
+        if state.awaiting_snapshot
+            || state.model.phase != EditPhase::Ready
+            || state.model.version != popup.input_version
+            || state.mapping.is_none()
+            || resolve_input(
+                &snapshot,
+                &state.model.input.value,
+                state.model.input.cursor,
+            )
+            .as_ref()
+                != state.mapping.as_ref()
+        {
+            return self.reject_command_suggestion(
+                "Input changed or is not confirmed; select the suggestion again",
+                cx,
+            );
+        }
+        let suffix = match plan_suggestion_fill(&state.model.input, &item.command) {
+            SuggestionFill::Rejected(message) => {
+                return self.reject_command_suggestion(message, cx);
+            }
+            SuggestionFill::NoChange => {
+                self.dismiss_command_suggestions(cx);
+                self.shell.set_status(if execute_requested {
+                    "Command already filled; press Enter again to execute"
+                } else {
+                    "Command already filled"
+                });
+                cx.notify();
+                return SuggestionSubmitResult::NoChange;
+            }
+            SuggestionFill::Append(suffix) => suffix,
+        };
+        // Logical input performs charset conversion and advances the shell model
+        // exactly once, after the primary write succeeds. The fan-out gate above
+        // is checked in the same GPUI update, without an asynchronous gap.
+        self.dismiss_command_suggestions(cx);
+        self.terminal.editing.state_mut().suggestion_fill = None;
+        if !self.send_terminal_input_without_suggestion_track(suffix.as_bytes().to_vec(), cx) {
+            self.terminal.editing.state_mut().invalidate();
+            return SuggestionSubmitResult::WriteFailed;
+        }
+        let state = self.terminal.editing.state_mut();
+        state.suggestion_fill = Some(SuggestionFillRequest {
+            request_id: state.confirmation_id,
+            input_version: state.model.version,
+            target: item.command.clone(),
+            execute_requested,
+            deadline: Instant::now() + EDIT_CONFIRMATION_TIMEOUT,
+            sync_revision: popup.sync_revision,
+        });
+        self.shell.set_status(if execute_requested {
+            "Suggestion filled; waiting for echo. Press Enter again to execute"
         } else {
-            format!("filled suggestion from {source}")
+            "Suggestion filled; waiting for echo"
         });
         cx.notify();
-        true
+        SuggestionSubmitResult::Submitted
     }
 
     pub(in crate::features) fn delete_command_suggestion_history(
@@ -986,44 +1119,26 @@ impl ZzClawTermApp {
         if command.is_empty() {
             return;
         }
-        let request_command = command.clone();
-        self.submit_store_request(
-            0,
-            store_request(StoreDomain::Commands, move |store| {
-                store.delete_command_history(&request_command)?;
-                store.list_command_history(64)
-            }),
-            move |this, event, cx| {
-                match event.outcome {
+        self.dismiss_command_suggestions(cx);
+        let runtime = self.commands.completion_runtime();
+        cx.spawn(async move |this, cx| {
+            let outcome = runtime.delete(command.clone()).await;
+            let _ = this.update(cx, |this, cx| {
+                match outcome {
                     Ok(history) => {
                         this.commands.replace_command_history(history);
                         this.session.remove_command_from_all_history(&command);
-                        if let Some(state) = this.terminal.assist.command_suggestions.as_mut() {
-                            state.items.retain(|item| {
-                                !(item.source == "history" && item.command == command)
-                            });
-                            if state.items.is_empty() {
-                                this.terminal.assist.command_suggestions = None;
-                            } else {
-                                state.selected_index = command_suggestion_clamp_selection(
-                                    state.selected_index,
-                                    state.items.len(),
-                                );
-                            }
-                        } else {
-                            this.refresh_command_suggestions(cx);
-                        }
-                        this.shell
-                            .set_status(format!("deleted history command '{command}'"));
+                        this.shell.set_status("History command deleted");
+                        this.refresh_command_suggestions(cx);
                     }
                     Err(error) => this
                         .shell
                         .set_status(format!("failed to delete history: {error}")),
                 }
                 cx.notify();
-            },
-            cx,
-        );
+            });
+        })
+        .detach();
     }
 
     pub(in crate::features) fn command_suggestions_overlay(
@@ -1052,10 +1167,9 @@ impl ZzClawTermApp {
             "suggestions.matches"
         });
         let footer = format!(
-            "↑↓ {} · Enter {} · Tab {} · Esc {}",
+            "↑↓ {} · Tab / Enter {} · Esc {}",
             t!("suggestions.select"),
-            t!("suggestions.execute"),
-            t!("suggestions.fill"),
+            t!("suggestions.acceptSelected"),
             t!("suggestions.dismiss")
         );
         let Some(placement) = self.suggestion_overlay_position_for_session(
@@ -1083,7 +1197,7 @@ impl ZzClawTermApp {
         for (index, item) in state.items.iter().enumerate() {
             let selected = state.selected_index == Some(index);
             let source_icon = match item.source.as_str() {
-                "history" => "icons/history.svg",
+                "history" | "legacyHistory" | "tokenHistory" => "icons/history.svg",
                 _ => "icons/commands.svg",
             };
             let label = if item.display.trim().is_empty() {
@@ -1093,7 +1207,10 @@ impl ZzClawTermApp {
             };
             let show_full_command = label.chars().count() > 48;
             let full_command = item.command.clone();
-            let is_history = item.source == "history";
+            let is_history = matches!(item.source.as_str(), "history" | "legacyHistory");
+            let description = item.description.clone();
+            let show_description = state.mode == CompletionMode::Token && !description.is_empty();
+            let fillable = item.fillable;
             let delete_command = item.command.clone();
             let mut row = div()
                 .id(SharedString::from(format!("command-suggestion-{index}")))
@@ -1116,6 +1233,7 @@ impl ZzClawTermApp {
                 }))
                 .text_size(px(11.))
                 .text_color(rgb(palette.text))
+                .opacity(if fillable { 1.0 } else { 0.5 })
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(state) = this.terminal.assist.command_suggestions.as_mut() {
@@ -1138,6 +1256,7 @@ impl ZzClawTermApp {
                     div()
                         .min_w_0()
                         .flex_1()
+                        .when(show_description, |this| this.min_w(px(140.)))
                         .font_family(crate::features::shell::gpui_code_font_family())
                         .flex()
                         .items_center()
@@ -1149,10 +1268,43 @@ impl ZzClawTermApp {
                             selected,
                         )),
                 );
-            if show_full_command {
+            if show_description {
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "command-suggestion-description-{index}"
+                        )))
+                        .min_w_0()
+                        .max_w(px(180.))
+                        .flex_initial()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_right()
+                        .text_color(rgb(palette.text_dimmed))
+                        .child(description.clone()),
+                );
+            }
+            if show_full_command || !description.is_empty() || !fillable {
                 row = row.tooltip(move |window, cx| {
-                    ZzClawTooltip::new(full_command.clone()).build(window, cx)
+                    let label = if !fillable {
+                        t!("suggestions.unsafeSuffix").to_string()
+                    } else if !description.is_empty() {
+                        description.clone()
+                    } else {
+                        full_command.clone()
+                    };
+                    ZzClawTooltip::new(label).build(window, cx)
                 });
+            }
+            if item.source == "legacyHistory" {
+                row = row.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(9.))
+                        .text_color(rgb(palette.text_dimmed))
+                        .child(t!("suggestions.legacyHistory").to_string()),
+                );
             }
             if is_history {
                 row = row.child(
@@ -1309,6 +1461,44 @@ impl ZzClawTermApp {
                 menu_size: (menu_w, menu_h),
             },
         )
+    }
+}
+
+fn completion_suggestion_item(
+    item: CompletionCandidate,
+    input: &str,
+    mode: CompletionMode,
+) -> CommandSuggestionItem {
+    let source = if mode == CompletionMode::History {
+        if item.kind == CandidateKind::QuickCommand {
+            "quickCommand"
+        } else if item.sources.contains(&CandidateSource::History) {
+            "history"
+        } else if item.sources.contains(&CandidateSource::LegacyHistory) {
+            "legacyHistory"
+        } else {
+            "history"
+        }
+    } else if item.sources.contains(&CandidateSource::Catalog) {
+        "static"
+    } else if item.sources.contains(&CandidateSource::History) {
+        "tokenHistory"
+    } else {
+        "quickToken"
+    };
+    let description = if source == "legacyHistory" {
+        t!("suggestions.legacyHistory").to_string()
+    } else {
+        item.description.clone()
+    };
+    CommandSuggestionItem {
+        command: item.target_line(input).unwrap_or_default(),
+        display: item.display,
+        source: source.into(),
+        score: item.score,
+        indices: item.indices,
+        fillable: item.fillable,
+        description,
     }
 }
 
@@ -1582,18 +1772,41 @@ mod tests {
     use crate::features::ZzClawTermApp;
     use crate::features::terminal::terminal_runtime::TERMINAL_INPUT_LATENCY_WINDOW;
     use crate::models::{CommandSuggestionItem, CommandSuggestionState};
+    pub(super) fn history_search_fixture(
+        command: &str,
+        input: &str,
+        revision: u64,
+    ) -> zzclawterm_core::completion::types::CompletionResult {
+        use zzclawterm_core::completion::types::{
+            CandidateKind, CandidateSource, CompletionCandidate, CompletionResult,
+        };
+        CompletionResult {
+            revision,
+            candidates: vec![CompletionCandidate {
+                display: command.into(),
+                insert_text: command.into(),
+                description: String::new(),
+                range: 0..input.len(),
+                kind: CandidateKind::History,
+                sources: vec![CandidateSource::History],
+                use_count: 1,
+                last_used_at_ms: 1,
+                score: 1,
+                indices: vec![],
+                fillable: command.starts_with(input),
+                context_priority: 1,
+            }],
+        }
+    }
     use std::time::{Duration, Instant};
 
     use gpui::{AppContext as _, KeyDownEvent, TestAppContext};
-    use zzclawterm_core::{
-        AppRuntime, RuntimeMode, TerminalInputState, apply_terminal_input_data, uuid,
-    };
+    use zzclawterm_core::{TerminalInputState, apply_terminal_input_data};
 
-    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
     use crate::test_support::TestConfigDir;
 
     use super::{
-        command_history_input_update, command_suggestion_clamp_selection, command_suggestion_input,
+        command_history_input_update, command_suggestion_clamp_selection,
         command_suggestion_input_can_defer_refresh, command_suggestion_input_candidate_chars,
         command_suggestion_input_obvious_pager_prefix, command_suggestion_item_for_selection,
         command_suggestion_refresh_input_delay, command_suggestion_state_changed,
@@ -1615,17 +1828,38 @@ mod tests {
             app.terminal
                 .seed_session_view("s1".into(), "$ echo abc".into(), "UTF-8");
             app.reconcile_shell_editing("s1", cx);
-            assert!(app.prepare_command_suggestion_search(1, cx).is_some());
+            assert!(
+                app.prepare_command_suggestion_search(
+                    1,
+                    zzclawterm_core::completion::types::CompletionMode::Token,
+                    cx
+                )
+                .is_some()
+            );
             assert!(app.can_use_smart_cursor_selection());
             app.terminal.assist.credential_prompt_input_until_ms = u64::MAX;
             assert!(app.is_credential_prompt_input_mode());
-            assert!(app.prepare_command_suggestion_search(1, cx).is_none());
+            assert!(
+                app.prepare_command_suggestion_search(
+                    1,
+                    zzclawterm_core::completion::types::CompletionMode::Token,
+                    cx
+                )
+                .is_none()
+            );
             assert!(!app.can_use_smart_cursor_selection());
 
             // The toggle must release these gates without waiting for output or a timeout.
             app.toggle_credential_autofill(cx);
             assert!(!app.is_credential_prompt_input_mode());
-            assert!(app.prepare_command_suggestion_search(1, cx).is_some());
+            assert!(
+                app.prepare_command_suggestion_search(
+                    1,
+                    zzclawterm_core::completion::types::CompletionMode::Token,
+                    cx
+                )
+                .is_some()
+            );
             assert!(app.can_use_smart_cursor_selection());
         });
     }
@@ -1643,26 +1877,96 @@ mod tests {
         cx.update_entity(&app, |app, cx| {
             app.note_shell_editing_input(b"echo", cx);
             let request = app
-                .prepare_command_suggestion_search(1, cx)
+                .prepare_command_suggestion_search(
+                    1,
+                    zzclawterm_core::completion::types::CompletionMode::Token,
+                    cx,
+                )
                 .expect("ordinary typing predictions can request suggestions");
             app.terminal.editing.state_mut().model.invalidate();
-            assert!(app.prepare_command_suggestion_search(1, cx).is_none());
+            assert!(
+                app.prepare_command_suggestion_search(
+                    1,
+                    zzclawterm_core::completion::types::CompletionMode::Token,
+                    cx
+                )
+                .is_none()
+            );
             app.publish_command_suggestion_search(
                 request,
-                vec![zzclawterm_core::FuzzyResult {
-                    command: "echo example".into(),
-                    source: "history".into(),
-                    score: 1,
-                    indices: vec![],
-                    display: "echo example".into(),
-                }],
+                history_search_fixture(
+                    "echo example",
+                    "echo ex",
+                    app.commands.completion_runtime().revision(),
+                ),
                 Duration::ZERO,
                 cx,
             );
             assert!(app.terminal.assist.command_suggestions.is_none());
             app.terminal.assist.command_suggestions = Some(open_suggestions_popup("s1"));
-            assert!(!app.apply_selected_command_suggestion(true, cx));
+            assert!(app.apply_selected_command_suggestion(true, cx));
             assert!(app.terminal.assist.pending_command_history_entry.is_none());
+        });
+    }
+
+    #[test]
+    fn published_candidates_require_explicit_selection_even_for_a_single_match() {
+        let dir = TestConfigDir::new("zzclawterm-suggestions-explicit-selection");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = crate::features::test_support::app_with_visible_local_session(
+            &mut cx,
+            dir.path(),
+            "s1",
+        );
+        cx.update_entity(&app, |app, cx| {
+            show_surface_for_session(app, "s1");
+            app.note_shell_editing_input(b"docker r", cx);
+            for mode in [
+                zzclawterm_core::completion::types::CompletionMode::Token,
+                zzclawterm_core::completion::types::CompletionMode::History,
+            ] {
+                for count in [1, 3] {
+                    let request_id = app.terminal.assist.command_suggestion_search_gen;
+                    let mut result = history_search_fixture(
+                        "docker run",
+                        "docker r",
+                        app.commands.completion_runtime().revision(),
+                    );
+                    result
+                        .candidates
+                        .resize(count, result.candidates[0].clone());
+                    for _ in 0..2 {
+                        let request = app
+                            .prepare_command_suggestion_search(request_id, mode, cx)
+                            .unwrap();
+                        app.publish_command_suggestion_search(
+                            request,
+                            zzclawterm_core::completion::types::CompletionResult {
+                                candidates: result.candidates.clone(),
+                                revision: result.revision,
+                            },
+                            Duration::ZERO,
+                            cx,
+                        );
+                        let popup = app.terminal.assist.command_suggestions.as_ref().unwrap();
+                        assert_eq!(popup.items.len(), count);
+                        assert_eq!(popup.selected_index, None);
+                        let mut down = escape_key_event();
+                        down.keystroke.key = "down".into();
+                        assert!(app.handle_command_suggestion_key(&down, cx));
+                        assert_eq!(
+                            app.terminal
+                                .assist
+                                .command_suggestions
+                                .as_ref()
+                                .unwrap()
+                                .selected_index,
+                            Some(0),
+                        );
+                    }
+                }
+            }
         });
     }
 
@@ -1737,9 +2041,16 @@ mod tests {
     #[test]
     fn command_suggestion_state_change_skips_identical_overlay() {
         let state = CommandSuggestionState {
+            mode: zzclawterm_core::completion::types::CompletionMode::History,
+            completion_revision: 0,
+            scope: None,
             session_id: "session".to_string(),
+            input_version: 0,
+            sync_revision: 0,
             draft: "git".to_string(),
             items: vec![CommandSuggestionItem {
+                fillable: true,
+                description: String::new(),
                 command: "git status".to_string(),
                 display: "git status".to_string(),
                 source: "history".to_string(),
@@ -1785,6 +2096,8 @@ mod tests {
     #[test]
     fn command_suggestion_accept_requires_selected_item() {
         let items = vec![CommandSuggestionItem {
+            fillable: true,
+            description: String::new(),
             command: "git status".to_string(),
             display: "git status".to_string(),
             source: "history".to_string(),
@@ -1811,68 +2124,6 @@ mod tests {
         assert!(state.value.is_empty());
     }
 
-    #[test]
-    fn executing_suggestion_records_plain_command_separately_from_wire_input() {
-        let (wire, submission) = command_suggestion_input("ps -ef", true);
-        assert_eq!(wire, b"\x05\x15ps -ef\r");
-        assert_eq!(submission.as_deref(), Some("ps -ef"));
-
-        let (wire, submission) = command_suggestion_input("ps -ef", false);
-        assert_eq!(wire, b"\x05\x15ps -ef");
-        assert!(submission.is_none());
-    }
-
-    #[test]
-    fn failed_suggestion_write_does_not_leave_a_pending_history_command() {
-        let mut cx = TestAppContext::single();
-        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
-        let root = std::env::temp_dir().join(format!(
-            "zzclawterm-suggestion-write-{}-{}",
-            std::process::id(),
-            uuid()
-        ));
-        let runtime = AppRuntime::from_parts_for_test(
-            RuntimeMode::Portable,
-            root.clone(),
-            root.join("config"),
-            root.join("logs"),
-            root.join("cache"),
-            None,
-        );
-        let stores = UiStoreHandles {
-            startup_restore: cx.new(|_| StartupRestoreStore::default()),
-            overlays: cx.new(|_| OverlayStore::default()),
-        };
-        let app = cx.new(|cx| ZzClawTermApp::new(runtime, stores, cx));
-
-        cx.update_entity(&app, |app, cx| {
-            // Exercise write failure with an eligible typing prediction. A stale
-            // popup is now rejected before any write is attempted.
-            app.terminal
-                .editing
-                .state_mut()
-                .model
-                .note_input("ps", Instant::now());
-            app.terminal.assist.command_suggestions = Some(CommandSuggestionState {
-                session_id: "missing".to_string(),
-                draft: "ps".to_string(),
-                items: vec![CommandSuggestionItem {
-                    command: "ps -ef".to_string(),
-                    display: "ps -ef".to_string(),
-                    source: "history".to_string(),
-                    score: 1,
-                    indices: Vec::new(),
-                }],
-                selected_index: Some(0),
-                cursor_row: 0,
-                cursor_col: 0,
-            });
-
-            assert!(app.apply_selected_command_suggestion(true, cx));
-            assert!(app.terminal.assist.pending_command_history_entry.is_none());
-        });
-    }
-
     fn escape_key_event() -> KeyDownEvent {
         KeyDownEvent {
             keystroke: gpui::Keystroke {
@@ -1887,7 +2138,7 @@ mod tests {
 
     /// A visible surface makes the popup authoritative for the session, so the
     /// key handler can only bail out for the reason under test.
-    fn show_surface_for_session(app: &mut ZzClawTermApp, session_id: &str) {
+    pub(super) fn show_surface_for_session(app: &mut ZzClawTermApp, session_id: &str) {
         app.terminal.layout.session_surface_bounds.insert(
             session_id.to_string(),
             gpui::Bounds::new(
@@ -1899,9 +2150,16 @@ mod tests {
 
     fn open_suggestions_popup(session_id: &str) -> CommandSuggestionState {
         CommandSuggestionState {
+            mode: zzclawterm_core::completion::types::CompletionMode::History,
+            completion_revision: 0,
+            scope: None,
             session_id: session_id.to_string(),
+            input_version: 0,
+            sync_revision: 0,
             draft: "1".to_string(),
             items: vec![CommandSuggestionItem {
+                fillable: true,
+                description: String::new(),
                 command: "1111".to_string(),
                 display: "1111".to_string(),
                 source: "history".to_string(),
@@ -2086,7 +2344,14 @@ mod tests {
 
             // A search deferred on the shell line would otherwise land after the
             // program has taken the screen; the request must be dropped.
-            assert!(app.prepare_command_suggestion_search(1, cx).is_none());
+            assert!(
+                app.prepare_command_suggestion_search(
+                    1,
+                    zzclawterm_core::completion::types::CompletionMode::Token,
+                    cx
+                )
+                .is_none()
+            );
             assert!(app.terminal.assist.command_suggestions.is_none());
         });
     }
@@ -2108,8 +2373,12 @@ mod tests {
             *app.terminal.editing.input_mut() =
                 apply_terminal_input_data(&TerminalInputState::new(), "vim 1");
             app.terminal.editing.state_mut().model.confirm();
-            app.prepare_command_suggestion_search(1, cx)
-                .expect("shell line should still build a request")
+            app.prepare_command_suggestion_search(
+                1,
+                zzclawterm_core::completion::types::CompletionMode::Token,
+                cx,
+            )
+            .expect("shell line should still build a request")
         });
 
         // The user starts a full-screen program while the search is running.
@@ -2124,13 +2393,11 @@ mod tests {
 
         cx.update_entity(&app, |app, cx| {
             assert!(app.active_terminal_uses_alternate_screen());
-            let results = vec![zzclawterm_core::FuzzyResult {
-                command: "vim 1111".to_string(),
-                score: 1,
-                indices: Vec::new(),
-                source: "history".to_string(),
-                display: "vim 1111".to_string(),
-            }];
+            let results = history_search_fixture(
+                "vim 1111",
+                "vim 1",
+                app.commands.completion_runtime().revision(),
+            );
             app.publish_command_suggestion_search(request, results, Duration::ZERO, cx);
             assert!(app.terminal.assist.command_suggestions.is_none());
         });

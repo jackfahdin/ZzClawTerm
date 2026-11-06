@@ -36,6 +36,7 @@ struct ImportCommand {
     icon_tag: Option<String>,
     pinned: Option<bool>,
     execution_mode: Option<String>,
+    raw_send: Option<bool>,
     source: Option<String>,
     risk_level: Option<RiskLevel>,
     sort_order: Option<i32>,
@@ -47,7 +48,7 @@ impl QuickCommandImportPathPromptKind {
     /// which owns `tr`.
     fn prompt_label_key(self) -> &'static str {
         match self {
-            Self::NyatermJson => "quickCommands.importPromptZzClawTermJson",
+            Self::ZzClawTermJson => "quickCommands.importPromptZzClawTermJson",
             Self::WindTermQuickbar => "quickCommands.importPromptWindTerm",
             Self::XshellXts => "quickCommands.importPromptXshell",
         }
@@ -55,7 +56,7 @@ impl QuickCommandImportPathPromptKind {
 
     fn selecting_status(self) -> &'static str {
         match self {
-            Self::NyatermJson => "selecting quick command JSON import file",
+            Self::ZzClawTermJson => "selecting quick command JSON import file",
             Self::WindTermQuickbar => "selecting WindTerm quickbar import file",
             Self::XshellXts => "selecting Xshell quick button import file",
         }

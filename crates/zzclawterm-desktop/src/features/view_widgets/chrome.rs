@@ -151,7 +151,7 @@ fn toggle_child_window_zoom(window: &mut Window, _cx: &mut App) {
     window.zoom_window();
 }
 
-/// The 40px bar every child window draws in place of a native title bar.
+/// The 40px child-window header, omitted when Linux supplies a system title bar.
 ///
 /// Which controls appear is read off the window itself rather than passed in, so
 /// a window cannot end up offering a button the platform will ignore -- or, worse,
@@ -165,9 +165,12 @@ pub(in crate::features) fn child_window_header(
     window: &mut Window,
     cx: &mut App,
     on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
-    let title = title.into();
+) -> AnyElement {
     let policy = WindowChrome::child(window, chrome == ChildWindowChrome::Sheet);
+    if !policy.show_child_header {
+        return div().size_0().into_any_element();
+    }
+    let title = title.into();
     div()
         .h(px(40.))
         .flex_none()
@@ -260,6 +263,7 @@ pub(in crate::features) fn child_window_header(
                     ))
                 }),
         )
+        .into_any_element()
 }
 
 pub(in crate::features) fn child_window_titlebar(
@@ -374,7 +378,10 @@ pub(in crate::features) fn full_window_overlay_layer(
     id: impl Into<String>,
     content: impl IntoElement,
 ) -> gpui::Deferred {
-    deferred(full_window_input_layer(id).child(content)).with_priority(APP_OVERLAY_PRIORITY)
+    deferred(zzclawterm_ui::nya_modal_overlay(
+        full_window_input_layer(id).child(content),
+    ))
+    .with_priority(APP_OVERLAY_PRIORITY)
 }
 
 /// Overlay layer that keeps the window's text-selection listeners alive.
@@ -387,7 +394,7 @@ pub(in crate::features) fn selectable_overlay_layer(
     id: impl Into<String>,
     content: impl IntoElement,
 ) -> gpui::Deferred {
-    deferred(
+    deferred(zzclawterm_ui::nya_modal_overlay(
         div()
             .id(SharedString::from(id.into()))
             .key_context(crate::shortcuts::MODAL_KEY_CONTEXT)
@@ -395,14 +402,28 @@ pub(in crate::features) fn selectable_overlay_layer(
             .inset_0()
             .occlude()
             .child(content),
-    )
+    ))
     .with_priority(APP_OVERLAY_PRIORITY)
+}
+
+/// Positioning shells do not own input; only menu controls contribute regions.
+pub(in crate::features) fn regional_overlay_layer(
+    _id: impl Into<String>,
+    content: impl IntoElement,
+) -> gpui::Deferred {
+    deferred(zzclawterm_ui::nya_region_overlay(content)).with_priority(APP_OVERLAY_PRIORITY)
+}
+
+/// Lifts a modal that already supplies its own input boundary. In particular,
+/// the lock screen must let Windows caption presses reach the window procedure.
+pub(in crate::features) fn modal_overlay_layer(content: impl IntoElement) -> gpui::Deferred {
+    deferred(zzclawterm_ui::nya_modal_overlay(content)).with_priority(APP_OVERLAY_PRIORITY)
 }
 
 /// Lifts an overlay that deliberately owns no input layer above the resize
 /// handles. Hover-driven surfaces must not block the pointer underneath them.
 pub(in crate::features) fn passive_overlay_layer(content: impl IntoElement) -> gpui::Deferred {
-    deferred(content).with_priority(APP_OVERLAY_PRIORITY)
+    deferred(zzclawterm_ui::nya_passive_overlay(content)).with_priority(APP_OVERLAY_PRIORITY)
 }
 
 /// Dimmed full-area modal shell (Tauri Dialog backdrop + centered card).
@@ -527,7 +548,7 @@ mod tests {
                 .on_mouse_move(move |_, _, _| {
                     moved.fetch_add(1, Ordering::SeqCst);
                 })
-                .on_scroll_wheel(move |_, _, _| {
+                .on_scroll(move |_, _, _| {
                     scrolled.fetch_add(1, Ordering::SeqCst);
                 })
                 .child(super::selectable_overlay_layer(
@@ -554,11 +575,12 @@ mod tests {
         let position = point(px(12.), px(12.));
         cx.simulate_mouse_move(position, None, Modifiers::none());
         cx.simulate_click(position, Modifiers::none());
-        cx.simulate_event(gpui::ScrollWheelEvent {
+        cx.simulate_event(gpui::ScrollEvent {
             position,
             delta: gpui::ScrollDelta::Lines(point(0., -3.)),
             modifiers: Modifiers::none(),
             touch_phase: gpui::TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
         });
         assert_eq!(overlay_clicks.load(Ordering::SeqCst), 1);
         assert_eq!(background_events.load(Ordering::SeqCst), 0);

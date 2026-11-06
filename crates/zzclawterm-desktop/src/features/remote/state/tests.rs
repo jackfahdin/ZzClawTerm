@@ -1,20 +1,20 @@
-use std::sync::Arc;
-
-use zzclawterm_transport::{
-    DockerContainer, DockerContainerDetails, DockerImage, NetworkInfo, NetworkSummaryInfo,
-    RemoteDockerOverview, RemoteGpu, RemoteGpuOverview, RemoteGpuProcess, RemoteNpu,
-    RemoteNpuOverview, RemoteNpuProcess, RemoteProcess, RemoteStats,
-};
-
 use super::{
-    AcceleratorProcessList, DockerDerivedItems, ProcessApplyOutcome, ProcessSortColumns,
-    RemoteOpsFeatureFocus, RemoteOpsFeatureState, StatsApplyOutcome,
+    AcceleratorProcessList, DockerDerivedItems, ProcessApplyOutcome, RemoteOpsFeatureFocus,
+    RemoteOpsFeatureState, StatsApplyOutcome,
 };
 use crate::features::remote::job_state::RemoteJobState;
 use crate::features::runtime_jobs::{
     DockerResource, ProcessJobOutput, ProcessJobResult, StatsJobResult,
 };
 use crate::models::{DockerTab, RemoteProcessSortKey};
+use std::sync::Arc;
+use zzclawterm_remote_ops::ascend_npu::{RemoteNpu, RemoteNpuOverview, RemoteNpuProcess};
+use zzclawterm_remote_ops::docker::{
+    DockerContainer, DockerContainerDetails, DockerImage, RemoteDockerOverview,
+};
+use zzclawterm_remote_ops::gpu::{RemoteGpu, RemoteGpuOverview, RemoteGpuProcess};
+use zzclawterm_remote_ops::remote_process::RemoteProcess;
+use zzclawterm_remote_ops::stats::{NetworkInfo, NetworkSummaryInfo, RemoteStats};
 
 fn process(pid: u32) -> RemoteProcess {
     RemoteProcess {
@@ -324,7 +324,7 @@ fn docker_summary_disables_compose_without_dropping_other_resource_caches() {
         ..Default::default()
     });
     state.apply_docker_resource(DockerResource::Compose(vec![
-        zzclawterm_transport::DockerComposeProject {
+        zzclawterm_remote_ops::docker::DockerComposeProject {
             name: "project".to_string(),
             status: "running".to_string(),
             config_files: "/compose.yml".to_string(),
@@ -444,6 +444,7 @@ fn stats_owner_reduces_matching_success_failure_and_stale_events() {
     stats.system.hostname = "host-a".to_string();
     let outcome = state.apply_stats_event(
         StatsJobResult {
+            users_revision: 0,
             job_id: ticket.job_id,
             session_id: "session-a".to_string(),
             result: Ok(stats),
@@ -459,6 +460,7 @@ fn stats_owner_reduces_matching_success_failure_and_stale_events() {
     assert!(matches!(
         state.apply_stats_event(
             StatsJobResult {
+                users_revision: 0,
                 job_id: ticket.job_id,
                 session_id: "session-a".to_string(),
                 result: Err("stale".to_string()),
@@ -472,6 +474,7 @@ fn stats_owner_reduces_matching_success_failure_and_stale_events() {
         let ticket = state.begin_stats_job("session-a".to_string(), false);
         let outcome = state.apply_stats_event(
             StatsJobResult {
+                users_revision: 0,
                 job_id: ticket.job_id,
                 session_id: "session-a".to_string(),
                 result: Err(format!("failure-{failure}")),
@@ -509,6 +512,7 @@ fn stats_network_history_is_bounded_isolated_and_cleaned_up() {
         assert!(matches!(
             state.apply_stats_event(
                 StatsJobResult {
+                    users_revision: 0,
                     job_id: ticket.job_id,
                     session_id: "session-a".to_string(),
                     result: Ok(stats(rate as f64)),
@@ -527,6 +531,7 @@ fn stats_network_history_is_bounded_isolated_and_cleaned_up() {
     assert!(matches!(
         state.apply_stats_event(
             StatsJobResult {
+                users_revision: 0,
                 job_id: ticket.job_id,
                 session_id: "session-b".to_string(),
                 result: Ok(stats(100.0)),
@@ -569,6 +574,7 @@ fn stats_network_history_is_bounded_isolated_and_cleaned_up() {
     assert!(matches!(
         state.apply_stats_event(
             StatsJobResult {
+                users_revision: 0,
                 job_id: stale.job_id,
                 session_id: "session-a".into(),
                 result: Ok(stats(999.0))
@@ -663,7 +669,7 @@ fn accelerator_owner_caches_unavailable_sessions_until_success() {
 
     state.apply_gpu(
         session_id,
-        zzclawterm_transport::RemoteGpuOverview {
+        zzclawterm_remote_ops::gpu::RemoteGpuOverview {
             available: false,
             ..Default::default()
         },
@@ -676,7 +682,7 @@ fn accelerator_owner_caches_unavailable_sessions_until_success() {
 
     state.apply_gpu(
         session_id,
-        zzclawterm_transport::RemoteGpuOverview {
+        zzclawterm_remote_ops::gpu::RemoteGpuOverview {
             available: true,
             ..Default::default()
         },
@@ -832,51 +838,6 @@ fn a_query_or_sort_change_leaves_the_derived_list_correct_for_a_reader() {
     assert_eq!(read(&state), vec![1, 2], "ascending by pid");
     state.toggle_process_sort(RemoteProcessSortKey::Pid);
     assert_eq!(read(&state), vec![2, 1], "and reversed");
-}
-
-/// Narrowing the panel must move the sort key off a column that is gone.
-///
-/// The width lives in the shell, so it is pushed in rather than observed. The
-/// derived list has to follow, because the sort key is part of its cache key -- a
-/// constrain that forgot to recompute would leave rows ordered by a hidden column.
-#[test]
-fn narrowing_the_panel_moves_the_sort_key_off_a_hidden_column() {
-    let mut state = RemoteOpsFeatureState::new(RemoteOpsFeatureFocus {});
-    let mut low_memory = process(1);
-    low_memory.memory_percent = 1.0;
-    low_memory.cpu_percent = 9.0;
-    let mut high_memory = process(2);
-    high_memory.memory_percent = 9.0;
-    high_memory.cpu_percent = 1.0;
-    state.apply_processes(vec![low_memory, high_memory]);
-    state.toggle_process_sort(RemoteProcessSortKey::Memory);
-    assert_eq!(
-        state.process_presentation().sort_key,
-        RemoteProcessSortKey::Memory
-    );
-    assert_eq!(state.derived_processes()[0].pid, 2, "highest memory first");
-
-    // A narrow panel shows neither the memory nor the user column.
-    let narrow = ProcessSortColumns {
-        allow_memory: false,
-        allow_user: false,
-    };
-    assert!(state.set_process_sort_columns(narrow));
-
-    assert_eq!(
-        state.process_presentation().sort_key,
-        RemoteProcessSortKey::Cpu,
-        "memory is not sortable at this width"
-    );
-    assert_eq!(
-        state.derived_processes()[0].pid,
-        1,
-        "and the list is re-sorted by cpu, not left ordered by the hidden column"
-    );
-    assert!(
-        !state.set_process_sort_columns(narrow),
-        "an unchanged width must not report a change"
-    );
 }
 
 /// Every mutation that changes a pane presentation must bump that pane revision,
@@ -1198,4 +1159,41 @@ fn the_docker_failure_ladder_clears_the_overview_and_bumps() {
         revision,
         "and the clear must bump, or the panel keeps rendering stale containers"
     );
+}
+
+#[test]
+fn docker_details_ignore_results_after_close_switch_or_removal() {
+    for reason in ["close", "session", "removed", "different-container"] {
+        let mut state = RemoteOpsFeatureState::new(RemoteOpsFeatureFocus {});
+        state.start_docker_details("old".into(), "loading".into());
+        match reason {
+            "close" => state.close_docker_details(),
+            "session" => state.reset_for_session_switch(),
+            "removed" => state.apply_docker_overview(RemoteDockerOverview::default()),
+            _ => state.start_docker_details("new".into(), "loading".into()),
+        }
+        let before = state.docker_revision();
+        state.apply_docker_details("old".into(), DockerContainerDetails::default());
+        assert!(state.docker_presentation().details.is_none(), "{reason}");
+        assert_eq!(
+            state.docker_revision(),
+            before,
+            "ignored results must not invalidate views"
+        );
+        assert_ne!(
+            state.docker_presentation().details_container_id.as_deref(),
+            Some("old")
+        );
+    }
+}
+
+#[test]
+fn docker_details_refresh_preserves_content_but_a_new_target_clears_it() {
+    let mut state = RemoteOpsFeatureState::new(RemoteOpsFeatureFocus {});
+    state.start_docker_details("a".into(), "loading".into());
+    state.apply_docker_details("a".into(), DockerContainerDetails::default());
+    state.start_docker_details("a".into(), "refreshing".into());
+    assert!(state.docker_presentation().details.is_some());
+    state.start_docker_details("b".into(), "loading".into());
+    assert!(state.docker_presentation().details.is_none());
 }

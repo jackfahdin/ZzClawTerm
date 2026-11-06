@@ -1,11 +1,11 @@
-use gpui::{Context, Div, div, prelude::*, rgb};
+use gpui::{Context, Div, div, prelude::*, px, rgb};
 use rust_i18n::t;
 use zzclawterm_core::ConnectionUsernameSource;
-use zzclawterm_ui::{ZzClawButton, ZzClawTabItem, ZzClawTabs};
+use zzclawterm_ui::{ZzClawButton, ZzClawInputShell, ZzClawTabItem, ZzClawTabs};
 
 use super::super::super::list::{
-    ConnectionEditorFields, ConnectionEditorRenderContext, EditorSecretFieldOptions,
-    connection_editor_select, editor_field, editor_secret_field, required,
+    ConnectionEditorFields, ConnectionEditorRenderContext, connection_editor_select, editor_field,
+    required,
 };
 use super::ConnectionEditorSectionContext;
 use crate::features::ZzClawTermApp;
@@ -320,34 +320,40 @@ pub(super) fn password_source(
         }
         ConnectionEditorPasswordSource::Direct => {
             let has_existing = editor.existing_password.is_some();
-            let editing = editor.password_edit == ConnectionPasswordEdit::Replace || !has_existing;
             if editor.password_edit == ConnectionPasswordEdit::Remove {
                 body = body.child(div().text_xs().child(t!("authForm.passwordWillRemove")));
-            } else if editing {
-                body = body.child(editor_secret_field(
-                    palette,
-                    if has_existing {
-                        t!("authForm.newPasswordRequiredLabel")
-                    } else {
-                        t!("authForm.passwordOptional")
-                    },
-                    ConnectionEditorField::Password,
-                    fields,
-                    EditorSecretFieldOptions::new(
-                        false,
-                        t!("authForm.removePassword"),
-                        cx.listener(|this, _, _, cx| this.clear_connection_editor_password(cx)),
-                    ),
-                    cx,
-                ));
-            } else {
-                body = body.child(div().text_xs().child(
-                    if editor.existing_password_locked && fields.account_password_locked {
-                        t!("authForm.passwordLocked")
-                    } else {
-                        t!("authForm.passwordSaved")
-                    },
-                ));
+            }
+            if let Some(input) = fields.get(&ConnectionEditorField::Password) {
+                body = body.child(
+                    div()
+                        .id("connection-password-field")
+                        .debug_selector(|| "connection-editor-field-Password".to_string())
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(palette.text_muted))
+                                .child(t!("authForm.passwordOptional")),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(super::super::super::list::EDITOR_CONTROL_HEIGHT_PX))
+                                .child(
+                                    ZzClawInputShell::new("connection-password-input", input)
+                                        .height(px(
+                                            super::super::super::list::EDITOR_CONTROL_HEIGHT_PX,
+                                        ))
+                                        .on_mask_toggle(cx.listener(|this, _, window, cx| {
+                                            this.toggle_connection_password_visibility(window, cx)
+                                        })),
+                                ),
+                        ),
+                );
             }
             let mut actions = div().flex().flex_wrap().gap_2();
             if editor.password_edit == ConnectionPasswordEdit::Keep && has_existing {
@@ -438,9 +444,7 @@ pub(super) fn password_authentication(
                     )
                 })),
         );
-    if editor.auth_mode == "password"
-        && !(editor.kind == ConnectionKindTab::Vnc && editor.vnc_security.mode == "none")
-    {
+    if editor.auth_mode == "password" && !protocol_requires_no_auth {
         body.child(password_source(section, cx))
     } else {
         body

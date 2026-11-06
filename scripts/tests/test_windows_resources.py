@@ -25,10 +25,10 @@ class WindowsResourcesTests(unittest.TestCase):
         ).splitlines() if line.startswith("host: "))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            shutil.copy2(ROOT / "crates/nyaterm-app/build.rs", root / "build.rs")
+            shutil.copy2(ROOT / "crates/zzclawterm-app/build.rs", root / "build.rs")
             icons = root / "resources/icons"
             icons.mkdir(parents=True)
-            shutil.copy2(ROOT / "crates/nyaterm-app/resources/icons/icon.ico", icons)
+            shutil.copy2(ROOT / "crates/zzclawterm-app/resources/icons/icon.ico", icons)
             (root / "src").mkdir()
             (root / "src/main.rs").write_text('#![windows_subsystem = "windows"]\nfn main() {}\n')
             env = {**os.environ, "CARGO_TARGET_DIR": str(root / "target")}

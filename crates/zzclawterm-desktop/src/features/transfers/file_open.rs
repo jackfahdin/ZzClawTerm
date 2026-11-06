@@ -1,8 +1,7 @@
-use gpui::{Context, Window};
-use zzclawterm_transport::SftpFileEntry;
-
 use super::file_operations::FileOperationEndpoint;
 use crate::features::ZzClawTermApp;
+use gpui::{Context, Window};
+use zzclawterm_files::sftp::SftpFileEntry;
 
 #[derive(Clone, Copy)]
 pub(in crate::features) enum FileOpenMode {

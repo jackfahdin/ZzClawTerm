@@ -1,17 +1,39 @@
 use rust_i18n::t;
 
 use std::borrow::Cow;
+use std::path::PathBuf;
+
+use zzclawterm_core::SecretString;
+use zzclawterm_core::session_import::{
+    SessionImportError, SessionImportOptions, prepare_session_import_with_options,
+    prepare_windterm_import_with_decisions, prepare_windterm_preview,
+};
+use zzclawterm_core::{PreparedSessionImport, WindtermImportReport, WindtermPreview};
 
 use gpui::{Context, IntoElement, PathPromptOptions, SharedString, Window};
 use zeroize::Zeroize as _;
 use zzclawterm_store::StoreDomain;
 use zzclawterm_ui::ZzClawDialogWindowExt as _;
 
+use crate::features::connections::state::import::ConnectionImportReportView;
+use crate::features::text_inputs::TextInputSetup;
 use crate::features::{ZzClawTermApp, runtime_jobs::await_blocking_job};
 use crate::models::ConnectionImportSource;
 
 enum ConnectionImportResult {
-    Imported(usize),
+    Imported {
+        count: usize,
+        incomplete: usize,
+        report: Option<WindtermImportReport>,
+    },
+    NeedsWindtermPassword(PathBuf),
+    /// WindTerm files parsed with OneKey accounts; the import waits for the user
+    /// to confirm the inferred accounts before anything is written.
+    NeedsWindtermAccounts {
+        preview: Box<WindtermPreview>,
+        path: PathBuf,
+        master_password: Option<SecretString>,
+    },
     Cancelled,
     Failed {
         source: ConnectionImportSource,
@@ -21,10 +43,18 @@ enum ConnectionImportResult {
     Closed,
 }
 
+enum PreparedConnectionImport {
+    Commit {
+        prepared: PreparedSessionImport,
+        report: Option<WindtermImportReport>,
+    },
+    WindtermAccounts(WindtermPreview),
+}
+
 impl ConnectionImportSource {
     fn prompt_label(self) -> Cow<'static, str> {
         match self {
-            Self::NyatermBackup => Cow::Borrowed("Import ZzClawTerm backup"),
+            Self::ZzClawTermBackup => Cow::Borrowed("Import ZzClawTerm backup"),
             Self::Xshell => Cow::Borrowed("Import Xshell .xts sessions"),
             Self::MobaXterm => Cow::Borrowed("Import MobaXterm .mxtsessions sessions"),
             Self::WindTerm => Cow::Borrowed("Import WindTerm .sessions file"),
@@ -33,13 +63,13 @@ impl ConnectionImportSource {
             Self::Termius => Cow::Borrowed("Import Termius IndexedDB directory"),
             Self::SshConfig => t!("savedConnections.importSshConfigPrompt"),
             Self::Electerm => Cow::Borrowed("Import Electerm bookmarks JSON"),
-            Self::NyatermJson => Cow::Borrowed("Import ZzClawTerm sessions JSON"),
+            Self::ZzClawTermJson => Cow::Borrowed("Import ZzClawTerm sessions JSON"),
         }
     }
 
     fn selecting_status(self) -> Cow<'static, str> {
         match self {
-            Self::NyatermBackup => Cow::Borrowed("selecting ZzClawTerm backup"),
+            Self::ZzClawTermBackup => Cow::Borrowed("selecting ZzClawTerm backup"),
             Self::Xshell => Cow::Borrowed("selecting Xshell session import file"),
             Self::MobaXterm => Cow::Borrowed("selecting MobaXterm session import file"),
             Self::WindTerm => Cow::Borrowed("selecting WindTerm session import file"),
@@ -48,7 +78,7 @@ impl ConnectionImportSource {
             Self::Termius => Cow::Borrowed("selecting Termius IndexedDB directory"),
             Self::SshConfig => t!("savedConnections.importSshConfigSelecting"),
             Self::Electerm => Cow::Borrowed("selecting Electerm bookmarks JSON"),
-            Self::NyatermJson => Cow::Borrowed("selecting ZzClawTerm session JSON"),
+            Self::ZzClawTermJson => Cow::Borrowed("selecting ZzClawTerm session JSON"),
         }
     }
 
@@ -91,163 +121,438 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.connection_state.import_path_prompt_active() {
+            return;
+        }
         window.close_nya_dialog(cx);
-        if source == ConnectionImportSource::NyatermBackup {
+        if source == ConnectionImportSource::ZzClawTermBackup {
             self.prompt_encrypted_portable_snapshot_import(window, cx);
             return;
         }
         if source == ConnectionImportSource::Termius {
-            self.import_termius_sessions(None, true, cx);
+            self.start_connection_import(source, None, None, true, window, cx);
             return;
         }
-        self.prompt_connection_session_import(source, cx);
+        self.prompt_connection_session_import(source, window, cx);
     }
 
     fn prompt_connection_session_import(
         &mut self,
         source: ConnectionImportSource,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.connection_state.import_path_prompt_active() {
-            self.shell
-                .set_status("connection import picker is already open".to_string());
-            cx.notify();
             return;
         }
-
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: !source.uses_directory_picker(),
             directories: source.uses_directory_picker(),
             multiple: false,
             prompt: Some(SharedString::from(source.prompt_label().to_string())),
         });
-        let store = self.store_blocking_client();
-        let scheduler = self.blocking_jobs.clone();
         self.connection_state.begin_import_path_prompt(source);
         self.shell.set_status(source.selecting_status().to_string());
-
+        let window = window.window_handle();
         cx.spawn(async move |this, cx| {
-            let result = match receiver.await {
-                Ok(Ok(Some(paths))) => match paths.into_iter().next() {
-                    Some(path) => {
-                        let task = scheduler.submit_task("connection-import", move |_| {
-                            match prepare_connection_source(source, Some(path.as_path())).and_then(
-                                |prepared| {
-                                    store
-                                        .request_mutation_fn(
-                                            StoreDomain::Connections,
-                                            move |database| {
-                                                database.commit_session_import(prepared)
-                                            },
-                                        )
-                                        .map_err(|error| error.to_string())
-                                },
-                            ) {
-                                Ok(count) => ConnectionImportResult::Imported(count),
-                                Err(error) => ConnectionImportResult::Failed {
+            let picked = receiver.await;
+            let _ = window.update(cx, |_, window, cx| {
+                let _ = this.update(cx, |app, cx| {
+                    let result = match picked {
+                        Ok(Ok(Some(paths))) => {
+                            if let Some(path) = paths.into_iter().next() {
+                                app.start_connection_import(
                                     source,
-                                    auto_termius: false,
-                                    error,
-                                },
+                                    Some(path),
+                                    None,
+                                    false,
+                                    window,
+                                    cx,
+                                );
+                                return;
                             }
-                        });
-                        match await_blocking_job(task).await {
-                            Ok(result) => result,
-                            Err(error) => ConnectionImportResult::Failed {
-                                source,
-                                auto_termius: false,
-                                error,
-                            },
+                            ConnectionImportResult::Cancelled
                         }
-                    }
-                    None => ConnectionImportResult::Cancelled,
-                },
-                Ok(Ok(None)) => ConnectionImportResult::Cancelled,
-                Ok(Err(error)) => ConnectionImportResult::Failed {
-                    source,
-                    auto_termius: false,
-                    error: error.to_string(),
-                },
-                Err(_) => ConnectionImportResult::Closed,
-            };
-            let _ = this.update(cx, |this, cx| {
-                this.apply_connection_import_result(result, cx);
+                        Ok(Ok(None)) => ConnectionImportResult::Cancelled,
+                        Ok(Err(error)) => ConnectionImportResult::Failed {
+                            source,
+                            auto_termius: false,
+                            error: error.to_string(),
+                        },
+                        Err(_) => ConnectionImportResult::Closed,
+                    };
+                    app.apply_connection_import_result(result, window, cx);
+                });
             });
         })
         .detach();
         cx.notify();
     }
 
-    fn import_termius_sessions(
+    fn start_connection_import(
         &mut self,
-        indexed_db_path: Option<std::path::PathBuf>,
+        source: ConnectionImportSource,
+        path: Option<PathBuf>,
+        master_password: Option<SecretString>,
         auto_termius: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.connection_state.import_path_prompt_active() {
-            self.shell
-                .set_status("connection import picker is already open".to_string());
-            cx.notify();
-            return;
-        }
-
+        self.connection_state.begin_session_import_job();
+        self.shell
+            .set_status(t!("savedConnections.importInProgress"));
         let store = self.store_blocking_client();
         let scheduler = self.blocking_jobs.clone();
-        self.connection_state
-            .begin_import_path_prompt(ConnectionImportSource::Termius);
-        self.shell.set_status(if auto_termius {
-            "importing Termius sessions".to_string()
-        } else {
-            "importing Termius sessions from selected directory".to_string()
-        });
-
+        let window = window.window_handle();
         cx.spawn(async move |this, cx| {
-            let task =
-                scheduler.submit_task("termius-import", move |_| match prepare_connection_source(
-                    ConnectionImportSource::Termius,
-                    indexed_db_path.as_deref(),
-                )
-                .and_then(|prepared| {
-                    store
-                        .request_mutation_fn(StoreDomain::Connections, move |database| {
-                            database.commit_session_import(prepared)
+            let task = scheduler.submit_task("connection-import", move |_| {
+                let retained_master_password = master_password.clone();
+                let prepared = if source == ConnectionImportSource::WindTerm {
+                    prepare_windterm_source(path.as_deref(), master_password.as_deref())
+                } else {
+                    prepare_connection_source(source, path.as_deref(), master_password.as_deref())
+                        .map(|prepared| PreparedConnectionImport::Commit {
+                            prepared,
+                            report: None,
                         })
-                        .map_err(|error| error.to_string())
-                }) {
-                    Ok(count) => ConnectionImportResult::Imported(count),
-                    Err(error) => ConnectionImportResult::Failed {
-                        source: ConnectionImportSource::Termius,
-                        auto_termius,
-                        error,
+                };
+                drop(master_password);
+                match prepared {
+                    Ok(PreparedConnectionImport::Commit { prepared, report }) => {
+                        let incomplete = prepared.incomplete_credentials_count();
+                        match store.request_mutation_fn(StoreDomain::Connections, move |database| {
+                            database.commit_session_import(prepared)
+                        }) {
+                            Ok(count) => ConnectionImportResult::Imported {
+                                count,
+                                incomplete,
+                                report,
+                            },
+                            Err(error) => ConnectionImportResult::Failed {
+                                source,
+                                auto_termius,
+                                error: error.to_string(),
+                            },
+                        }
+                    }
+                    Ok(PreparedConnectionImport::WindtermAccounts(preview)) => {
+                        ConnectionImportResult::NeedsWindtermAccounts {
+                            preview: Box::new(preview),
+                            path: path.unwrap_or_default(),
+                            master_password: retained_master_password,
+                        }
+                    }
+                    Err(SessionImportError::WindTermMasterPasswordRequired) => match path {
+                        Some(path) => ConnectionImportResult::NeedsWindtermPassword(path),
+                        None => ConnectionImportResult::Failed {
+                            source,
+                            auto_termius,
+                            error: "connection import path was not selected".into(),
+                        },
                     },
-                });
+                    Err(error) => ConnectionImportResult::Failed {
+                        source,
+                        auto_termius,
+                        error: error.to_string(),
+                    },
+                }
+            });
             let result = match await_blocking_job(task).await {
                 Ok(result) => result,
                 Err(error) => ConnectionImportResult::Failed {
-                    source: ConnectionImportSource::Termius,
+                    source,
                     auto_termius,
                     error,
                 },
             };
-            let _ = this.update(cx, |this, cx| {
-                this.apply_connection_import_result(result, cx);
+            let _ = window.update(cx, |_, window, cx| {
+                let _ = this.update(cx, |app, cx| {
+                    app.apply_connection_import_result(result, window, cx)
+                });
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    pub(in crate::features) fn submit_windterm_password(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.connection_state.awaiting_windterm_password() {
+            return true;
+        }
+        let Some(field) = self.existing_text_input("windterm-password.value") else {
+            return false;
+        };
+        let password = SecretString::from(field.read(cx).value(cx));
+        if password.is_empty() {
+            self.shell
+                .set_status(t!("savedConnections.windtermMasterPasswordRequired"));
+            cx.notify();
+            return false;
+        }
+        let Some(path) = self.connection_state.take_windterm_password_path() else {
+            return true;
+        };
+        field.update(cx, |field, cx| field.discard_content(cx));
+        self.forget_text_inputs("windterm-password.");
+        self.start_connection_import(
+            ConnectionImportSource::WindTerm,
+            Some(path),
+            Some(password),
+            false,
+            window,
+            cx,
+        );
+        true
+    }
+
+    pub(in crate::features) fn cancel_windterm_password(&mut self, cx: &mut Context<Self>) {
+        if !self.connection_state.awaiting_windterm_password() {
+            return;
+        }
+        if let Some(field) = self.existing_text_input("windterm-password.value") {
+            field.update(cx, |field, cx| field.discard_content(cx));
+        }
+        self.forget_text_inputs("windterm-password.");
+        self.connection_state.finish_import_path_prompt();
+        self.shell
+            .set_status(t!("savedConnections.importCancelled"));
+        cx.notify();
+    }
+
+    /// Second step of the WindTerm flow: create the accounts inferred from
+    /// `onekeys.config` and commit sessions already linked to those account ids.
+    pub(in crate::features) fn submit_windterm_accounts_import(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.connection_state.awaiting_windterm_accounts() {
+            return true;
+        }
+        let Some(context) = self.connection_state.take_windterm_accounts_context() else {
+            return true;
+        };
+        let decisions = context.decisions();
+        let path = context.path;
+        let master_password = context.master_password;
+        let _ = context.preview;
+        self.forget_text_inputs("windterm-account.");
+        self.connection_state.begin_session_import_job();
+        self.shell
+            .set_status(t!("savedConnections.importInProgress"));
+        let store = self.store_blocking_client();
+        let scheduler = self.blocking_jobs.clone();
+        let window = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let task = scheduler.submit_task("connection-import", move |_| {
+                let outcome = match prepare_windterm_import_with_decisions(
+                    &path,
+                    master_password.as_deref(),
+                    &decisions,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        return ConnectionImportResult::Failed {
+                            source: ConnectionImportSource::WindTerm,
+                            auto_termius: false,
+                            error: error.to_string(),
+                        };
+                    }
+                };
+                drop(master_password);
+                let zzclawterm_core::WindtermImportOutcome { prepared, report } = outcome;
+                match store.request_mutation_fn(StoreDomain::Connections, move |database| {
+                    database.commit_session_import(prepared)
+                }) {
+                    Ok(count) => ConnectionImportResult::Imported {
+                        count,
+                        incomplete: report.credential_warning_sessions,
+                        report: Some(report),
+                    },
+                    Err(error) => ConnectionImportResult::Failed {
+                        source: ConnectionImportSource::WindTerm,
+                        auto_termius: false,
+                        error: error.to_string(),
+                    },
+                }
+            });
+            let result = match await_blocking_job(task).await {
+                Ok(result) => result,
+                Err(error) => ConnectionImportResult::Failed {
+                    source: ConnectionImportSource::WindTerm,
+                    auto_termius: false,
+                    error,
+                },
+            };
+            let _ = window.update(cx, |_, window, cx| {
+                let _ = this.update(cx, |app, cx| {
+                    app.apply_connection_import_result(result, window, cx)
+                });
+            });
+        })
+        .detach();
+        cx.notify();
+        true
+    }
+
+    pub(in crate::features) fn cancel_windterm_accounts_import(&mut self, cx: &mut Context<Self>) {
+        if !self.connection_state.awaiting_windterm_accounts() {
+            return;
+        }
+        self.forget_text_inputs("windterm-account.");
+        self.connection_state.finish_import_path_prompt();
+        self.shell
+            .set_status(t!("savedConnections.importCancelled"));
+        cx.notify();
+    }
+
+    fn prepare_windterm_account_inputs(&mut self, cx: &mut Context<Self>) {
+        let drafts = self.connection_state.windterm_account_drafts().to_vec();
+        for draft in drafts {
+            let username_id = format!("windterm-account.{}.username", draft.one_key_uuid);
+            let password_id = format!("windterm-account.{}.password", draft.one_key_uuid);
+            self.text_input(username_id, &draft.username, TextInputSetup::default(), cx);
+            self.text_input(
+                password_id,
+                draft.password.expose_secret(),
+                TextInputSetup::masked(),
+                cx,
+            );
+        }
+    }
+
+    pub(in crate::features) fn apply_windterm_account_input(
+        &mut self,
+        uuid: &str,
+        field: &str,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = match field {
+            "username" => self
+                .connection_state
+                .update_windterm_account_username(uuid, text),
+            "password" => self
+                .connection_state
+                .update_windterm_account_password(uuid, text),
+            _ => false,
+        };
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub(in crate::features) fn set_windterm_account_skip(
+        &mut self,
+        uuid: &str,
+        skip: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connection_state.set_windterm_account_skip(uuid, skip) {
+            cx.notify();
+        }
+    }
+
+    pub(in crate::features) fn set_windterm_account_reuse(
+        &mut self,
+        uuid: &str,
+        account_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .connection_state
+            .set_windterm_account_reuse(uuid, account_id)
+        {
+            cx.notify();
+        }
+    }
+
+    pub(in crate::features) fn toggle_connection_import_report(&mut self, cx: &mut Context<Self>) {
+        self.connection_state.toggle_import_report_expanded();
+        cx.notify();
+    }
+
+    pub(in crate::features) fn dismiss_connection_import_report(&mut self, cx: &mut Context<Self>) {
+        self.connection_state.dismiss_import_report();
         cx.notify();
     }
 
     fn apply_connection_import_result(
         &mut self,
         result: ConnectionImportResult,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.connection_state.finish_import_path_prompt();
         match result {
-            ConnectionImportResult::Imported(count) => {
+            ConnectionImportResult::NeedsWindtermPassword(path) => {
+                self.connection_state.await_windterm_password(path);
+                self.open_windterm_password_dialog(window, cx);
+            }
+            ConnectionImportResult::NeedsWindtermAccounts {
+                preview,
+                path,
+                master_password,
+            } => {
+                let existing_passwords = self.security.passwords().to_vec();
+                self.connection_state.await_windterm_accounts(
+                    *preview,
+                    path,
+                    master_password,
+                    &existing_passwords,
+                );
+                self.prepare_windterm_account_inputs(cx);
+                self.open_windterm_accounts_dialog(window, cx);
+            }
+            ConnectionImportResult::Imported {
+                count,
+                incomplete,
+                report,
+            } => {
                 self.refresh_store_from_runtime_and_sync_theme(cx);
                 self.connection_state.expand_all_catalog_groups();
-                let message = t!("savedConnections.importSuccess", count = count);
+                let base = if incomplete == 0 {
+                    t!("savedConnections.importSuccess", count = count)
+                } else {
+                    t!(
+                        "savedConnections.importPartialCredentials",
+                        count = count,
+                        incomplete = incomplete
+                    )
+                };
+                let report_view = match &report {
+                    Some(report) => ConnectionImportReportView::from_windterm(report),
+                    None => ConnectionImportReportView::from_basic(count, incomplete),
+                };
+                let missing = report_view.missing_one_key.len();
+                let one_key_notice = report_view.one_key_state.map(|state| match state {
+                    zzclawterm_core::WindtermOneKeyConfigState::Absent => {
+                        t!("savedConnections.windtermOneKeysConfigMissing").to_string()
+                    }
+                    zzclawterm_core::WindtermOneKeyConfigState::Unreadable => {
+                        t!("savedConnections.windtermOneKeysConfigUnreadable").to_string()
+                    }
+                    zzclawterm_core::WindtermOneKeyConfigState::Readable => String::new(),
+                });
+                let message = match (missing, one_key_notice.filter(|notice| !notice.is_empty())) {
+                    (0, None) => base.to_string(),
+                    (0, Some(notice)) => format!("{base}；{notice}"),
+                    (missing, notice) => {
+                        let missing_message = t!(
+                            "savedConnections.windtermMissingOneKeySummary",
+                            count = missing
+                        );
+                        match notice {
+                            Some(notice) => format!("{base}；{missing_message}；{notice}"),
+                            None => format!("{base}；{missing_message}"),
+                        }
+                    }
+                };
+                self.connection_state.set_import_report(report_view);
                 self.shell.set_status(message.clone());
                 self.settings.update_store_status(message, true);
             }
@@ -266,7 +571,11 @@ impl ZzClawTermApp {
                 {
                     self.shell
                         .set_status("select Termius IndexedDB directory".to_string());
-                    self.prompt_connection_session_import(ConnectionImportSource::Termius, cx);
+                    self.prompt_connection_session_import(
+                        ConnectionImportSource::Termius,
+                        window,
+                        cx,
+                    );
                     return;
                 }
                 let message = t!("savedConnections.importFailed", error = error);
@@ -282,26 +591,57 @@ impl ZzClawTermApp {
     }
 }
 
+fn prepare_windterm_source(
+    path: Option<&std::path::Path>,
+    master_password: Option<&str>,
+) -> Result<PreparedConnectionImport, SessionImportError> {
+    let path = path.ok_or_else(|| {
+        SessionImportError::Config("connection import path was not selected".to_string())
+    })?;
+    let preview = prepare_windterm_preview(path, master_password)?;
+    if preview.accounts.is_empty() {
+        // No referenced OneKey account (missing/unreadable config included):
+        // keep the single-step import, but carry the diagnostics with it.
+        Ok(PreparedConnectionImport::Commit {
+            report: Some(preview.report()),
+            prepared: preview.prepared,
+        })
+    } else {
+        Ok(PreparedConnectionImport::WindtermAccounts(preview))
+    }
+}
+
 fn prepare_connection_source(
     source: ConnectionImportSource,
     path: Option<&std::path::Path>,
-) -> Result<zzclawterm_core::PreparedSessionImport, String> {
+    master_password: Option<&str>,
+) -> Result<zzclawterm_core::PreparedSessionImport, SessionImportError> {
     match source {
         ConnectionImportSource::Termius => {
-            let mut local_key = load_termius_local_key_secret()?;
-            let result = zzclawterm_core::prepare_termius_session_import(path, &local_key)
-                .map_err(|error| error.to_string());
+            let mut local_key =
+                load_termius_local_key_secret().map_err(SessionImportError::Config)?;
+            let result = zzclawterm_core::prepare_termius_session_import(path, &local_key);
             local_key.zeroize();
             result
         }
         ConnectionImportSource::SshConfig => {
-            let path =
-                path.ok_or_else(|| t!("savedConnections.importSshConfigPathMissing").to_string())?;
-            zzclawterm_core::prepare_ssh_config_import(path).map_err(|error| error.to_string())
+            let path = path.ok_or_else(|| {
+                SessionImportError::Config(
+                    t!("savedConnections.importSshConfigPathMissing").to_string(),
+                )
+            })?;
+            zzclawterm_core::prepare_ssh_config_import(path)
         }
         _ => {
-            let path = path.ok_or_else(|| "connection import path was not selected".to_string())?;
-            zzclawterm_core::prepare_session_import(path).map_err(|error| error.to_string())
+            let path = path.ok_or_else(|| {
+                SessionImportError::Config("connection import path was not selected".to_string())
+            })?;
+            prepare_session_import_with_options(
+                path,
+                SessionImportOptions {
+                    windterm_master_password: master_password,
+                },
+            )
         }
     }
 }

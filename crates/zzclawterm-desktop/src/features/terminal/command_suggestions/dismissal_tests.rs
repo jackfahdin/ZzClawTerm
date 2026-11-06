@@ -5,7 +5,7 @@ use gpui::{
     MouseButton, MouseDownEvent, ParentElement as _, Render, Styled as _, TestAppContext, Window,
     div, point, px, size,
 };
-use zzclawterm_core::{FuzzyResult, get_tracked_command};
+use zzclawterm_core::get_tracked_command;
 
 use super::CommandSuggestionSearchRequest;
 use crate::features::ZzClawTermApp;
@@ -61,6 +61,7 @@ fn open_suggestions(
         let request = app
             .prepare_command_suggestion_search(
                 app.terminal.assist.command_suggestion_search_gen,
+                zzclawterm_core::completion::types::CompletionMode::History,
                 cx,
             )
             .expect("typing can start a suggestion search");
@@ -73,10 +74,17 @@ fn open_suggestions(
                 source: "history".into(),
                 score: 1,
                 indices: Vec::new(),
+                fillable: true,
+                description: String::new(),
             }],
             selected_index: None,
             cursor_row: 0,
             cursor_col: 0,
+            mode: request.mode,
+            completion_revision: 0,
+            scope: None,
+            input_version: request.input_version,
+            sync_revision: request.sync_revision,
         });
         request
     })
@@ -94,13 +102,23 @@ fn assert_dismissed_without_losing_input(
     );
     app.publish_command_suggestion_search(
         request,
-        vec![FuzzyResult {
-            command: "echo example".into(),
-            display: "echo example".into(),
-            source: "history".into(),
-            score: 1,
-            indices: Vec::new(),
-        }],
+        zzclawterm_core::completion::types::CompletionResult {
+            revision: app.commands.completion_runtime().revision(),
+            candidates: vec![zzclawterm_core::completion::types::CompletionCandidate {
+                display: "echo example".into(),
+                insert_text: "echo example".into(),
+                description: String::new(),
+                range: 0..4,
+                kind: zzclawterm_core::completion::types::CandidateKind::History,
+                sources: vec![zzclawterm_core::completion::types::CandidateSource::History],
+                use_count: 1,
+                last_used_at_ms: 1,
+                score: 1,
+                indices: Vec::new(),
+                fillable: true,
+                context_priority: 1,
+            }],
+        },
         Duration::ZERO,
         cx,
     );

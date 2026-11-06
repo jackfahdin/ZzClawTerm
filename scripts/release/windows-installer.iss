@@ -65,6 +65,7 @@ Source: "{#SourceDir}\*.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\VERSION"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\conpty\*"; DestDir: "{app}\conpty"; Flags: recursesubdirs createallsubdirs ignoreversion
 ; VcXsrv is optional: package_native.py stages it when a distribution is
 ; available and skips it (with a warning) otherwise.
 #if FileExists(SourceDir + "\vcxsrv\vcxsrv.exe")

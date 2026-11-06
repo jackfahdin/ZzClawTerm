@@ -69,10 +69,16 @@ pub(super) fn connection_editor_rdp_section(
             .flex_col()
             .gap_3()
             .child(rdp_basic(section, cx))
-            .child(rdp_authentication(section, cx)),
-        ConnectionEditorSection::Security => rdp_security(section, cx),
+            .when(!section.editor.uses_mstsc_rdp(), |this| {
+                this.child(rdp_authentication(section, cx))
+            }),
+        ConnectionEditorSection::Security if !section.editor.uses_mstsc_rdp() => {
+            rdp_security(section, cx)
+        }
         ConnectionEditorSection::Network => rdp_network(section, cx),
-        ConnectionEditorSection::Display => rdp_display(section, cx),
+        ConnectionEditorSection::Display if !section.editor.uses_mstsc_rdp() => {
+            rdp_display(section, cx)
+        }
         ConnectionEditorSection::Session => rdp_session(section, cx),
         _ => div(),
     };
@@ -81,6 +87,14 @@ pub(super) fn connection_editor_rdp_section(
         .flex()
         .flex_col()
         .gap_3()
+        .when(section.editor.uses_mstsc_rdp(), |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(section.palette.text_muted))
+                    .child(t!("dialog.rdpMstscDesc")),
+            )
+        })
         .child(content)
 }
 
@@ -199,16 +213,26 @@ fn rdp_security(
                 )
             }),
         ))
-        .child(connection_editor_select(
-            ConnectionEditorRenderContext {
-                palette,
-                fields,
-                cx,
-            },
-            "connection-editor-rdp-certificate-policy",
-            t!("dialog.rdpCertificatePolicy"),
-            ConnectionEditorSelect::RdpCertificatePolicy,
-        ))
+        .when(editor.uses_windows_rdp(), |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(palette.text_muted))
+                    .child(t!("dialog.rdpWindowsAuthentication")),
+            )
+        })
+        .when(!editor.uses_windows_rdp(), |this| {
+            this.child(connection_editor_select(
+                ConnectionEditorRenderContext {
+                    palette,
+                    fields,
+                    cx,
+                },
+                "connection-editor-rdp-certificate-policy",
+                t!("dialog.rdpCertificatePolicy"),
+                ConnectionEditorSelect::RdpCertificatePolicy,
+            ))
+        })
 }
 
 fn rdp_network(
@@ -406,28 +430,38 @@ fn rdp_session(
                 fields,
                 cx,
             },
-            "connection-editor-rdp-clipboard-mode",
-            t!("dialog.rdpClipboard"),
-            ConnectionEditorSelect::RdpClipboardMode,
+            "connection-editor-rdp-backend",
+            t!("dialog.rdpBackend"),
+            ConnectionEditorSelect::RdpBackend,
         ))
+        .when(!editor.uses_mstsc_rdp(), |this| {
+            this.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(palette.text_muted))
+                    .child(t!("dialog.rdpBackendDesc")),
+            )
+        })
         .flex()
         .flex_col()
         .gap_3()
-        .child(rdp_switch_row(
-            palette,
-            "connection-rdp-auto-reconnect",
-            t!("dialog.rdpAutoReconnect"),
-            t!("dialog.rdpAutoReconnectDesc"),
-            editor.rdp_reconnect.enabled,
-            cx.listener(|this, _, _, cx| {
-                this.toggle_connection_editor_flag(ConnectionEditorToggle::RdpReconnect, cx)
-            }),
-        ))
-        .child(editor_stepper_field(
-            palette,
-            t!("dialog.rdpReconnectAttempts"),
-            ConnectionEditorField::RdpReconnectAttempts,
-            fields,
-            cx,
-        ))
+        .when(!editor.uses_mstsc_rdp(), |this| {
+            this.child(rdp_switch_row(
+                palette,
+                "connection-rdp-auto-reconnect",
+                t!("dialog.rdpAutoReconnect"),
+                t!("dialog.rdpAutoReconnectDesc"),
+                editor.rdp_reconnect.enabled,
+                cx.listener(|this, _, _, cx| {
+                    this.toggle_connection_editor_flag(ConnectionEditorToggle::RdpReconnect, cx)
+                }),
+            ))
+            .child(editor_stepper_field(
+                palette,
+                t!("dialog.rdpReconnectAttempts"),
+                ConnectionEditorField::RdpReconnectAttempts,
+                fields,
+                cx,
+            ))
+        })
 }

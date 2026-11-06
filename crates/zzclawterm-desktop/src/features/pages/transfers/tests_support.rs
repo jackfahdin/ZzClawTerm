@@ -1,6 +1,6 @@
 //! Fixtures shared by the transfers panel tests.
 
-use zzclawterm_transport::{SftpFileEntry, SftpFileType};
+use zzclawterm_files::sftp::{SftpFileEntry, SftpFileType};
 
 pub(in crate::features::pages::transfers) fn browser_entry(index: usize) -> SftpFileEntry {
     SftpFileEntry {

@@ -3,6 +3,7 @@
 use regex::Regex;
 use std::sync::OnceLock;
 use zzclawterm_core::ActionLinksMatcherSettings;
+use zzclawterm_core::mac_address::{MacAddress, MacAddressFormat};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ActionLinkKind {
@@ -10,6 +11,7 @@ pub(crate) enum ActionLinkKind {
     Ip,
     HostPort,
     Archive,
+    Mac,
 }
 
 impl ActionLinkKind {
@@ -19,6 +21,7 @@ impl ActionLinkKind {
             Self::Ip => "IPv4",
             Self::HostPort => "Host:Port",
             Self::Archive => "Archive",
+            Self::Mac => "MAC",
         }
     }
 }
@@ -38,9 +41,42 @@ pub(crate) struct ActionLinkMatch {
 pub(crate) struct ActionLinkAction {
     pub(crate) id: String,
     pub(crate) label: String,
-    pub(crate) command: Option<String>,
-    pub(crate) open_url: Option<String>,
+    pub(crate) target: ActionLinkTarget,
+    pub(crate) mac_format: Option<MacAddressFormat>,
     pub(crate) is_default: bool,
+}
+
+/// Exactly one execution target, shared by menu and modifier-click dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActionLinkTarget {
+    ExecuteCommand(String),
+    OpenUrl(String),
+    CopyText(String),
+    PasteText(String),
+}
+
+impl ActionLinkTarget {
+    pub(crate) fn text(&self) -> &str {
+        match self {
+            Self::ExecuteCommand(text)
+            | Self::OpenUrl(text)
+            | Self::CopyText(text)
+            | Self::PasteText(text) => text,
+        }
+    }
+}
+
+fn mac_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+        r"(?i)(?:[0-9a-f]{2}(?:[:-][0-9a-f]{2}){5}|[0-9a-f]{4}(?:[.-][0-9a-f]{4}){2}|[0-9a-f]{12})"
+    ).expect("mac regex")
+    })
+}
+
+fn mac_token_continuation(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '_' | ':' | '-' | '.')
 }
 
 fn ipv4_re() -> &'static Regex {
@@ -124,7 +160,7 @@ fn overlaps(a: (usize, usize), b: (usize, usize)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
-/// Scan plain text for action-link entities (priority: url > host:port > ipv4 > archive).
+/// Scan plain text for action-link entities (priority: url > host:port > mac > ipv4 > archive).
 pub(crate) fn find_action_links(
     text: &str,
     matchers: &ActionLinksMatcherSettings,
@@ -187,6 +223,33 @@ pub(crate) fn find_action_links(
         }
     }
 
+    if matchers.mac {
+        for m in mac_re().find_iter(text) {
+            // Reject whole malformed tokens rather than extracting a valid suffix.
+            if text[..m.start()]
+                .chars()
+                .next_back()
+                .is_some_and(mac_token_continuation)
+                || text[m.end()..]
+                    .chars()
+                    .next()
+                    .is_some_and(mac_token_continuation)
+                || m.as_str().parse::<MacAddress>().is_err()
+            {
+                continue;
+            }
+            matches.push(ActionLinkMatch {
+                kind: ActionLinkKind::Mac,
+                text: m.as_str().to_owned(),
+                value: m.as_str().to_owned(),
+                start: m.start(),
+                end: m.end(),
+                host: None,
+                port: None,
+            });
+        }
+    }
+
     if matchers.ipv4 {
         for m in ipv4_re().find_iter(text) {
             if !is_valid_ipv4(m.as_str()) {
@@ -226,8 +289,9 @@ pub(crate) fn find_action_links(
         let rank = |kind: ActionLinkKind| match kind {
             ActionLinkKind::Url => 0,
             ActionLinkKind::HostPort => 1,
-            ActionLinkKind::Ip => 2,
-            ActionLinkKind::Archive => 3,
+            ActionLinkKind::Mac => 2,
+            ActionLinkKind::Ip => 3,
+            ActionLinkKind::Archive => 4,
         };
         rank(a.kind)
             .cmp(&rank(b.kind))
@@ -261,19 +325,50 @@ pub(crate) fn match_at_offset(
 
 pub(crate) fn actions_for_match(item: &ActionLinkMatch) -> Vec<ActionLinkAction> {
     match item.kind {
+        ActionLinkKind::Mac => {
+            let Ok(mac) = item.value.parse::<MacAddress>() else {
+                return Vec::new();
+            };
+            MacAddressFormat::ALL
+                .into_iter()
+                .enumerate()
+                .flat_map(|(index, format)| {
+                    let text = mac.format(format);
+                    [
+                        ActionLinkAction {
+                            id: format!("mac-copy-{index}"),
+                            label: rust_i18n::t!("terminal.macCopy").to_string(),
+                            target: ActionLinkTarget::CopyText(text.clone()),
+                            mac_format: Some(format),
+                            is_default: format == MacAddressFormat::OctetColon,
+                        },
+                        ActionLinkAction {
+                            id: format!("mac-paste-{index}"),
+                            label: rust_i18n::t!("terminal.macInsert").to_string(),
+                            target: ActionLinkTarget::PasteText(text),
+                            mac_format: Some(format),
+                            is_default: false,
+                        },
+                    ]
+                })
+                .collect()
+        }
         ActionLinkKind::Url => vec![
             ActionLinkAction {
                 id: "open".into(),
                 label: "Open Link".into(),
-                command: None,
-                open_url: Some(item.value.clone()),
+                mac_format: None,
+                target: ActionLinkTarget::OpenUrl(item.value.clone()),
                 is_default: true,
             },
             ActionLinkAction {
                 id: "curl".into(),
                 label: "curl".into(),
-                command: Some(format!("curl {}", shell_quote(&item.value))),
-                open_url: None,
+                target: ActionLinkTarget::ExecuteCommand(format!(
+                    "curl {}",
+                    shell_quote(&item.value)
+                )),
+                mac_format: None,
                 is_default: false,
             },
         ],
@@ -281,29 +376,29 @@ pub(crate) fn actions_for_match(item: &ActionLinkMatch) -> Vec<ActionLinkAction>
             ActionLinkAction {
                 id: "ping".into(),
                 label: "Ping".into(),
-                command: Some(format!("ping {}", item.value)),
-                open_url: None,
+                target: ActionLinkTarget::ExecuteCommand(format!("ping {}", item.value)),
+                mac_format: None,
                 is_default: true,
             },
             ActionLinkAction {
                 id: "traceroute".into(),
                 label: "Traceroute".into(),
-                command: Some(format!("traceroute {}", item.value)),
-                open_url: None,
+                target: ActionLinkTarget::ExecuteCommand(format!("traceroute {}", item.value)),
+                mac_format: None,
                 is_default: false,
             },
             ActionLinkAction {
                 id: "ssh".into(),
                 label: "SSH".into(),
-                command: Some(format!("ssh {}", item.value)),
-                open_url: None,
+                target: ActionLinkTarget::ExecuteCommand(format!("ssh {}", item.value)),
+                mac_format: None,
                 is_default: false,
             },
             ActionLinkAction {
                 id: "curl-http".into(),
                 label: "curl http://".into(),
-                command: Some(format!("curl http://{}", item.value)),
-                open_url: None,
+                target: ActionLinkTarget::ExecuteCommand(format!("curl http://{}", item.value)),
+                mac_format: None,
                 is_default: false,
             },
         ],
@@ -320,29 +415,32 @@ pub(crate) fn actions_for_match(item: &ActionLinkMatch) -> Vec<ActionLinkAction>
                 ActionLinkAction {
                     id: "curl-http".into(),
                     label: "curl http://".into(),
-                    command: Some(format!("curl http://{}", item.value)),
-                    open_url: None,
+                    target: ActionLinkTarget::ExecuteCommand(format!("curl http://{}", item.value)),
+                    mac_format: None,
                     is_default: true,
                 },
                 ActionLinkAction {
                     id: "curl-https".into(),
                     label: "curl https://".into(),
-                    command: Some(format!("curl https://{}", item.value)),
-                    open_url: None,
+                    target: ActionLinkTarget::ExecuteCommand(format!(
+                        "curl https://{}",
+                        item.value
+                    )),
+                    mac_format: None,
                     is_default: false,
                 },
                 ActionLinkAction {
                     id: "nc".into(),
                     label: "nc -vz".into(),
-                    command: Some(format!("nc -vz {host} {port}")),
-                    open_url: None,
+                    target: ActionLinkTarget::ExecuteCommand(format!("nc -vz {host} {port}")),
+                    mac_format: None,
                     is_default: false,
                 },
                 ActionLinkAction {
                     id: "telnet".into(),
                     label: "Telnet".into(),
-                    command: Some(format!("telnet {host} {port}")),
-                    open_url: None,
+                    target: ActionLinkTarget::ExecuteCommand(format!("telnet {host} {port}")),
+                    mac_format: None,
                     is_default: false,
                 },
             ]
@@ -387,8 +485,8 @@ pub(crate) fn actions_for_match(item: &ActionLinkMatch) -> Vec<ActionLinkAction>
                 actions.push(ActionLinkAction {
                     id: "extract".into(),
                     label: "Extract".into(),
-                    command: Some(command),
-                    open_url: None,
+                    target: ActionLinkTarget::ExecuteCommand(command),
+                    mac_format: None,
                     is_default: true,
                 });
             }
@@ -396,8 +494,8 @@ pub(crate) fn actions_for_match(item: &ActionLinkMatch) -> Vec<ActionLinkAction>
                 actions.push(ActionLinkAction {
                     id: "list".into(),
                     label: "List contents".into(),
-                    command: Some(command),
-                    open_url: None,
+                    target: ActionLinkTarget::ExecuteCommand(command),
+                    mac_format: None,
                     is_default: actions.is_empty(),
                 });
             }
@@ -408,12 +506,122 @@ pub(crate) fn actions_for_match(item: &ActionLinkMatch) -> Vec<ActionLinkAction>
 
 #[cfg(test)]
 mod tests {
-    use zzclawterm_core::ActionLinksMatcherSettings;
 
-    use super::{ActionLinkKind, actions_for_match, find_action_links, match_at_offset};
+    use super::{
+        ActionLinkKind, ActionLinkTarget, actions_for_match, find_action_links, match_at_offset,
+    };
+
+    #[test]
+    fn mac_formats_share_five_copy_and_paste_candidates_and_one_safe_default() {
+        use zzclawterm_core::ActionLinksMatcherSettings;
+        use zzclawterm_core::mac_address::MacAddressFormat;
+        for input in [
+            "aa-bb-cc-dd-ee-ff",
+            "aabb-ccdd-eeff",
+            "aabb.ccdd.eeff",
+            "aa:bb:cc:dd:ee:ff",
+            "aabbccddeeff",
+        ] {
+            let found = find_action_links(input, &ActionLinksMatcherSettings::default(), true);
+            assert_eq!(found.len(), 1, "{input}");
+            assert_eq!(found[0].kind, ActionLinkKind::Mac);
+            assert_eq!(found[0].text, input);
+            let actions = actions_for_match(&found[0]);
+            assert_eq!(actions.len(), 10);
+            assert_eq!(actions.iter().filter(|action| action.is_default).count(), 1);
+            assert_eq!(
+                actions
+                    .iter()
+                    .find(|action| action.is_default)
+                    .unwrap()
+                    .target,
+                ActionLinkTarget::CopyText("AA:BB:CC:DD:EE:FF".into())
+            );
+            for (format, expected) in MacAddressFormat::ALL.into_iter().zip([
+                "AA-BB-CC-DD-EE-FF",
+                "AABB-CCDD-EEFF",
+                "AABB.CCDD.EEFF",
+                "AA:BB:CC:DD:EE:FF",
+                "AABBCCDDEEFF",
+            ]) {
+                let candidates = actions
+                    .iter()
+                    .filter(|action| action.mac_format == Some(format))
+                    .collect::<Vec<_>>();
+                assert_eq!(candidates.len(), 2);
+                assert_eq!(
+                    candidates[0].target,
+                    ActionLinkTarget::CopyText(expected.into())
+                );
+                assert_eq!(
+                    candidates[1].target,
+                    ActionLinkTarget::PasteText(expected.into())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mac_matching_rejects_malformed_tokens_and_identifier_substrings() {
+        use zzclawterm_core::ActionLinksMatcherSettings;
+        for text in [
+            "AA-BB:CC-DD:EE-FF",
+            "AABB.CCDD-EEFF",
+            "AA:BB:CC:DD:EE:FF:00:11",
+            "AABBCCDDEEFF00",
+            "0AABBCCDDEEFF",
+            "id_AABBCCDDEEFF",
+            "AABBCCDDEEFF_id",
+            "gAABBCCDDEEFF",
+            "AABBCCDDEEFFg",
+            "AA-BB-CC-DD-EE-FF-00",
+            "AABB-CCDD-EEFF-0011",
+            "éAABBCCDDEEFF",
+            "AABBCCDDEEFF界",
+            "AA:BB:CC:DD:EE:GG",
+            "AABB.CCDD.EEF",
+        ] {
+            assert!(
+                !find_action_links(text, &ActionLinksMatcherSettings::default(), true)
+                    .iter()
+                    .any(|item| item.kind == ActionLinkKind::Mac),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn mac_matches_keep_utf8_offsets_and_url_priority_and_respect_the_switch() {
+        use zzclawterm_core::ActionLinksMatcherSettings;
+        let text = "设备 [905d.7c16.b6d9], (90:5d:7c:16:b6:d9) https://example.com/AABBCCDDEEFF";
+        let mut matchers = ActionLinksMatcherSettings::default();
+        let matches = find_action_links(text, &matchers, true);
+        assert_eq!(
+            matches.iter().map(|item| item.kind).collect::<Vec<_>>(),
+            [
+                ActionLinkKind::Mac,
+                ActionLinkKind::Mac,
+                ActionLinkKind::Url
+            ]
+        );
+        for item in &matches {
+            assert_eq!(&text[item.start..item.end], item.text);
+            assert_eq!(
+                match_at_offset(text, item.start, &matchers).as_ref(),
+                Some(item)
+            );
+            assert_eq!(
+                match_at_offset(text, item.end - 1, &matchers).as_ref(),
+                Some(item)
+            );
+        }
+        matchers.mac = false;
+        assert_eq!(find_action_links(text, &matchers, true).len(), 1);
+    }
 
     #[test]
     fn urls_take_priority_over_embedded_hosts_ips_and_archives() {
+        use zzclawterm_core::ActionLinksMatcherSettings;
         let matchers = ActionLinksMatcherSettings::default();
         for url in [
             "http://123.123.123.123:123/sdfsdf",
@@ -438,20 +646,23 @@ mod tests {
             }
             let actions = actions_for_match(item);
             let default = actions.iter().find(|action| action.is_default).unwrap();
-            assert_eq!(default.open_url.as_deref(), Some(url));
-            assert!(default.command.is_none());
+            assert_eq!(default.target, ActionLinkTarget::OpenUrl(url.into()));
             let curl = actions.iter().find(|action| action.id == "curl").unwrap();
             let expected_command = if url.contains('?') {
                 format!("curl '{url}'")
             } else {
                 format!("curl {url}")
             };
-            assert_eq!(curl.command.as_deref(), Some(expected_command.as_str()));
+            assert_eq!(
+                curl.target,
+                ActionLinkTarget::ExecuteCommand(expected_command)
+            );
         }
     }
 
     #[test]
     fn bare_host_ports_keep_their_port_actions() {
+        use zzclawterm_core::ActionLinksMatcherSettings;
         let matchers = ActionLinksMatcherSettings::default();
         for host in ["123.123.123.123", "example.com", "localhost"] {
             let value = format!("{host}:123");
@@ -465,7 +676,10 @@ mod tests {
             let actions = actions_for_match(item);
             let default = actions.iter().find(|action| action.is_default).unwrap();
             assert_eq!(default.id, "curl-http");
-            assert_eq!(default.command, Some(format!("curl http://{value}")));
+            assert_eq!(
+                default.target,
+                ActionLinkTarget::ExecuteCommand(format!("curl http://{value}"))
+            );
             assert!(actions.iter().any(|action| action.id == "nc"));
             assert!(actions.iter().any(|action| action.id == "telnet"));
         }
@@ -473,6 +687,7 @@ mod tests {
 
     #[test]
     fn url_priority_preserves_separate_action_links_in_text_order() {
+        use zzclawterm_core::ActionLinksMatcherSettings;
         let matchers = ActionLinksMatcherSettings::default();
         let found = find_action_links(
             "192.168.1.1:22 https://example.com:8443/app.zip 10.0.0.1 backup.tar.gz",
@@ -496,6 +711,7 @@ mod tests {
 
     #[test]
     fn detects_ip_and_actions() {
+        use zzclawterm_core::ActionLinksMatcherSettings;
         let matchers = ActionLinksMatcherSettings::default();
         let found = find_action_links("gateway 192.168.1.1 up", &matchers, true);
         assert_eq!(found.len(), 1);
@@ -506,6 +722,7 @@ mod tests {
 
     #[test]
     fn detects_host_port() {
+        use zzclawterm_core::ActionLinksMatcherSettings;
         let matchers = ActionLinksMatcherSettings::default();
         let found = find_action_links("listening on api.example.com:8080", &matchers, true);
         assert_eq!(found.len(), 1);
@@ -514,6 +731,7 @@ mod tests {
 
     #[test]
     fn rejects_source_location_as_host_port() {
+        use zzclawterm_core::ActionLinksMatcherSettings;
         let matchers = ActionLinksMatcherSettings::default();
         let found = find_action_links("error main.rs:42", &matchers, true);
         assert!(found.is_empty());
@@ -521,6 +739,7 @@ mod tests {
 
     #[test]
     fn detects_archive() {
+        use zzclawterm_core::ActionLinksMatcherSettings;
         let matchers = ActionLinksMatcherSettings::default();
         let found = find_action_links("download app.tar.gz now", &matchers, true);
         assert_eq!(found.len(), 1);

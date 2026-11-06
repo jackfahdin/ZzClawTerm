@@ -183,6 +183,11 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: bash scripts/ci/install-appimagetool.sh "${TARGET}"
 
+      - name: Prepare bundled ConPTY
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python scripts/release/prepare_conpty.py
+
       - name: Install Inno Setup
         if: runner.os == 'Windows'
         shell: pwsh

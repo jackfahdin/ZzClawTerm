@@ -54,6 +54,7 @@ pub(crate) struct UpdateStore {
     check_generation: u64,
     startup_check_started: bool,
     update_attention: bool,
+    release_notes_expanded: bool,
     pub(in crate::features) download: DownloadState,
     pub(in crate::features) download_generation: u64,
     pub(in crate::features) download_cancel: ConnectionAttempt,
@@ -61,6 +62,7 @@ pub(crate) struct UpdateStore {
     tx: UnboundedSender<UpdateEvent>,
     rx: Option<UnboundedReceiver<UpdateEvent>>,
     blocking_jobs: BlockingJobScheduler,
+    shutdown_started: bool,
 }
 
 impl UpdateStore {
@@ -77,6 +79,7 @@ impl UpdateStore {
             check_generation: 0,
             startup_check_started: false,
             update_attention: false,
+            release_notes_expanded: false,
             download: DownloadState::Idle,
             download_generation: 0,
             download_cancel: Default::default(),
@@ -84,6 +87,7 @@ impl UpdateStore {
             tx,
             rx: Some(rx),
             blocking_jobs: BlockingJobScheduler::new(),
+            shutdown_started: false,
         }
     }
 
@@ -140,6 +144,40 @@ impl UpdateStore {
         was_visible
     }
 
+    pub(in crate::features) fn release_notes_expanded(&self) -> bool {
+        self.release_notes_expanded
+    }
+
+    pub(in crate::features) fn set_release_notes_expanded(&mut self, expanded: bool) {
+        self.release_notes_expanded = expanded;
+    }
+
+    /// Notes open for a release the user can still install, and close again
+    /// when the outcome is a failure or "already current". Download progress
+    /// keeps whatever the user last chose.
+    fn assign_phase(&mut self, phase: UpdatePhase) {
+        let same_kind = std::mem::discriminant(&self.phase) == std::mem::discriminant(&phase);
+        let preserve_notes = matches!(
+            phase,
+            UpdatePhase::Downloading { .. } | UpdatePhase::Applying
+        );
+        self.phase = phase;
+        if same_kind || preserve_notes {
+            return;
+        }
+        self.release_notes_expanded =
+            matches!(self.phase, UpdatePhase::Available | UpdatePhase::Ready);
+    }
+
+    pub(crate) fn begin_shutdown(&mut self) -> Option<impl FnOnce() + Send + 'static + use<>> {
+        if self.shutdown_started {
+            return None;
+        }
+        self.shutdown_started = true;
+        self.download_cancel.cancel();
+        Some(self.blocking_jobs.begin_shutdown())
+    }
+
     pub(crate) fn blocking_jobs(&self) -> BlockingJobScheduler {
         self.blocking_jobs.clone()
     }
@@ -156,6 +194,9 @@ impl UpdateStore {
         &mut self,
         _kind: UpdateCheckKind,
     ) -> Option<(UnboundedSender<UpdateEvent>, u64)> {
+        if self.shutdown_started {
+            return None;
+        }
         if matches!(
             self.phase,
             UpdatePhase::Checking
@@ -166,7 +207,7 @@ impl UpdateStore {
             return None;
         }
         self.check_generation = self.check_generation.wrapping_add(1);
-        self.phase = UpdatePhase::Checking;
+        self.assign_phase(UpdatePhase::Checking);
         self.status = "checking for updates...".to_string();
         self.info = None;
         self.repository = None;
@@ -189,6 +230,9 @@ impl UpdateStore {
         u64,
         UnboundedSender<UpdateEvent>,
     )> {
+        if self.shutdown_started {
+            return None;
+        }
         if matches!(
             self.phase,
             UpdatePhase::Downloading { .. } | UpdatePhase::Applying
@@ -204,10 +248,10 @@ impl UpdateStore {
             received: 0,
             total: None,
         };
-        self.phase = UpdatePhase::Downloading {
+        self.assign_phase(UpdatePhase::Downloading {
             received: 0,
             total: None,
-        };
+        });
         self.status = "downloading update...".to_string();
         Some((info, repository, self.download_generation, self.tx.clone()))
     }
@@ -217,23 +261,23 @@ impl UpdateStore {
         self.download_generation = self.download_generation.wrapping_add(1);
         self.download = DownloadState::Idle;
         self.download_repository = None;
-        self.phase = if self.info.as_ref().is_some_and(|info| info.available) {
+        self.assign_phase(if self.info.as_ref().is_some_and(|info| info.available) {
             UpdatePhase::Available
         } else {
             UpdatePhase::Idle
-        };
+        });
         self.status = "update download cancelled".to_string();
     }
 
     pub(crate) fn mark_applying(&mut self) {
-        self.phase = UpdatePhase::Applying;
+        self.assign_phase(UpdatePhase::Applying);
         self.status = "installing update...".to_string();
     }
 
     pub(crate) fn clear_install_request(&mut self) {
         self.install_requested = false;
         if matches!(self.download, DownloadState::Ready(_)) {
-            self.phase = UpdatePhase::Ready;
+            self.assign_phase(UpdatePhase::Ready);
             self.status = "update ready to install".to_string();
         }
     }
@@ -264,11 +308,11 @@ impl UpdateStore {
                         } else {
                             format!("ZzClawTerm is up to date ({})", info.current_version)
                         };
-                        self.phase = if info.available {
+                        self.assign_phase(if info.available {
                             UpdatePhase::Available
                         } else {
                             UpdatePhase::UpToDate
-                        };
+                        });
                         self.info = Some(info);
                         self.repository = Some(repository);
                         self.download_repository = None;
@@ -276,7 +320,7 @@ impl UpdateStore {
                     Err(error) if kind == UpdateCheckKind::Silent => {
                         self.update_attention = false;
                         self.last_silent_error = Some(error);
-                        self.phase = UpdatePhase::Idle;
+                        self.assign_phase(UpdatePhase::Idle);
                         self.status = format!("Current version {}", env!("CARGO_PKG_VERSION"));
                         self.info = None;
                         self.repository = None;
@@ -285,10 +329,10 @@ impl UpdateStore {
                     Err(error) => {
                         self.update_attention = false;
                         self.status = format!("update check failed: {error}");
-                        self.phase = UpdatePhase::Failed {
+                        self.assign_phase(UpdatePhase::Failed {
                             message: error,
                             download: false,
-                        };
+                        });
                         self.info = None;
                         self.repository = None;
                         self.download_repository = None;
@@ -300,7 +344,7 @@ impl UpdateStore {
                 if generation != self.download_generation {
                     return false;
                 }
-                self.phase = match &state {
+                self.assign_phase(match &state {
                     DownloadState::Idle => UpdatePhase::Available,
                     DownloadState::Downloading { received, total } => UpdatePhase::Downloading {
                         received: *received,
@@ -311,7 +355,7 @@ impl UpdateStore {
                         message: error.clone(),
                         download: true,
                     },
-                };
+                });
                 self.status = match &state {
                     DownloadState::Idle => "update available".to_string(),
                     DownloadState::Downloading { .. } => "downloading update...".to_string(),
@@ -376,6 +420,16 @@ mod tests {
         let mut state = UpdateStore::new();
         assert!(state.mark_startup_check_started());
         assert!(!state.mark_startup_check_started());
+    }
+
+    #[test]
+    fn process_scheduler_shutdown_is_admitted_once_and_rejects_new_updates() {
+        let mut state = UpdateStore::new();
+        let cleanup = state.begin_shutdown().unwrap();
+        assert!(state.begin_shutdown().is_none());
+        assert!(state.begin_check(UpdateCheckKind::Manual).is_none());
+        assert!(state.begin_download(Default::default()).is_none());
+        cleanup();
     }
 
     #[test]
@@ -548,5 +602,55 @@ mod tests {
             Ok(update_info(true)),
         ));
         assert!(state.update_attention());
+    }
+
+    #[test]
+    fn release_notes_open_for_an_installable_release_and_stay_put_while_downloading() {
+        use crate::features::update::download::DownloadState;
+
+        let mut state = UpdateStore::new();
+        assert!(!state.release_notes_expanded());
+
+        let (_, generation) = state.begin_check(UpdateCheckKind::Manual).unwrap();
+        assert!(state.apply_event(check_event(
+            generation,
+            UpdateCheckKind::Manual,
+            Ok(update_info(true)),
+        )));
+        assert!(state.release_notes_expanded());
+
+        state.set_release_notes_expanded(false);
+        let (_info, _repository, generation, _events) =
+            state.begin_download(Default::default()).unwrap();
+        assert!(!state.release_notes_expanded());
+        assert!(state.apply_event(UpdateEvent::Download {
+            generation,
+            state: DownloadState::Downloading {
+                received: 1,
+                total: Some(4),
+            },
+        }));
+        assert!(!state.release_notes_expanded());
+        state.set_release_notes_expanded(true);
+
+        assert!(
+            state.apply_event(UpdateEvent::Download {
+                generation,
+                state: DownloadState::Failed(
+                    "portable update archive contains an unexpected file: conpty/LICENSE.txt"
+                        .to_string(),
+                ),
+            })
+        );
+        assert!(!state.release_notes_expanded());
+
+        let (_, generation) = state.begin_check(UpdateCheckKind::Manual).unwrap();
+        assert!(state.apply_event(check_event(
+            generation,
+            UpdateCheckKind::Manual,
+            Ok(update_info(false)),
+        )));
+        assert!(!state.release_notes_expanded());
+        assert!(matches!(state.phase(), UpdatePhase::UpToDate));
     }
 }

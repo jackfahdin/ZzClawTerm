@@ -1,18 +1,15 @@
-use std::collections::HashSet;
-
+use super::super::panels::RemoteMonitorPanel;
+use super::{DockerRenderContext, docker_tab_menu_layer};
+use crate::features::shell::gpui_code_font_family;
+use crate::models::DockerTab;
+use crate::theme::ThemePalette;
 use gpui::{
     App, ClickEvent, Context, FontWeight, IntoElement, MouseButton, Window, div, prelude::*, px,
     rgb,
 };
-use zzclawterm_transport::RemoteDockerOverview;
+use std::collections::HashSet;
+use zzclawterm_remote_ops::docker::RemoteDockerOverview;
 use zzclawterm_ui::{ZzClawTabItem, ZzClawTabs};
-
-use super::super::panels::RemoteMonitorPanel;
-use crate::features::shell::gpui_code_font_family;
-use crate::models::DockerTab;
-use crate::theme::ThemePalette;
-
-use super::{DockerRenderContext, docker_tab_menu_layer};
 
 fn tab_label(label: String, count: usize, loaded: bool) -> String {
     if loaded {

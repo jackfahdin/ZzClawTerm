@@ -1,0 +1,20 @@
+[package]
+name = "zzclawterm-recording"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+zzclawterm-core.workspace = true
+zzclawterm-terminal.workspace = true
+regex.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tempfile.workspace = true
+same-file.workspace = true
+
+[dev-dependencies]
+zzclawterm-core = { workspace = true, features = ["test-support"] }

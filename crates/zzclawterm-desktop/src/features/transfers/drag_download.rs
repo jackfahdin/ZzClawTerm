@@ -6,17 +6,16 @@ use std::{
     path::Path,
     sync::{Arc, Weak},
 };
-use zzclawterm_transport::{
-    RemoteFileService, SftpFileEntry, SftpPathTransferOptions, SftpTransferControl,
-    SftpTransferOptions,
-};
+use zzclawterm_files::remote_file::RemoteFileService;
+use zzclawterm_files::sftp::{SftpFileEntry, SftpTransferControl};
+use zzclawterm_files::sftp_transfer_types::{SftpPathTransferOptions, SftpTransferOptions};
 
 pub(super) struct RemoteDownloadProvider {
     session_id: String,
     service: Weak<RemoteFileService>,
     entry: SftpFileEntry,
     options: SftpPathTransferOptions,
-    _lifetime: Arc<zzclawterm_transport::drag_export::DragSourceLifetime>,
+    _lifetime: Arc<zzclawterm_files::drag_export::DragSourceLifetime>,
     sender: UnboundedSender<TransferJobResult>,
     control: SftpTransferControl,
 }
@@ -28,7 +27,7 @@ impl RemoteDownloadProvider {
         options: SftpTransferOptions,
         sender: UnboundedSender<TransferJobResult>,
         control: SftpTransferControl,
-        lifetime: Arc<zzclawterm_transport::drag_export::DragSourceLifetime>,
+        lifetime: Arc<zzclawterm_files::drag_export::DragSourceLifetime>,
     ) -> Self {
         Self {
             session_id,
@@ -83,7 +82,7 @@ impl PromisedFileProvider for RemoteDownloadProvider {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .ok_or_else(|| anyhow::anyhow!("invalid promised destination"))?;
-                zzclawterm_transport::download_path::validate_name(name)?;
+                zzclawterm_files::download_path::validate_name(name)?;
                 // Finder resolves top-level naming conflicts. A race must never turn
                 // its negotiated promise into an overwrite of another user's file.
                 let summary = service.download_remote_path_with_progress_and_path_options(

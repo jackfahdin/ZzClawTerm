@@ -1,13 +1,10 @@
-use gpui::{ClickEvent, Context, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Window};
-use zzclawterm_core::truncate_preview;
-use zzclawterm_transport::SftpFileEntry;
-
-use std::collections::HashSet;
-
+use super::{TransferPathPart, transfer_path_part_value};
 use crate::features::ZzClawTermApp;
 use crate::models::{TransferBrowserContextTarget, TransferBrowserDragSelectionState};
-
-use super::{TransferPathPart, transfer_path_part_value};
+use gpui::{ClickEvent, Context, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Window};
+use std::collections::HashSet;
+use zzclawterm_core::truncate_preview;
+use zzclawterm_files::sftp::SftpFileEntry;
 
 /// Converts a selection identity key to its display path so raw-path-token is not
 /// treated as a user-facing path.
@@ -20,7 +17,7 @@ fn browser_display_path_for_identity(entries: &[SftpFileEntry], identity: &str) 
 }
 
 fn browser_operation_target_directory(
-    backend: zzclawterm_transport::FileBrowserBackendKind,
+    backend: zzclawterm_files::file_browser::FileBrowserBackendKind,
     selected: &[SftpFileEntry],
     current: &str,
     home: &str,
@@ -30,7 +27,7 @@ fn browser_operation_target_directory(
         return if entry.is_directory() {
             entry.path.clone()
         } else {
-            zzclawterm_transport::file_browser_parent(backend, &entry.path)
+            zzclawterm_files::file_browser::file_browser_parent(backend, &entry.path)
         };
     }
     [current, home, fallback]
@@ -46,7 +43,7 @@ impl ZzClawTermApp {
         let backend = self
             .session
             .active_file_browser_backend()
-            .unwrap_or(zzclawterm_transport::FileBrowserBackendKind::Remote);
+            .unwrap_or(zzclawterm_files::file_browser::FileBrowserBackendKind::Remote);
         if self.settings.summary().ui_file_explorer_view_mode
             == zzclawterm_core::TransferBrowserViewMode::Tree
             && let Some(session) = self.session.active_id()
@@ -141,7 +138,7 @@ impl ZzClawTermApp {
         // A plain press on a selected entry preserves the multi-file selection
         // for export. Modifier gestures retain the existing range-selection path.
         let exportable = self.session.active_file_browser_backend()
-            == Some(zzclawterm_transport::FileBrowserBackendKind::Local)
+            == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Local)
             || ((window.supports_virtual_file_drag()
                 || window.supports_file_promise_drag()
                 || cfg!(target_os = "linux"))
@@ -149,8 +146,8 @@ impl ZzClawTermApp {
                     entry.matches_identity(&path)
                         && matches!(
                             entry.file_type,
-                            zzclawterm_transport::SftpFileType::File
-                                | zzclawterm_transport::SftpFileType::Directory
+                            zzclawterm_files::sftp::SftpFileType::File
+                                | zzclawterm_files::sftp::SftpFileType::Directory
                         )
                 }));
         if exportable
@@ -651,11 +648,10 @@ impl ZzClawTermApp {
 
 #[cfg(test)]
 mod tests {
-    use zzclawterm_transport::{
-        FileBrowserBackendKind, RemoteFilePath, SftpFileEntry, SftpFileType,
-    };
 
     use super::{browser_display_path_for_identity, browser_operation_target_directory};
+    use zzclawterm_files::file_browser::FileBrowserBackendKind;
+    use zzclawterm_files::sftp::{RemoteFilePath, SftpFileEntry, SftpFileType};
 
     fn entry(name: &str, path: &str, file_type: SftpFileType) -> SftpFileEntry {
         SftpFileEntry {

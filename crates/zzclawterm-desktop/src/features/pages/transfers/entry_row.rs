@@ -1,19 +1,16 @@
+use super::{format_permissions_octal, format_sftp_modified};
+use crate::features::pages::transfers::panel::TransferPanel;
+use crate::features::{shell::gpui_code_font_family, view_widgets::transfer_entry_icon};
+use crate::models::{TransferBrowserColumnWidths, TransferRenameState};
+use crate::theme::ThemePalette;
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, InteractiveElement as _, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
     Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, div, prelude::*, px, rgb,
 };
-use zzclawterm_transport::{SftpFileEntry, SftpFileType};
-use zzclawterm_ui::{ZzClawHoverCard, ZzClawPopoverAlign, ZzClawPopoverPlacement};
-
 use std::collections::HashSet;
-
-use crate::features::{shell::gpui_code_font_family, view_widgets::transfer_entry_icon};
-use crate::models::{TransferBrowserColumnWidths, TransferRenameState};
-use crate::theme::ThemePalette;
-
-use super::{format_permissions_octal, format_sftp_modified};
-use crate::features::pages::transfers::panel::TransferPanel;
+use zzclawterm_files::sftp::{SftpFileEntry, SftpFileType};
+use zzclawterm_ui::{ZzClawHoverCard, ZzClawPopoverAlign, ZzClawPopoverPlacement};
 
 pub(in crate::features) fn format_browser_file_size(size: Option<u64>) -> String {
     match size {

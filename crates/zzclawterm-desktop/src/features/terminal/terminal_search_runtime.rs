@@ -1,12 +1,3 @@
-use std::hash::{Hash, Hasher};
-use std::ops::Range;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use futures::StreamExt as _;
-use gpui::{Context, KeyDownEvent, Window};
-use rust_i18n::t;
-
 use crate::features::terminal::terminal_surface::{
     TerminalOverviewMarker, TerminalOverviewMarkerKind,
 };
@@ -17,6 +8,13 @@ use crate::models::{
     terminal_frame_search_result_is_current,
 };
 use crate::terminal::TerminalBufferMatch;
+use futures::StreamExt as _;
+use gpui::{Context, KeyDownEvent, Window};
+use rust_i18n::t;
+use std::hash::{Hash, Hasher};
+use std::ops::Range;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Default)]
 pub(in crate::features) struct TerminalSelectedOccurrenceMatches {
@@ -597,7 +595,7 @@ impl ZzClawTermApp {
                 let last_error = status.last_error.clone();
                 self.recording.apply_status(status);
                 match state {
-                    zzclawterm_transport::RecordingStatusState::Degraded
+                    zzclawterm_recording::recording::RecordingStatusState::Degraded
                         if previous_state != Some(state) =>
                     {
                         self.shell.set_status(format!(
@@ -606,7 +604,7 @@ impl ZzClawTermApp {
                             last_error.unwrap_or_else(|| t!("recording.degraded").to_string())
                         ));
                     }
-                    zzclawterm_transport::RecordingStatusState::Failed
+                    zzclawterm_recording::recording::RecordingStatusState::Failed
                         if previous_state != Some(state) =>
                     {
                         self.shell.set_status(format!(
@@ -615,11 +613,11 @@ impl ZzClawTermApp {
                             last_error.unwrap_or_else(|| t!("recording.failed").to_string())
                         ));
                     }
-                    zzclawterm_transport::RecordingStatusState::Starting
-                    | zzclawterm_transport::RecordingStatusState::Recording
-                    | zzclawterm_transport::RecordingStatusState::Stopping
-                    | zzclawterm_transport::RecordingStatusState::Degraded
-                    | zzclawterm_transport::RecordingStatusState::Failed => {}
+                    zzclawterm_recording::recording::RecordingStatusState::Starting
+                    | zzclawterm_recording::recording::RecordingStatusState::Recording
+                    | zzclawterm_recording::recording::RecordingStatusState::Stopping
+                    | zzclawterm_recording::recording::RecordingStatusState::Degraded
+                    | zzclawterm_recording::recording::RecordingStatusState::Failed => {}
                 }
                 true
             }
@@ -655,7 +653,7 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn terminal_history_search_results(
         &self,
-    ) -> Result<zzclawterm_transport::TerminalHistorySearchResponse, String> {
+    ) -> Result<zzclawterm_recording::recording::TerminalHistorySearchResponse, String> {
         let Some(key) = self.terminal_history_search_key() else {
             return Ok(empty_terminal_history_search_response());
         };
@@ -804,8 +802,9 @@ fn terminal_search_next_index(
     }
 }
 
-fn empty_terminal_history_search_response() -> zzclawterm_transport::TerminalHistorySearchResponse {
-    zzclawterm_transport::TerminalHistorySearchResponse {
+fn empty_terminal_history_search_response()
+-> zzclawterm_recording::recording::TerminalHistorySearchResponse {
+    zzclawterm_recording::recording::TerminalHistorySearchResponse {
         total: 0,
         elapsed_ms: 0,
         truncated: false,
@@ -868,9 +867,6 @@ fn current_selected_occurrence_matches(
 
 #[cfg(test)]
 mod tests {
-    use crate::terminal::TerminalBufferMatch;
-    use std::collections::HashMap;
-
     use super::{
         TerminalSelectedOccurrenceMatches, current_selected_occurrence_matches,
         terminal_matches_in_absolute_range, terminal_search_index_for_position,
@@ -884,6 +880,8 @@ mod tests {
         TerminalBufferCellPos, TerminalFrameSearchKey, TerminalFrameSearchResult,
         TerminalSelection, TerminalViewState,
     };
+    use crate::terminal::TerminalBufferMatch;
+    use std::collections::HashMap;
 
     #[test]
     fn search_navigation_wraps_by_default_and_stops_when_disabled() {

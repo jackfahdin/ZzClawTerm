@@ -1,17 +1,16 @@
-use rust_i18n::t;
-
+use super::super::helpers::{remote_child_path, valid_remote_child_name};
 use crate::features::{ZzClawTermApp, text_inputs::TextInputSetup};
 use crate::models::{
     TransferJobEvent, TransferJobKind, TransferJobOutput, TransferJobResult, TransferJobState,
     TransferJobStatus, TransferNewSymlinkState, TransferRenameState, TransferSymlinkField,
 };
 use gpui::{Context, KeyDownEvent, Window};
-use zzclawterm_transport::{
-    FileBrowserBackendKind, RemoteFilePath, file_browser_join, file_browser_name,
-    file_browser_parent, file_browser_path_is_root,
+use rust_i18n::t;
+use zzclawterm_files::file_browser::{
+    FileBrowserBackendKind, file_browser_join, file_browser_name, file_browser_parent,
+    file_browser_path_is_root,
 };
-
-use super::super::helpers::{remote_child_path, valid_remote_child_name};
+use zzclawterm_files::sftp::RemoteFilePath;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn open_transfer_new_symlink_dialog(
@@ -268,7 +267,7 @@ impl ZzClawTermApp {
 
     fn open_transfer_rename_for_entry(
         &mut self,
-        entry: zzclawterm_transport::SftpFileEntry,
+        entry: zzclawterm_files::sftp::SftpFileEntry,
         cx: &mut Context<Self>,
     ) -> bool {
         let opened = self.open_transfer_rename_for_path(entry.path.clone(), cx);

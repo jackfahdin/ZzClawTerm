@@ -1,15 +1,8 @@
-use futures::channel::mpsc::unbounded;
-use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
-use std::sync::Arc;
-
-use gpui::{ScrollHandle, ScrollStrategy, TestAppContext, UniformListScrollHandle, point, px};
-use zzclawterm_transport::{
-    RemoteTextDocument, RemoteTextGeneration, RemoteTextMetadata, RemoteTextRevision,
-    RemoteTextWriteResult, SftpDuplicatePolicy, SftpFileEntry, SftpFileProperties, SftpFileType,
-    SftpPathTransferOptions, SftpTransferControl, SftpTransferOptions, SftpWriteTextResult,
+use super::{
+    TransferEditorCloseAfterSave, TransferEditorCloseOutcome, TransferEditorSaveOutcome,
+    TransferFeatureFocus, TransferFeatureState, TransferPanelState, TransferPathState,
+    TransferQueueState,
 };
-
 use crate::models::{
     TransferBrowserContextTarget, TransferBrowserNavigationSnapshot,
     TransferBrowserSessionCacheState, TransferBrowserSortColumn, TransferEditorField,
@@ -17,12 +10,23 @@ use crate::models::{
     TransferJobResult, TransferJobState, TransferJobStatus, TransferNewFolderState,
     TransferPathPromptKind, TransferPropertiesState, TransferRenameState,
 };
-
-use super::{
-    TransferEditorCloseAfterSave, TransferEditorCloseOutcome, TransferEditorSaveOutcome,
-    TransferFeatureFocus, TransferFeatureState, TransferPanelState, TransferPathState,
-    TransferQueueState,
+use futures::channel::mpsc::unbounded;
+use gpui::{ScrollHandle, ScrollStrategy, TestAppContext, UniformListScrollHandle, point, px};
+use std::collections::{HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::Arc;
+use zzclawterm_files::remote_file::{
+    RemoteTextDocument, RemoteTextGeneration, RemoteTextMetadata, RemoteTextRevision,
+    RemoteTextWriteResult,
 };
+use zzclawterm_files::sftp::{
+    SftpFileEntry, SftpFileProperties, SftpFileType, SftpTransferControl, SftpWriteTextResult,
+};
+use zzclawterm_files::sftp_transfer_types::{
+    SftpDuplicatePolicy, SftpPathTransferOptions, SftpTransferOptions,
+};
+
+mod delete_jobs;
 
 fn transfer_focus(cx: &TestAppContext) -> TransferFeatureFocus {
     cx.update(|cx| TransferFeatureFocus {
@@ -133,7 +137,8 @@ fn bulk_executor_is_lazy_and_shutdown_wakes_paused_transfers() {
 
 #[test]
 fn inactive_delete_invalidates_cached_directory_until_its_session_is_restored() {
-    use zzclawterm_transport::{FileBrowserBackendKind, RemoteFilePath};
+    use zzclawterm_files::file_browser::FileBrowserBackendKind;
+    use zzclawterm_files::sftp::RemoteFilePath;
 
     let cx = TestAppContext::single();
     let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -571,7 +576,7 @@ fn browser_session_restore_preserves_the_raw_directory_token() {
     let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
     let remote =
-        zzclawterm_transport::RemoteFilePath::from_raw("/srv/non-utf8-?", b"/srv/non-utf8-\xff");
+        zzclawterm_files::sftp::RemoteFilePath::from_raw("/srv/non-utf8-?", b"/srv/non-utf8-\xff");
     transfer.store_browser_session_cache(
         "session-a".to_string(),
         TransferBrowserSessionCacheState {
@@ -1569,7 +1574,8 @@ fn transfer_queue_owns_admission_events_and_job_removal() {
 
 #[test]
 fn pausing_and_resuming_visible_jobs_discard_old_speed_samples() {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    use std::time::Instant;
 
     let cx = TestAppContext::single();
     let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -1830,7 +1836,7 @@ fn preview_tab(session_id: &str, remote_path: &str) -> crate::models::TransferPr
     crate::models::TransferPreviewState {
         id: crate::models::TransferPreviewState::tab_id_for_remote_path(
             Some(session_id),
-            &zzclawterm_transport::RemoteFilePath::new(remote_path),
+            &zzclawterm_files::sftp::RemoteFilePath::new(remote_path),
         ),
         session_id: Some(session_id.to_string()),
         remote_path: remote_path.to_string(),
@@ -2066,14 +2072,14 @@ fn promised_retry_keeps_original_source_and_execution_contract_until_released() 
     let cx = TestAppContext::single();
     let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut transfer = transfer_state(&cx);
-    let source = std::sync::Arc::new(zzclawterm_transport::RemoteFileService::new(
+    let source = std::sync::Arc::new(zzclawterm_files::remote_file::RemoteFileService::new(
         zzclawterm_transport::SshSessionConfig::default(),
     ));
     transfer.bind_promised_download(
         "promise",
         SftpPathTransferOptions::for_promised_download(
             SftpTransferOptions::default().with_max_retries(2),
-            zzclawterm_transport::SftpFileType::Directory,
+            zzclawterm_files::sftp::SftpFileType::Directory,
         ),
         std::sync::Arc::downgrade(&source),
     );
@@ -2111,7 +2117,8 @@ fn file_operation_context_retains_both_sessions_and_migrates_retry_identity() {
         FileOperationContext, FileOperationEndpoint, FileOperationRequest, FileTransferIntent,
         FileTransferOperation,
     };
-    use zzclawterm_transport::RemoteFilePath;
+    use zzclawterm_files::sftp::RemoteFilePath;
+
     let cx = TestAppContext::single();
     let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut state = transfer_state(&cx);
@@ -2174,11 +2181,12 @@ fn file_operation_context_retains_both_sessions_and_migrates_retry_identity() {
 
 #[test]
 fn metadata_file_operations_are_excluded_from_shared_pause() {
-    use crate::features::transfers::file_operations::{
-        FileMutation, FileMutationIntent, FileOperationContext, FileOperationEndpoint,
-        FileOperationRequest,
-    };
-    use zzclawterm_transport::RemoteFilePath;
+    use crate::features::transfers::file_operations::FileOperationContext;
+    use crate::features::transfers::file_operations::FileOperationEndpoint;
+    use crate::features::transfers::file_operations::FileOperationRequest;
+    use crate::features::transfers::file_operations::{FileMutation, FileMutationIntent};
+    use zzclawterm_files::sftp::RemoteFilePath;
+
     let cx = TestAppContext::single();
     let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let mut state = transfer_state(&cx);
@@ -2200,6 +2208,7 @@ fn metadata_file_operations_are_excluded_from_shared_pause() {
             }),
         },
     );
+    assert!(!state.supports_bulk_admission("metadata"));
     assert_eq!(state.pause_visible_transfer_jobs(Some("source")), 0);
     assert_eq!(
         state.transfer_job("metadata").unwrap().status,

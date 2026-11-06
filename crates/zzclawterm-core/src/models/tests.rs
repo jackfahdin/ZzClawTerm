@@ -218,6 +218,7 @@ fn rdp_connection_defaults_and_endpoint_match_tauri_shape() {
     let ConnectionType::Rdp {
         port,
         domain,
+        backend,
         security,
         display,
         clipboard,
@@ -230,6 +231,7 @@ fn rdp_connection_defaults_and_endpoint_match_tauri_shape() {
 
     assert_eq!(*port, 3389);
     assert!(domain.is_empty());
+    assert_eq!(backend, "builtin");
     assert!(security.use_nla);
     assert_eq!(security.certificate_policy, "prompt");
     // Added after this document shape was written; absent must mean "off", which is
@@ -251,7 +253,7 @@ fn rdp_connection_defaults_and_endpoint_match_tauri_shape() {
     assert!(display.disable_menu_animations);
     assert!(!display.disable_cursor_shadow);
     assert!(!display.disable_cursor_blinking);
-    assert_eq!(clipboard.mode, "text-only");
+    assert_eq!(clipboard.mode, "text-and-files");
     assert!(reconnect.enabled);
     assert_eq!(reconnect.max_attempts, 5);
 }
@@ -790,6 +792,7 @@ fn quick_command(id: &str, category: Option<&str>, pinned: bool, order: i32) -> 
         icon_tag: None,
         pinned: pinned.then_some(true),
         execution_mode: None,
+        raw_send: None,
         source: None,
         risk_level: None,
         updated_at: None,
@@ -1416,5 +1419,35 @@ fn encoding_aliases_and_unknown_labels_survive_saved_connection_round_trips() {
         assert_eq!(saved["sftp"]["future_option"], true);
         let reloaded: SavedConnection = serde_json::from_value(saved).unwrap();
         assert_eq!(reloaded, connection);
+    }
+}
+
+#[test]
+fn rdp_backend_legacy_aliases_and_unknown_values_survive_editing() {
+    for (value, expected) in [
+        (None, "builtin"),
+        (Some("auto"), "builtin"),
+        (Some("internal"), "builtin"),
+        (Some("builtin"), "builtin"),
+        (Some("windows"), "windows"),
+        (Some("active-x"), "windows"),
+        (Some("mstsc"), "mstsc"),
+        (Some("future-engine"), "future-engine"),
+    ] {
+        let mut document = serde_json::json!({
+            "id":"rdp", "name":"RDP", "type":"rdp", "host":"example.invalid",
+            "username":"user", "port":3389
+        });
+        if let Some(value) = value {
+            document["backend"] = value.into();
+        }
+        let mut saved: SavedConnection = serde_json::from_value(document).unwrap();
+        saved.name = "Edited name".into();
+        let serialized = serde_json::to_value(&saved).unwrap();
+        assert_eq!(serialized["backend"], expected);
+        assert_eq!(
+            serde_json::from_value::<SavedConnection>(serialized).unwrap(),
+            saved
+        );
     }
 }

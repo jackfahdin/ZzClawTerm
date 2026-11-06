@@ -25,18 +25,7 @@ mod editor;
 mod preview;
 pub(in crate::features) use self::preview::{PdfPageRequest, TransferPreviewCloseOutcome};
 
-use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
-use std::time::Instant;
-
-use gpui::{BackgroundExecutor, FocusHandle, Pixels, ScrollHandle, UniformListScrollHandle};
-use zzclawterm_transport::{
-    SftpDuplicatePolicy, SftpFileEntry, SftpFileProperties, SftpPathTransferOptions,
-    SftpTransferControl,
-};
-use zzclawterm_ui::{ChildWindowSlot, ZzClawWindowHandle};
-
+use super::external_sync_runtime::ExternalEditorWatcher;
 use crate::models::{
     TransferBrowserColumnResizeState, TransferBrowserColumnWidths, TransferBrowserContextTarget,
     TransferBrowserDragSelectionState, TransferBrowserFavoritesMenuState,
@@ -49,13 +38,19 @@ use crate::models::{
     TransferPreviewWorkspaceState, TransferPropertiesState, TransferRenameState,
     TransferUnknownFileState,
 };
-
-use super::external_sync_runtime::ExternalEditorWatcher;
 use crate::thread_owner::BackgroundCleanup;
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use gpui::{BackgroundExecutor, FocusHandle, Pixels, ScrollHandle, UniformListScrollHandle};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+use std::time::Instant;
+use zzclawterm_files::sftp::{SftpFileEntry, SftpFileProperties, SftpTransferControl};
+use zzclawterm_files::sftp_transfer_types::{SftpDuplicatePolicy, SftpPathTransferOptions};
+use zzclawterm_ui::{ChildWindowSlot, ZzClawWindowHandle};
 
 struct TransferRetryContext {
     options: SftpPathTransferOptions,
-    source: Option<std::sync::Weak<zzclawterm_transport::RemoteFileService>>,
+    source: Option<std::sync::Weak<zzclawterm_files::remote_file::RemoteFileService>>,
 }
 
 pub(in crate::features) struct TransferFeatureState {
@@ -197,7 +192,7 @@ pub(super) struct TransferBrowserState {
     pub(super) pending_navigations: HashMap<String, TransferBrowserNavigationSnapshot>,
     pub(super) pending_cwd_sync: bool,
     #[cfg(test)]
-    pub(super) directory_requests: Option<Vec<(String, zzclawterm_transport::RemoteFilePath)>>,
+    pub(super) directory_requests: Option<Vec<(String, zzclawterm_files::sftp::RemoteFilePath)>>,
     pub(super) favorites: VecDeque<String>,
     pub(super) sort_column: TransferBrowserSortColumn,
     pub(super) sort_direction: TransferBrowserSortDirection,
@@ -468,7 +463,7 @@ impl TransferFeatureState {
     pub(in crate::features) fn supports_bulk_admission(&self, id: &str) -> bool {
         self.file_operations
             .get(id)
-            .is_none_or(|context| context.can_pause())
+            .is_none_or(|context| context.can_pause() || context.is_delete())
             && self
                 .queue
                 .job(id)
@@ -483,7 +478,15 @@ impl TransferFeatureState {
         work: Box<dyn FnOnce() + Send>,
     ) {
         if let Some(job) = self.queue.jobs.iter_mut().find(|job| job.id == id) {
-            self.admission.enqueue(job, name, tx, work);
+            if self
+                .file_operations
+                .get(id)
+                .is_some_and(|context| context.is_delete())
+            {
+                self.admission.enqueue_delete(job, name, tx, work);
+            } else {
+                self.admission.enqueue(job, name, tx, work);
+            }
         }
     }
 
@@ -569,7 +572,7 @@ impl TransferFeatureState {
         &mut self,
         job_id: &str,
         options: SftpPathTransferOptions,
-        source: std::sync::Weak<zzclawterm_transport::RemoteFileService>,
+        source: std::sync::Weak<zzclawterm_files::remote_file::RemoteFileService>,
     ) {
         self.path_options_by_job.insert(
             job_id.to_owned(),
@@ -583,7 +586,7 @@ impl TransferFeatureState {
     pub(in crate::features) fn promised_download_source(
         &self,
         job_id: &str,
-    ) -> Option<std::sync::Weak<zzclawterm_transport::RemoteFileService>> {
+    ) -> Option<std::sync::Weak<zzclawterm_files::remote_file::RemoteFileService>> {
         self.path_options_by_job
             .get(job_id)
             .and_then(|context| context.source.clone())

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -9,17 +9,21 @@ use zzclawterm_core::DecryptedOtpEntry;
 use crate::models::event_wake::{ANY_INTEREST, EventWake};
 use zzclawterm_store::{KnownHostCheck, StoreBlockingClient, StoreDomain};
 use zzclawterm_transport::{
-    SftpDuplicateDecision, SftpDuplicateRequest, SftpDuplicateResolver, SshAgentPrompt,
-    SshAgentPromptAction, SshAgentPromptProvider,
+    SshAgentPrompt, SshAgentPromptAction, SshAgentPromptProvider,
     SshAgentPromptRequest as TransportSshAgentPromptRequest, SshCredentialPrompt,
     SshCredentialProvider, SshHostKey, SshHostKeyDecision, SshHostKeyVerifier,
     SshKeyboardInteractiveRequest, SshOtpProvider,
 };
 
-use super::{
-    credential_prompt_id, keyboard_interactive_prompt_id, sftp_duplicate_prompt_id,
-    uuid_like_prompt_id,
+use super::runtime_auth::{
+    CredentialResponseSender, RuntimeAuthenticationContext, RuntimeAuthenticationForm,
 };
+use zzclawterm_store::runtime_auth::{PreparedCredentialSave, RuntimeConnectionSnapshot};
+use zzclawterm_transport::ssh_authentication::{
+    SshAuthenticationRequest, SshAuthenticationResponse,
+};
+
+use super::{credential_prompt_id, keyboard_interactive_prompt_id, uuid_like_prompt_id};
 
 const MAX_SILENT_TOTP_REUSE_WAIT_SECS: u64 = 5;
 
@@ -345,111 +349,6 @@ fn seconds_until_next_totp_step(now: u64, period: u64) -> u64 {
     remaining.max(1)
 }
 
-#[derive(Debug)]
-pub(in crate::features) struct SftpDuplicatePromptRequest {
-    pub(in crate::features) id: String,
-    pub(in crate::features) request: SftpDuplicateRequest,
-    pub(in crate::features) response_tx: mpsc::Sender<SftpDuplicateDecision>,
-}
-
-#[derive(Debug, Clone)]
-pub(in crate::features) struct SftpDuplicatePromptState {
-    pub(in crate::features) id: String,
-    pub(in crate::features) request: SftpDuplicateRequest,
-    pub(in crate::features) response_tx: mpsc::Sender<SftpDuplicateDecision>,
-}
-
-#[derive(Debug, Default)]
-pub(in crate::features) struct SftpDuplicatePromptBroker {
-    pending: Mutex<VecDeque<SftpDuplicatePromptRequest>>,
-    /// 同一文件可能在连续上传中重复出现；序号让每个对话框都有独立生命周期。
-    next_id: AtomicU64,
-    /// Signalled after a transport thread enqueues, so activation does not
-    /// have to be polled. `Option` because the brokers are `Default`-built,
-    /// including in tests that drive them without a wake at all.
-    wake: Mutex<Option<EventWake>>,
-}
-
-impl SftpDuplicatePromptBroker {
-    pub(in crate::features) fn set_wake(&self, wake: EventWake) {
-        if let Ok(mut slot) = self.wake.lock() {
-            *slot = Some(wake);
-        }
-    }
-
-    fn signal_wake(&self) {
-        if let Ok(slot) = self.wake.lock()
-            && let Some(wake) = slot.as_ref()
-        {
-            wake.signal(ANY_INTEREST);
-        }
-    }
-
-    fn request_decision(
-        &self,
-        request: SftpDuplicateRequest,
-    ) -> Result<SftpDuplicateDecision, String> {
-        self.enqueue_decision_request(request)?
-            .recv_timeout(Duration::from_secs(300))
-            .map_err(|_| "remote transfer duplicate prompt timed out".to_string())
-    }
-
-    /// 完成入队和唤醒后才返回 receiver，调用方不会观察到只入队、尚未唤醒的中间态。
-    fn enqueue_decision_request(
-        &self,
-        request: SftpDuplicateRequest,
-    ) -> Result<mpsc::Receiver<SftpDuplicateDecision>, String> {
-        let (response_tx, response_rx) = mpsc::channel();
-        let prompt_id = format!(
-            "{}-{}",
-            sftp_duplicate_prompt_id(&request),
-            self.next_id.fetch_add(1, Ordering::Relaxed)
-        );
-        let request = SftpDuplicatePromptRequest {
-            id: prompt_id,
-            request,
-            response_tx,
-        };
-        self.pending
-            .lock()
-            .map_err(|_| "remote transfer duplicate prompt queue is poisoned".to_string())?
-            .push_back(request);
-        self.signal_wake();
-        Ok(response_rx)
-    }
-
-    #[cfg(test)]
-    pub(in crate::features) fn enqueue_decision_request_for_test(
-        &self,
-        request: SftpDuplicateRequest,
-    ) -> Result<mpsc::Receiver<SftpDuplicateDecision>, String> {
-        self.enqueue_decision_request(request)
-    }
-
-    pub(in crate::features) fn pop_pending(&self) -> Option<SftpDuplicatePromptRequest> {
-        self.pending
-            .lock()
-            .ok()
-            .and_then(|mut pending| pending.pop_front())
-    }
-
-    pub(in crate::features) fn has_pending(&self) -> bool {
-        self.pending
-            .lock()
-            .ok()
-            .is_some_and(|pending| !pending.is_empty())
-    }
-}
-
-impl SftpDuplicateResolver for SftpDuplicatePromptBroker {
-    fn resolve_duplicate(
-        &self,
-        request: &SftpDuplicateRequest,
-    ) -> Result<SftpDuplicateDecision, String> {
-        self.request_decision(request.clone())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::features) enum HostKeyPromptIssue {
     Unknown,
@@ -571,6 +470,17 @@ impl HostKeyPromptBroker {
 
 #[derive(Debug)]
 pub(in crate::features) enum CredentialPromptRequest {
+    Authentication {
+        id: String,
+        request: SshAuthenticationRequest,
+        context: Arc<RuntimeAuthenticationContext>,
+        response_tx: mpsc::Sender<Option<SshAuthenticationResponse>>,
+    },
+    Authenticated {
+        id: String,
+        saves: Vec<PreparedCredentialSave>,
+        attempt: zzclawterm_transport::connection_attempt::ConnectionAttempt,
+    },
     Secret {
         id: String,
         prompt: SshCredentialPrompt,
@@ -586,7 +496,10 @@ pub(in crate::features) enum CredentialPromptRequest {
 impl CredentialPromptRequest {
     fn id(&self) -> &str {
         match self {
-            Self::Secret { id, .. } | Self::KeyboardInteractive { id, .. } => id,
+            Self::Secret { id, .. }
+            | Self::KeyboardInteractive { id, .. }
+            | Self::Authentication { id, .. }
+            | Self::Authenticated { id, .. } => id,
         }
     }
 }
@@ -595,7 +508,8 @@ impl CredentialPromptRequest {
 pub(in crate::features) struct CredentialPromptState {
     pub(in crate::features) id: String,
     pub(in crate::features) prompt: SshCredentialPrompt,
-    pub(in crate::features) response_tx: mpsc::Sender<Option<String>>,
+    pub(in crate::features) response_tx: CredentialResponseSender,
+    pub(in crate::features) authentication: Option<RuntimeAuthenticationForm>,
     pub(in crate::features) value: String,
 }
 
@@ -642,6 +556,7 @@ impl std::fmt::Debug for KeyboardInteractivePromptState {
 
 #[derive(Debug, Default)]
 pub(in crate::features) struct CredentialPromptBroker {
+    auth_context: Option<Arc<RuntimeAuthenticationContext>>,
     pending: Arc<Mutex<VecDeque<CredentialPromptRequest>>>,
     cancelled: Arc<Mutex<Vec<String>>>,
     attempt: zzclawterm_transport::connection_attempt::ConnectionAttempt,
@@ -657,12 +572,38 @@ impl CredentialPromptBroker {
         attempt: zzclawterm_transport::connection_attempt::ConnectionAttempt,
     ) -> Self {
         Self {
+            auth_context: Some(Arc::new(
+                self.auth_context
+                    .as_deref()
+                    .map(|context| context.for_attempt(attempt.clone()))
+                    .unwrap_or_else(|| {
+                        RuntimeAuthenticationContext::default().for_attempt(attempt.clone())
+                    }),
+            )),
             pending: self.pending.clone(),
             cancelled: self.cancelled.clone(),
             wake: self.wake.clone(),
             attempt,
         }
     }
+    pub(in crate::features) fn for_connection(
+        &self,
+        snapshot: Option<RuntimeConnectionSnapshot>,
+        account_id: Option<String>,
+        key_id: Option<String>,
+        key_material: Option<zzclawterm_transport::SshKeyAuthConfig>,
+    ) -> Self {
+        let mut broker = self.for_attempt(self.attempt.clone());
+        broker.auth_context = Some(Arc::new(RuntimeAuthenticationContext::new(
+            snapshot,
+            account_id,
+            key_id,
+            key_material,
+            self.attempt.clone(),
+        )));
+        broker
+    }
+
     pub(in crate::features) fn take_cancelled(&self) -> Vec<String> {
         self.cancelled
             .lock()
@@ -744,6 +685,14 @@ impl CredentialPromptBroker {
         self.receive(id, &response_rx)
     }
 
+    pub(in crate::features) fn pop_completed(&self) -> Option<CredentialPromptRequest> {
+        let mut pending = self.pending.lock().ok()?;
+        let index = pending
+            .iter()
+            .position(|request| matches!(request, CredentialPromptRequest::Authenticated { .. }))?;
+        pending.remove(index)
+    }
+
     pub(in crate::features) fn pop_pending(&self) -> Option<CredentialPromptRequest> {
         self.pending
             .lock()
@@ -769,6 +718,48 @@ impl SshCredentialProvider for CredentialPromptBroker {
 
     fn request_secret(&self, prompt: &SshCredentialPrompt) -> Result<Option<String>, String> {
         CredentialPromptBroker::request_secret(self, prompt.clone())
+    }
+
+    fn request_authentication(
+        &self,
+        request: &SshAuthenticationRequest,
+    ) -> Result<Option<SshAuthenticationResponse>, String> {
+        self.attempt.check()?;
+        let context = self.auth_context.clone().unwrap_or_default();
+        context.begin_request(
+            request.key_response_id.as_deref(),
+            &request.accepted_response_ids,
+        );
+        let id = zzclawterm_core::uuid();
+        let (response_tx, response_rx) = mpsc::channel();
+        self.pending
+            .lock()
+            .map_err(|_| "credential prompt queue is poisoned")?
+            .push_back(CredentialPromptRequest::Authentication {
+                id: id.clone(),
+                request: request.clone(),
+                context,
+                response_tx,
+            });
+        self.signal_wake();
+        self.receive(id, &response_rx)
+    }
+
+    fn authentication_finished(&self, responses: Option<&[String]>) {
+        let Some(context) = &self.auth_context else {
+            return;
+        };
+        let saves = context.finish(responses);
+        if !saves.is_empty() {
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.push_back(CredentialPromptRequest::Authenticated {
+                    id: zzclawterm_core::uuid(),
+                    saves,
+                    attempt: self.attempt.clone(),
+                });
+            }
+            self.signal_wake();
+        }
     }
 
     fn request_keyboard_interactive(
@@ -1066,15 +1057,14 @@ fn agent_prompt_id() -> String {
 mod prompt_state_debug_tests {
     use super::{
         AgentPromptBroker, AgentPromptState, CredentialPromptState, KeyboardInteractivePromptState,
-        NativeOtpProvider, SftpDuplicatePromptBroker, TotpUseRecord,
-        TransportSshAgentPromptRequest,
+        NativeOtpProvider, TotpUseRecord, TransportSshAgentPromptRequest,
     };
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
     use zzclawterm_transport::{
-        SftpDuplicateDecision, SftpDuplicateRequest, SftpTransferDirection, SshAgentPrompt,
-        SshAgentPromptAction, SshAgentPromptPhase, SshCredentialPrompt, SshCredentialPromptKind,
-        SshCredentialPromptReason, SshKeyboardInteractivePrompt, SshKeyboardInteractiveRequest,
+        SshAgentPrompt, SshAgentPromptAction, SshAgentPromptPhase, SshCredentialPrompt,
+        SshCredentialPromptKind, SshCredentialPromptReason, SshKeyboardInteractivePrompt,
+        SshKeyboardInteractiveRequest,
     };
 
     use crate::test_support::{TestConfigDir, blocking_test_store};
@@ -1187,42 +1177,6 @@ mod prompt_state_debug_tests {
     }
 
     #[test]
-    fn identical_sftp_duplicate_prompts_receive_unique_ids() {
-        let broker = SftpDuplicatePromptBroker::default();
-        let request = SftpDuplicateRequest {
-            direction: SftpTransferDirection::Upload,
-            source_path: "/local/file.txt".to_string(),
-            target_path: "/remote/file.txt".to_string(),
-            is_directory: false,
-        };
-        let first_rx = broker
-            .enqueue_decision_request(request.clone())
-            .expect("enqueue first duplicate prompt");
-        let second_rx = broker
-            .enqueue_decision_request(request)
-            .expect("enqueue second duplicate prompt");
-        let first = broker.pop_pending().expect("first pending prompt");
-        let second = broker.pop_pending().expect("second pending prompt");
-        assert_ne!(first.id, second.id);
-        first
-            .response_tx
-            .send(SftpDuplicateDecision::Skip)
-            .expect("send first duplicate decision");
-        second
-            .response_tx
-            .send(SftpDuplicateDecision::Overwrite)
-            .expect("send second duplicate decision");
-        assert_eq!(
-            first_rx.recv_timeout(Duration::from_secs(1)),
-            Ok(SftpDuplicateDecision::Skip)
-        );
-        assert_eq!(
-            second_rx.recv_timeout(Duration::from_secs(1)),
-            Ok(SftpDuplicateDecision::Overwrite)
-        );
-    }
-
-    #[test]
     fn credential_prompt_debug_redacts_the_response() {
         let (response_tx, _) = mpsc::channel();
         let state = CredentialPromptState {
@@ -1238,7 +1192,8 @@ mod prompt_state_debug_tests {
                 prompt_text: None,
                 echo: false,
             },
-            response_tx,
+            response_tx: response_tx.into(),
+            authentication: None,
             value: "credential-secret".to_string(),
         };
 
@@ -1309,15 +1264,17 @@ mod prompt_state_debug_tests {
 #[cfg(test)]
 mod attempt_cancellation_tests {
     use super::CredentialPromptBroker;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
+
+    use std::time::Instant;
     use zzclawterm_transport::connection_attempt::ConnectionAttempt;
-    use zzclawterm_transport::{
-        SshCredentialPrompt, SshCredentialPromptKind, SshCredentialPromptReason,
-    };
 
     #[test]
     fn cancelling_one_attempt_removes_only_its_prompt_and_wakes_the_waiter() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        use zzclawterm_transport::SshCredentialPrompt;
+        use zzclawterm_transport::SshCredentialPromptKind;
+        use zzclawterm_transport::SshCredentialPromptReason;
         let broker = Arc::new(CredentialPromptBroker::default());
         let attempt = ConnectionAttempt::default();
         let scoped = broker.for_attempt(attempt.clone());
@@ -1349,3 +1306,6 @@ mod attempt_cancellation_tests {
         assert_eq!(broker.take_cancelled().len(), 1);
     }
 }
+
+#[cfg(test)]
+mod runtime_authentication_tests;

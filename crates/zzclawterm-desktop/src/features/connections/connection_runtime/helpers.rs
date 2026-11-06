@@ -24,14 +24,16 @@ pub(super) enum ConnectionEditorValidationError {
     TelnetKeepAliveIntervalInvalid,
     UsernameRequired,
     MissingAccount,
-    AccountPasswordMissing,
-    PasswordReplacementRequired,
     ShellPathRequired,
     SerialPortRequired,
     BaudRateInvalid,
     RdpDisplayWidthInvalid,
     RdpDisplayHeightInvalid,
     RdpReconnectAttemptsInvalid,
+    RdpWindowsAuthenticationRequired,
+    RdpRelayUnsupported,
+    RdpMstscRelayUnsupported,
+    RdpMstscHostInvalid,
     VncReconnectAttemptsInvalid,
     VncPasswordTooLong,
     VncUsernameTooLong,
@@ -50,6 +52,9 @@ pub(super) fn validate_editor_account(
     editor: &ConnectionEditorState,
     accounts: &[zzclawterm_core::SavedPassword],
 ) -> Result<(), ConnectionEditorValidationError> {
+    if editor.uses_mstsc_rdp() {
+        return Ok(());
+    }
     let identity = matches!(
         editor.kind,
         ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
@@ -58,7 +63,7 @@ pub(super) fn validate_editor_account(
         && !(editor.kind == ConnectionKindTab::Vnc && editor.vnc_security.mode == "none");
     let id = if identity {
         editor.account_id.as_deref()
-    } else if password_active && editor.password_source == ConnectionEditorPasswordSource::Saved {
+    } else if password_active {
         editor.password_id.as_deref()
     } else {
         None
@@ -82,20 +87,6 @@ pub(super) fn validate_editor_account(
     };
     if editor.kind == ConnectionKindTab::Ssh && effective_username.is_empty() {
         return Err(ConnectionEditorValidationError::UsernameRequired);
-    }
-    if password_active
-        && editor.password_source == ConnectionEditorPasswordSource::Saved
-        && account.is_some_and(|entry| !entry.has_password)
-    {
-        return Err(ConnectionEditorValidationError::AccountPasswordMissing);
-    }
-    if password_active
-        && editor.password_source == ConnectionEditorPasswordSource::Direct
-        && editor.password_edit == crate::models::ConnectionPasswordEdit::Replace
-        && editor.existing_password.is_some()
-        && editor.password.is_empty()
-    {
-        return Err(ConnectionEditorValidationError::PasswordReplacementRequired);
     }
     Ok(())
 }
@@ -128,9 +119,8 @@ pub(super) fn connection_editor_from_saved(
         connection.config,
         ConnectionType::Ssh { .. } | ConnectionType::Telnet { .. }
     );
-    let password_source = if uses_accounts
-        && auth.password_source
-            == Some(zzclawterm_core::models::credentials::ConnectionPasswordSource::Connection)
+    let password_source = if uses_accounts && !auth.uses_account_password()
+        || !uses_accounts && (auth.password.is_some() || auth.has_password)
     {
         if auth.password.is_some() || auth.has_password {
             ConnectionEditorPasswordSource::Direct
@@ -143,14 +133,6 @@ pub(super) fn connection_editor_from_saved(
         ConnectionEditorPasswordSource::Direct
     } else {
         ConnectionEditorPasswordSource::Ask
-    };
-    let password = if auth.mode == "password"
-        && password_source == ConnectionEditorPasswordSource::Direct
-        && !auth.has_password
-    {
-        auth.password.clone().unwrap_or_default()
-    } else {
-        zzclawterm_core::SecretString::default()
     };
     let icon_auto_detect = connection.icon_auto_detect_enabled();
     let mut editor = ConnectionEditorState {
@@ -170,7 +152,8 @@ pub(super) fn connection_editor_from_saved(
         port: String::new(),
         username: "root".to_string(),
         domain: String::new(),
-        auth_mode: auth.mode,
+        auth_mode: auth.mode.clone(),
+        rdp_backend: "builtin".to_string(),
         rdp_security: RdpSecuritySettings::default(),
         rdp_display: RdpDisplaySettings::default(),
         rdp_clipboard: RdpClipboardSettings::default(),
@@ -209,7 +192,14 @@ pub(super) fn connection_editor_from_saved(
             auth.account_id.clone()
         },
         password_id: auth.password_id,
-        password,
+        password: if auth.mode == "password"
+            && password_source == ConnectionEditorPasswordSource::Direct
+            && !auth.has_password
+        {
+            auth.password.clone().unwrap_or_default()
+        } else {
+            zzclawterm_core::SecretString::default()
+        },
         existing_password: auth.password.filter(|value| !value.is_empty()),
         existing_password_locked: auth.has_password,
         key_id: auth.key_id,
@@ -388,6 +378,7 @@ pub(super) fn connection_editor_from_saved(
             port,
             username,
             domain,
+            backend,
             security,
             display,
             clipboard,
@@ -397,6 +388,7 @@ pub(super) fn connection_editor_from_saved(
             editor.port = port.to_string();
             editor.username = username;
             editor.domain = domain;
+            editor.rdp_backend = backend;
             editor.rdp_security = security;
             editor.rdp_display = display;
             editor.rdp_clipboard = clipboard;
@@ -424,6 +416,7 @@ pub(super) fn connection_editor_from_saved(
             editor.vnc_view_only = view_only;
         }
     }
+    editor.normalize_rdp_backend_settings();
     editor
 }
 
@@ -621,23 +614,39 @@ pub(super) fn build_saved_connection_from_editor(
                 return Err(ConnectionEditorValidationError::HostRequired);
             }
             let port = parse_port(&editor.port)?;
-            if editor.username.trim().is_empty() {
+            if !editor.uses_mstsc_rdp() && editor.username.trim().is_empty() {
                 return Err(ConnectionEditorValidationError::UsernameRequired);
             }
-            if !(640..=7680).contains(&editor.rdp_display.width) {
+            if !editor.uses_mstsc_rdp() && !(640..=7680).contains(&editor.rdp_display.width) {
                 return Err(ConnectionEditorValidationError::RdpDisplayWidthInvalid);
             }
-            if !(480..=4320).contains(&editor.rdp_display.height) {
+            if !editor.uses_mstsc_rdp() && !(480..=4320).contains(&editor.rdp_display.height) {
                 return Err(ConnectionEditorValidationError::RdpDisplayHeightInvalid);
             }
-            if editor.rdp_reconnect.max_attempts > 20 {
+            if !editor.uses_mstsc_rdp() && editor.rdp_reconnect.max_attempts > 20 {
                 return Err(ConnectionEditorValidationError::RdpReconnectAttemptsInvalid);
+            }
+            if editor.uses_mstsc_rdp() {
+                if editor.proxy_id.is_some() || editor.proxy_jump_id.is_some() {
+                    return Err(ConnectionEditorValidationError::RdpMstscRelayUnsupported);
+                }
+                crate::platform::mstsc::MstscTarget::new(&host, port)
+                    .map_err(|_| ConnectionEditorValidationError::RdpMstscHostInvalid)?;
+            }
+            if matches!(editor.rdp_backend.as_str(), "windows" | "active-x") {
+                if editor.proxy_id.is_some() || editor.proxy_jump_id.is_some() {
+                    return Err(ConnectionEditorValidationError::RdpRelayUnsupported);
+                }
+                if editor.rdp_security.windows_authentication.as_deref() != Some("system") {
+                    return Err(ConnectionEditorValidationError::RdpWindowsAuthenticationRequired);
+                }
             }
             ConnectionType::Rdp {
                 host,
                 port,
                 username: editor.username.trim().to_string(),
                 domain: editor.domain.trim().to_string(),
+                backend: editor.rdp_backend.clone(),
                 security: editor.rdp_security.clone(),
                 display: editor.rdp_display.clone(),
                 clipboard: editor.rdp_clipboard.clone(),
@@ -659,6 +668,7 @@ pub(super) fn build_saved_connection_from_editor(
             if editor.auth_mode == "password"
                 && editor.vnc_security.mode != "none"
                 && editor.password_source == ConnectionEditorPasswordSource::Direct
+                && editor.password_edit == crate::models::ConnectionPasswordEdit::Replace
                 && editor.password.len()
                     > if editor.vnc_security.mode == "vnc_auth" {
                         8
@@ -780,13 +790,16 @@ pub(super) fn build_saved_connection_from_editor(
             let (password, has_password) = if mode == "password"
                 && editor.password_source == ConnectionEditorPasswordSource::Direct
             {
-                if editor.password_edit == crate::models::ConnectionPasswordEdit::Remove {
-                    (None, false)
-                } else if entered_password.is_empty() {
-                    let has_password = existing.is_some() && editor.existing_password_locked;
-                    (existing, has_password)
-                } else {
-                    (Some(entered_password), false)
+                match editor.password_edit {
+                    crate::models::ConnectionPasswordEdit::Remove => (None, false),
+                    crate::models::ConnectionPasswordEdit::Keep => {
+                        let has_password = existing.is_some() && editor.existing_password_locked;
+                        (existing, has_password)
+                    }
+                    crate::models::ConnectionPasswordEdit::Replace => (
+                        Some(entered_password).filter(|value| !value.is_empty()),
+                        false,
+                    ),
                 }
             } else {
                 (None, false)
@@ -811,8 +824,7 @@ pub(super) fn build_saved_connection_from_editor(
                         zzclawterm_core::models::credentials::ConnectionPasswordSource::Connection
                     },
                 ),
-                password_id: (mode == "password"
-                    && editor.password_source == ConnectionEditorPasswordSource::Saved)
+                password_id: (mode == "password")
                     .then(|| editor.password_id.clone())
                     .flatten(),
                 username_source: (matches!(
@@ -1064,6 +1076,7 @@ mod tests {
     use super::{
         ConnectionEditorValidationError, build_saved_connection_from_editor,
         connection_editor_from_saved, local_terminal_default_name, shell_preset_label,
+        validate_editor_account,
     };
 
     #[test]
@@ -1229,6 +1242,7 @@ mod tests {
                 let mut editor = connection_editor_from_saved(connection.clone(), false);
                 editor.password_source = ConnectionEditorPasswordSource::Direct;
                 editor.password = password.into();
+                editor.password_edit = crate::models::ConnectionPasswordEdit::Replace;
                 let saved = build_saved_connection_from_editor(&editor).expect("valid password");
                 let auth = saved.auth.as_ref().expect("auth");
                 assert_eq!(auth.password.as_deref(), Some(password), "{kind}");
@@ -1248,7 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn connection_editor_only_prefills_password_for_direct_password_authentication() {
+    fn connection_editor_does_not_prefill_account_or_inactive_passwords() {
         for auth in [
             serde_json::json!({"mode": "password", "password_source": "account", "account_id": "account", "password": "fixture-secret"}),
             serde_json::json!({"mode": "key", "password": "fixture-secret"}),
@@ -1282,10 +1296,65 @@ mod tests {
 
         let mut editor = connection_editor_from_saved(connection, false);
         editor.password = "new-secret".to_string().into();
+        editor.password_edit = crate::models::ConnectionPasswordEdit::Replace;
         let replaced = build_saved_connection_from_editor(&editor).expect("replacement password");
         let auth = replaced.auth.expect("auth");
         assert_eq!(auth.password.as_deref(), Some("new-secret"));
         assert!(!auth.has_password);
+    }
+
+    #[test]
+    fn connection_password_edits_preserve_or_replace_or_remove_supported_saved_formats() {
+        use crate::models::ConnectionPasswordEdit;
+
+        for kind in ["ssh", "telnet", "rdp", "vnc"] {
+            for locked in [false, true] {
+                let connection: SavedConnection = serde_json::from_value(serde_json::json!({
+                    "id": "password-edits", "name": "Password edits", "type": kind,
+                    "host": "example.test", "username": "user",
+                    "auth": {"mode": "password", "password": "old", "has_password": locked}
+                }))
+                .unwrap();
+                let mut editor = connection_editor_from_saved(connection, false);
+                assert_eq!(editor.password.is_empty(), locked);
+                assert_eq!(editor.password_edit, ConnectionPasswordEdit::Keep);
+
+                editor.name = "Renamed".into();
+                validate_editor_account(&editor, &[]).unwrap();
+                let auth = build_saved_connection_from_editor(&editor)
+                    .unwrap()
+                    .auth
+                    .unwrap();
+                assert_eq!(auth.password.as_deref(), Some("old"));
+                assert_eq!(auth.has_password, locked);
+
+                editor.password_edit = ConnectionPasswordEdit::Replace;
+                editor.password = " new ".into();
+                let auth = build_saved_connection_from_editor(&editor)
+                    .unwrap()
+                    .auth
+                    .unwrap();
+                assert_eq!(auth.password.as_deref(), Some(" new "));
+                assert!(!auth.has_password);
+
+                editor.password = Default::default();
+                editor.password_edit = ConnectionPasswordEdit::Remove;
+                let auth = build_saved_connection_from_editor(&editor)
+                    .unwrap()
+                    .auth
+                    .unwrap();
+                assert!(auth.password.is_none());
+                assert!(!auth.has_password);
+
+                editor.password_edit = ConnectionPasswordEdit::Keep;
+                let auth = build_saved_connection_from_editor(&editor)
+                    .unwrap()
+                    .auth
+                    .unwrap();
+                assert_eq!(auth.password.as_deref(), Some("old"));
+                assert_eq!(auth.has_password, locked);
+            }
+        }
     }
 
     #[test]
@@ -1599,10 +1668,53 @@ mod tests {
     }
 
     #[test]
+    fn old_windows_connections_preserve_clipboard_settings_through_editor_and_save() {
+        for backend in ["windows", "active-x"] {
+            for mode in ["text-only", "text-and-files", "disabled"] {
+                for authentication in [None, Some("system"), Some("future-auth")] {
+                    let mut document = serde_json::json!({
+                        "id":"old-windows", "name":"Old Windows", "type":"rdp",
+                        "backend":backend, "host":"example.invalid", "username":"user",
+                        "security":{"certificate_policy":"strict"},
+                        "clipboard":{"mode":mode}
+                    });
+                    if let Some(authentication) = authentication {
+                        document["security"]["windows_authentication"] = authentication.into();
+                    }
+                    let stored: SavedConnection = serde_json::from_value(document).unwrap();
+                    let original = serde_json::to_value(&stored).unwrap();
+                    let editor = connection_editor_from_saved(stored.clone(), false);
+                    assert_eq!(editor.rdp_clipboard.mode, mode);
+                    assert_eq!(editor.rdp_security.certificate_policy, "strict");
+                    assert_eq!(
+                        editor.rdp_security.windows_authentication.as_deref(),
+                        Some(authentication.unwrap_or("system"))
+                    );
+                    let saved = build_saved_connection_from_editor(&editor);
+                    if authentication == Some("future-auth") {
+                        assert_eq!(
+                            saved.unwrap_err(),
+                            ConnectionEditorValidationError::RdpWindowsAuthenticationRequired
+                        );
+                    } else {
+                        let saved = serde_json::to_value(saved.unwrap()).unwrap();
+                        assert_eq!(saved["clipboard"]["mode"], mode);
+                        assert_eq!(saved["security"]["windows_authentication"], "system");
+                        assert_eq!(saved["security"]["certificate_policy"], "strict");
+                    }
+                    assert_eq!(serde_json::to_value(&stored).unwrap(), original);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn connection_editor_round_trip_preserves_rdp_settings_and_auth_mode() {
+        let expected_backend = "windows";
         let expected_security = RdpSecuritySettings {
             use_nla: false,
             certificate_policy: "strict".to_string(),
+            windows_authentication: Some("system".into()),
             // Opposite of the default, so a silently re-defaulted field fails the assert.
             administrative_session: true,
         };
@@ -1646,6 +1758,7 @@ mod tests {
                 port: 3390,
                 username: "operator".to_string(),
                 domain: "ACME".to_string(),
+                backend: expected_backend.to_string(),
                 security: expected_security.clone(),
                 display: expected_display.clone(),
                 clipboard: expected_clipboard.clone(),
@@ -1677,6 +1790,7 @@ mod tests {
         assert_eq!(editor.kind, ConnectionKindTab::Rdp);
         assert_eq!(editor.domain, "ACME");
         assert_eq!(editor.auth_mode, "none");
+        assert_eq!(editor.rdp_backend, expected_backend);
 
         let mut invalid = editor.clone();
         invalid.username.clear();
@@ -1709,6 +1823,7 @@ mod tests {
             port,
             username,
             domain,
+            backend,
             security,
             display,
             clipboard,
@@ -1718,6 +1833,7 @@ mod tests {
             panic!("expected RDP connection");
         };
 
+        assert_eq!(backend, expected_backend);
         assert_eq!(host, "desktop.example.com");
         assert_eq!(port, 3390);
         assert_eq!(username, "operator");
@@ -1799,6 +1915,7 @@ mod tests {
 
         let mut password_boundary = editor.clone();
         password_boundary.password_source = ConnectionEditorPasswordSource::Direct;
+        password_boundary.password_edit = crate::models::ConnectionPasswordEdit::Replace;
         password_boundary.vnc_security.mode = "vnc_auth".to_string();
         password_boundary.password = "12345678".to_string().into();
         assert!(build_saved_connection_from_editor(&password_boundary).is_ok());
@@ -1814,6 +1931,10 @@ mod tests {
             build_saved_connection_from_editor(&password_boundary).unwrap_err(),
             ConnectionEditorValidationError::VncPasswordTooLong
         );
+        // Existing secrets may predate these limits; an unrelated edit keeps them.
+        password_boundary.password_edit = crate::models::ConnectionPasswordEdit::Keep;
+        password_boundary.existing_password = Some(password_boundary.password.clone());
+        assert!(build_saved_connection_from_editor(&password_boundary).is_ok());
 
         let saved = build_saved_connection_from_editor(&editor).expect("valid connection");
         let ConnectionType::Vnc {
@@ -2049,14 +2170,14 @@ pub(in crate::features) enum ConnectionEditorToggle {
 
 #[cfg(test)]
 mod account_edit_tests {
-    use super::{
-        ConnectionEditorValidationError, build_saved_connection_from_editor,
-        connection_editor_from_saved,
-    };
-    use crate::models::ConnectionEditorPasswordSource;
-    use zzclawterm_core::SavedConnection;
+
     #[test]
     fn account_validation_uses_effective_username_and_preserves_missing_references() {
+        use super::ConnectionEditorValidationError;
+        use super::build_saved_connection_from_editor;
+        use super::connection_editor_from_saved;
+        use crate::models::ConnectionEditorPasswordSource;
+        use zzclawterm_core::SavedConnection;
         let connection: SavedConnection = serde_json::from_value(serde_json::json!({
             "id":"account-test", "name":"Account", "type":"ssh", "host":"example.test", "username":"",
             "auth":{"mode":"password", "account_id":"ops", "password_source":"account"}
@@ -2080,10 +2201,7 @@ mod account_edit_tests {
         );
         editor.username = "manual".into();
         account.has_password = false;
-        assert_eq!(
-            super::validate_editor_account(&editor, &[account.clone()]),
-            Err(ConnectionEditorValidationError::AccountPasswordMissing)
-        );
+        assert!(super::validate_editor_account(&editor, &[account.clone()]).is_ok());
         editor.password_source = ConnectionEditorPasswordSource::Ask;
         assert!(super::validate_editor_account(&editor, &[account.clone()]).is_ok());
         account.username = "deploy".into();
@@ -2110,6 +2228,10 @@ mod account_edit_tests {
 
     #[test]
     fn vnc_without_authentication_ignores_inactive_password_errors_and_keeps_the_draft() {
+        use super::ConnectionEditorValidationError;
+        use super::build_saved_connection_from_editor;
+        use super::connection_editor_from_saved;
+        use zzclawterm_core::SavedConnection;
         let connection: SavedConnection = serde_json::from_value(serde_json::json!({
             "id":"vnc-draft", "name":"VNC", "type":"vnc", "host":"example.test", "port":5900,
             "auth":{"mode":"password", "password_id":"deleted-account"}
@@ -2134,6 +2256,10 @@ mod account_edit_tests {
 
     #[test]
     fn saving_only_emits_the_active_authentication_and_explicit_password_edit() {
+        use super::build_saved_connection_from_editor;
+        use super::connection_editor_from_saved;
+        use crate::models::ConnectionEditorPasswordSource;
+        use zzclawterm_core::SavedConnection;
         let connection: SavedConnection = serde_json::from_value(serde_json::json!({
             "id":"active-auth-test", "name":"Active auth", "type":"ssh", "host":"example.test", "username":"user",
             "auth":{"mode":"password", "password_source":"connection", "password":"existing"}
@@ -2171,5 +2297,138 @@ mod account_edit_tests {
                 .as_deref(),
             Some("existing")
         );
+    }
+    #[test]
+    fn mstsc_saves_without_unused_credentials_display_or_reconnect_validation() {
+        use super::ConnectionEditorValidationError;
+        use super::build_saved_connection_from_editor;
+        use super::connection_editor_from_saved;
+        use zzclawterm_core::SavedConnection;
+        let original: SavedConnection = serde_json::from_value(serde_json::json!({
+            "id":"mstsc", "name":"System RDP", "type":"rdp", "backend":"mstsc",
+            "host":"example.test", "username":"", "domain":"EXAMPLE",
+            "auth":{"mode":"password", "password_id":"missing-account"},
+            "security":{"use_nla":false, "certificate_policy":"future-policy", "windows_authentication":"future-auth"},
+            "display":{"width":1, "height":1}, "reconnect":{"enabled":true, "max_attempts":21}
+        })).unwrap();
+        let editor = connection_editor_from_saved(original.clone(), false);
+        assert!(super::validate_editor_account(&editor, &[]).is_ok());
+        let saved = build_saved_connection_from_editor(&editor).unwrap();
+        assert_eq!(saved.config, original.config);
+        assert_eq!(saved.auth, original.auth);
+        let mut embedded = editor;
+        embedded.rdp_backend = "builtin".into();
+        assert_eq!(
+            build_saved_connection_from_editor(&embedded).unwrap_err(),
+            ConnectionEditorValidationError::UsernameRequired
+        );
+    }
+
+    #[test]
+    fn mstsc_requires_a_valid_direct_target_without_discarding_network_settings() {
+        use super::ConnectionEditorValidationError;
+        use super::build_saved_connection_from_editor;
+        use super::connection_editor_from_saved;
+        use zzclawterm_core::SavedConnection;
+        let original: SavedConnection = serde_json::from_value(serde_json::json!({
+            "id":"mstsc", "name":"System RDP", "type":"rdp", "backend":"mstsc", "host":"example.test"
+        })).unwrap();
+        let mut editor = connection_editor_from_saved(original, false);
+        for (proxy, jump) in [(Some("proxy"), None), (None, Some("jump"))] {
+            editor.proxy_id = proxy.map(str::to_owned);
+            editor.proxy_jump_id = jump.map(str::to_owned);
+            assert_eq!(
+                build_saved_connection_from_editor(&editor).unwrap_err(),
+                ConnectionEditorValidationError::RdpMstscRelayUnsupported
+            );
+            assert_eq!(editor.proxy_id.as_deref(), proxy);
+            assert_eq!(editor.proxy_jump_id.as_deref(), jump);
+        }
+        editor.proxy_jump_id = None;
+        editor.host = "example.test:3390".into();
+        assert_eq!(
+            build_saved_connection_from_editor(&editor).unwrap_err(),
+            ConnectionEditorValidationError::RdpMstscHostInvalid
+        );
+        editor.host = "example.test".into();
+        for port in ["0", "65536", "invalid"] {
+            editor.port = port.into();
+            assert_eq!(
+                build_saved_connection_from_editor(&editor).unwrap_err(),
+                ConnectionEditorValidationError::PortInvalid
+            );
+        }
+    }
+
+    #[test]
+    fn editing_an_unrelated_field_preserves_an_unknown_rdp_backend() {
+        use super::build_saved_connection_from_editor;
+        use super::connection_editor_from_saved;
+        use zzclawterm_core::SavedConnection;
+        let connection: SavedConnection = serde_json::from_value(serde_json::json!({
+            "id":"future-rdp", "name":"Remote desktop", "type":"rdp",
+            "host":"example.invalid", "port":3389, "username":"user", "backend":"future-engine"
+        }))
+        .unwrap();
+        let mut editor = connection_editor_from_saved(connection, false);
+        editor.name = "Edited".into();
+        let saved = build_saved_connection_from_editor(&editor).unwrap();
+        assert!(
+            matches!(saved.config, zzclawterm_core::ConnectionType::Rdp { backend, .. } if backend == "future-engine")
+        );
+    }
+
+    #[test]
+    fn legacy_local_password_override_keeps_its_source_until_account_is_reselected() {
+        for kind in ["ssh", "telnet", "rdp", "vnc"] {
+            for locked in [false, true] {
+                let original: zzclawterm_core::SavedConnection = serde_json::from_value(serde_json::json!({
+                        "id":"legacy", "name":"Legacy", "type":kind, "host":"example.test", "username":"user",
+                        "auth":{"mode":"password", "account_id": if kind == "ssh" || kind == "telnet" { Some("account") } else { None }, "password_id":"account", "password":"local", "has_password":locked}
+                    })).unwrap();
+                let editor = super::connection_editor_from_saved(original, false);
+                assert_eq!(
+                    editor.password_source,
+                    crate::models::ConnectionEditorPasswordSource::Direct
+                );
+                assert_eq!(editor.password.is_empty(), locked);
+                let auth = super::build_saved_connection_from_editor(&editor)
+                    .unwrap()
+                    .auth
+                    .unwrap();
+                assert_eq!(auth.password.as_deref(), Some("local"));
+                assert_eq!(auth.has_password, locked);
+                assert_eq!(auth.saved_account_id(), Some("account"));
+                assert!(!auth.uses_account_password());
+            }
+        }
+    }
+
+    #[test]
+    fn password_only_account_references_survive_empty_passwords_and_report_missing_accounts() {
+        for kind in ["ssh", "telnet", "rdp", "vnc"] {
+            let original: zzclawterm_core::SavedConnection = serde_json::from_value(serde_json::json!({
+                "id":"account", "name":"Account", "type":kind, "host":"example.test", "username":"user",
+                "auth":{"mode":"password", "password_id":"account"}
+            }))
+            .unwrap();
+            let editor = super::connection_editor_from_saved(original, false);
+            let account: zzclawterm_core::SavedPassword =
+                serde_json::from_value(serde_json::json!({
+                    "id":"account", "name":"Account", "username":"user", "has_password":false
+                }))
+                .unwrap();
+            assert!(super::validate_editor_account(&editor, &[account]).is_ok());
+            assert_eq!(
+                super::validate_editor_account(&editor, &[]),
+                Err(super::ConnectionEditorValidationError::MissingAccount)
+            );
+            let auth = super::build_saved_connection_from_editor(&editor)
+                .unwrap()
+                .auth
+                .unwrap();
+            assert_eq!(auth.saved_account_id(), Some("account"));
+            assert!(auth.password.is_none());
+        }
     }
 }

@@ -1,6 +1,7 @@
 //! GPUI presentation crate for ZzClawTerm.
 
 mod action_links;
+mod ai_runtime;
 mod external_process;
 mod i18n;
 mod send_command;

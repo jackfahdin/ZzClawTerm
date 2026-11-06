@@ -2,7 +2,9 @@ use std::time::Instant;
 
 use gpui::{Context, Window};
 use rust_i18n::t;
+use zzclawterm_core::ConnectionType;
 use zzclawterm_core::uuid;
+use zzclawterm_transport::SessionKind;
 
 use crate::features::ZzClawTermApp;
 use crate::features::session::{SavedConnectionStartOptions, SessionStartEventRequest};
@@ -18,6 +20,13 @@ impl ZzClawTermApp {
         let Some(failed) = self.session.start.failed(&request_id) else {
             return;
         };
+        let remote = failed.pending.kind != SessionKind::LocalPty;
+        if remote && self.remote_start_blocked_by_configuration_replacement(cx) {
+            return;
+        }
+        let Some(failed) = self.session.start.failed(&request_id) else {
+            return;
+        };
         let connection = failed
             .pending
             .source_connection_id
@@ -29,22 +38,63 @@ impl ZzClawTermApp {
                     .find(|connection| &connection.id == id)
             })
             .cloned();
-        if connection.is_none() && failed.pending.launch_config.is_none() {
+        if failed.pending.source_connection_id.is_some() && connection.is_none() {
+            self.session.start.set_failed_error(
+                &request_id,
+                t!("terminal.savedConnectionDeleted").to_string(),
+            );
+            cx.notify();
+            return;
+        }
+        let same_protocol = connection.as_ref().is_none_or(|connection| {
+            matches!(
+                (&connection.config, failed.pending.kind),
+                (ConnectionType::LocalTerminal { .. }, SessionKind::LocalPty)
+                    | (ConnectionType::Ssh { .. }, SessionKind::Ssh)
+                    | (
+                        ConnectionType::Telnet { .. },
+                        SessionKind::Telnet | SessionKind::RawTcp
+                    )
+                    | (ConnectionType::Serial { .. }, SessionKind::Serial)
+                    | (ConnectionType::Rdp { .. }, SessionKind::Rdp)
+                    | (ConnectionType::Vnc { .. }, SessionKind::Vnc)
+            )
+        });
+        if !same_protocol {
+            self.session.start.set_failed_error(
+                &request_id,
+                t!("terminal.savedConnectionProtocolChanged").to_string(),
+            );
+            cx.notify();
+            return;
+        }
+        if connection.is_none()
+            && failed
+                .pending
+                .launch_config
+                .as_ref()
+                .is_none_or(|config| config.encoding().is_none())
+        {
             self.session
                 .start
                 .set_failed_error(&request_id, t!("terminal.retryUnavailable").to_string());
             cx.notify();
             return;
         }
-        if connection.as_ref().is_some_and(|connection| {
-            self.session
-                .start
-                .source_connection_is_pending(&connection.id)
-                || self
-                    .session
+        if failed
+            .pending
+            .source_connection_id
+            .as_ref()
+            .is_some_and(|connection_id| {
+                self.session
                     .start
-                    .saved_connection_is_preparing(&connection.id)
-        }) {
+                    .source_connection_is_pending(connection_id)
+                    || self
+                        .session
+                        .start
+                        .saved_connection_is_preparing(connection_id)
+            })
+        {
             self.session
                 .start
                 .set_failed_error(&request_id, t!("tabCtx.reconnecting").to_string());
@@ -61,6 +111,7 @@ impl ZzClawTermApp {
         let profile = pending.ai_execution_profile;
         let new_id = uuid();
         let options = SavedConnectionStartOptions {
+            ssh_runtime_mode: pending.ssh_runtime_mode(),
             custom_name: pending.custom_name.clone(),
             tab_color: pending.tab_color,
             locked: pending.locked,

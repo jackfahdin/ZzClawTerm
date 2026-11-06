@@ -1,18 +1,17 @@
-use gpui::{Context, Window};
-use zzclawterm_core::AiCustomActionConfig;
-use zzclawterm_transport::{
-    RemoteTextGeneration, SFTP_TRANSFER_CANCELLED, SftpFileEntry, SftpFileType, SftpTransferControl,
-};
-
+use super::super::helpers::remote_file_name;
+use super::helpers::{RemoteFileTextKind, open_local_path_with_editor, remote_file_text_kind};
+use super::workspace::{external_edit_path, prepare_external_edit_workspace};
 use crate::features::ZzClawTermApp;
 use crate::models::{
     TransferEditorField, TransferEditorState, TransferJobEvent, TransferJobKind, TransferJobOutput,
     TransferJobResult, TransferJobState, TransferJobStatus, TransferUnknownFileState,
 };
-
-use super::super::helpers::remote_file_name;
-use super::helpers::{RemoteFileTextKind, open_local_path_with_editor, remote_file_text_kind};
-use super::workspace::{external_edit_path, prepare_external_edit_workspace};
+use gpui::{Context, Window};
+use zzclawterm_core::AiCustomActionConfig;
+use zzclawterm_files::remote_file::RemoteTextGeneration;
+use zzclawterm_files::sftp::{
+    SFTP_TRANSFER_CANCELLED, SftpFileEntry, SftpFileType, SftpTransferControl,
+};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn enabled_transfer_file_ai_actions_for_entry(

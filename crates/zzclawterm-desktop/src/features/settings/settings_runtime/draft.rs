@@ -1,12 +1,10 @@
-use rust_i18n::t;
-
-use gpui::Context;
-use zzclawterm_store::StoreDomain;
-use zzclawterm_transport::SftpDuplicatePolicy;
-
 use crate::features::ZzClawTermApp;
 use crate::features::app_state::SettingsDraftSnapshot;
 use crate::models::TranslationSecretDraft;
+use gpui::Context;
+use rust_i18n::t;
+use zzclawterm_files::sftp_transfer_types::SftpDuplicatePolicy;
+use zzclawterm_store::StoreDomain;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn begin_settings_draft(&mut self, cx: &mut Context<Self>) {
@@ -248,6 +246,18 @@ impl ZzClawTermApp {
         close_after_apply: bool,
         cx: &mut Context<Self>,
     ) {
+        // Theme saves commit independently before resuming this intent. Reject an
+        // invalid ordinary draft before starting that flow, but allow theme-only saves.
+        if self.settings_draft_dirty()
+            && let Some(error) = self.pending_settings_validation_error()
+        {
+            self.settings.update_store_status(error.clone(), false);
+            self.shell
+                .set_status(t!("settings.applyBlocked", detail = error));
+            cx.notify();
+            self.request_settings_panel_refresh(cx);
+            return;
+        }
         if self.settings.theme_designer().dirty() {
             self.theme_designer_action(
                 crate::features::settings::theme_designer::ThemeIntent::Apply(close_after_apply),
@@ -262,15 +272,6 @@ impl ZzClawTermApp {
             self.request_settings_panel_refresh(cx);
             return;
         }
-        if let Some(error) = self.pending_settings_validation_error() {
-            self.settings.update_store_status(error.clone(), false);
-            self.shell
-                .set_status(t!("settings.applyBlocked", detail = error));
-            cx.notify();
-            self.request_settings_panel_refresh(cx);
-            return;
-        }
-
         self.hide_ai_provider_secret(cx);
         self.ai.invalidate_provider_jobs();
         let settings = self.settings.summary().clone();
@@ -334,10 +335,29 @@ impl ZzClawTermApp {
         } else {
             Some(Some(master_password.draft.to_string()))
         };
+        let password_rotation = (base.cloud_sync_settings.protocol_version == 4
+            && base.settings.has_master_password)
+            .then(|| {
+                master_password_update
+                    .as_ref()
+                    .and_then(|value| value.as_ref())
+                    .cloned()
+            })
+            .flatten()
+            .map(zzclawterm_core::SecretString::from);
+        if password_rotation.is_some() && cloud_changed {
+            let message = t!("settings.syncV3RotateSeparately").to_string();
+            self.settings.update_store_status(message.clone(), false);
+            self.shell.set_status(message);
+            self.request_settings_panel_refresh(cx);
+            cx.notify();
+            return;
+        }
         self.settings
             .update_store_status(t!("settings.applying").to_string(), false);
-        self.submit_store_request(
+        self.submit_store_request_with_password_rotation(
             0,
+            password_rotation,
             zzclawterm_store::store_mutation(StoreDomain::Settings, move |store| {
                 let conflict = || {
                     zzclawterm_store::StorageError::InvalidData(
@@ -648,6 +668,7 @@ impl ZzClawTermApp {
 
     fn finish_settings_page(&mut self, cx: &mut Context<Self>) {
         let browser_was_visible = self.transfer_browser_is_visible();
+        self.collapse_open_search_engine(cx);
         self.hide_secret_inputs(cx);
         self.settings.theme_designer_mut().reset();
         self.forget_text_inputs("theme.designer.");
@@ -659,9 +680,7 @@ impl ZzClawTermApp {
         self.forget_text_inputs("ai.settings.action.");
         self.forget_text_inputs("ai.settings.manual-model.");
         self.forget_text_inputs("keyword.highlight.");
-        if self.shell.finish_settings_navigation() {
-            self.persist_ui_layout();
-        }
+        self.close_settings_workspace_tab(cx);
         self.transfer_browser_visibility_changed(browser_was_visible, cx);
         self.shell
             .set_status(t!("settings.settingsClosed").to_string());
@@ -688,14 +707,12 @@ fn drive_validation_key(
 
 #[cfg(test)]
 mod tests {
-    use crate::features::ZzClawTermApp;
-    use crate::models::CloudSyncInputField;
-    use gpui::{AppContext as _, TestAppContext};
-    use zzclawterm_core::{AppRuntime, RuntimeMode, uuid};
-
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
+    use crate::features::ZzClawTermApp;
     use crate::features::settings::SettingsSaveKind;
     use crate::models::HeaderStatusMode;
+    use gpui::{AppContext as _, TestAppContext};
+    use zzclawterm_core::{AppRuntime, RuntimeMode, uuid};
 
     /// A real store runtime, because these tests are about what reaches disk.
     fn app(cx: &mut TestAppContext) -> gpui::Entity<ZzClawTermApp> {
@@ -720,6 +737,82 @@ mod tests {
             overlays: cx.new(|_| OverlayStore::default()),
         };
         cx.new(|cx| ZzClawTermApp::new(runtime, stores, cx))
+    }
+
+    #[test]
+    fn terminal_wrapping_draft_cancel_and_save_preserve_committed_preferences() {
+        use zzclawterm_core::models::settings::TerminalWrapMode;
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        app.update(&mut cx, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.set_terminal_wrap_mode(TerminalWrapMode::None, cx);
+            app.toggle_terminal_wrap_markers(cx);
+            assert!(app.settings_draft_dirty());
+            app.cancel_settings(cx);
+            assert_eq!(
+                app.settings.summary().terminal_wrap_mode,
+                TerminalWrapMode::Character
+            );
+            assert!(!app.settings.summary().terminal_show_wrap_markers);
+            app.begin_settings_draft(cx);
+            app.set_terminal_wrap_mode(TerminalWrapMode::None, cx);
+            app.toggle_terminal_wrap_markers(cx);
+        });
+        let before_save = app.update(&mut cx, |app, _| {
+            app.store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    store.load_app_settings_summary()
+                })
+                .unwrap()
+        });
+        assert_eq!(before_save.terminal_wrap_mode, TerminalWrapMode::Character);
+        assert!(!before_save.terminal_show_wrap_markers);
+        app.update(&mut cx, |app, cx| app.apply_settings_draft(false, cx));
+        cx.run_until_parked();
+        let saved = app.update(&mut cx, |app, _| {
+            app.store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    store.load_app_settings_summary()
+                })
+                .unwrap()
+        });
+        assert_eq!(saved.terminal_wrap_mode, TerminalWrapMode::None);
+        assert!(saved.terminal_show_wrap_markers);
+    }
+
+    #[test]
+    fn row_stripes_draft_cancel_and_apply_preserve_committed_preferences() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        app.update(&mut cx, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.toggle_terminal_zebra_stripes_by_row(cx);
+            app.toggle_terminal_zebra_stripes(cx);
+            assert!(app.settings.summary().terminal_zebra_stripes_by_row);
+            assert!(!app.settings.summary().terminal_zebra_stripes_enabled);
+            assert!(app.settings_draft_dirty());
+            app.cancel_settings(cx);
+            assert!(!app.settings.summary().terminal_zebra_stripes_by_row);
+            assert!(app.settings.summary().terminal_zebra_stripes_enabled);
+            app.begin_settings_draft(cx);
+            app.toggle_terminal_zebra_stripes_by_row(cx);
+        });
+        let load = |cx: &mut TestAppContext| {
+            app.update(cx, |app, _| {
+                app.store_blocking_client()
+                    .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                        store.load_app_settings_summary()
+                    })
+                    .unwrap()
+            })
+        };
+        assert!(!load(&mut cx).terminal_zebra_stripes_by_row);
+        app.update(&mut cx, |app, cx| app.apply_settings_draft(false, cx));
+        cx.run_until_parked();
+        assert!(load(&mut cx).terminal_zebra_stripes_by_row);
     }
 
     #[test]
@@ -1042,6 +1135,39 @@ mod tests {
         );
     }
 
+    /// Editing only the word separators must still be written when the draft is applied.
+    ///
+    /// The box used to update memory and nothing else, so no persistence domain was
+    /// marked dirty and applying the draft saved no interaction settings at all. The
+    /// assertion is on disk for the same reason as the header-status test above.
+    #[test]
+    fn applying_a_draft_persists_word_separators() {
+        const SEPARATORS: &str = " ()[]{}\"':=,;|&<>";
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        let stored = |app: &gpui::Entity<ZzClawTermApp>, cx: &mut TestAppContext| {
+            cx.update_entity(app, |app, _| {
+                app.store_blocking_client()
+                    .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                        store.load_app_settings_summary()
+                    })
+            })
+            .expect("load stored settings")
+            .interaction_word_separators
+        };
+        assert_ne!(stored(&app, &mut cx), SEPARATORS, "fixture baseline");
+
+        cx.update_entity(&app, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.apply_interaction_word_separators(SEPARATORS.to_string(), cx);
+            app.apply_settings_draft(false, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(stored(&app, &mut cx), SEPARATORS);
+    }
+
     #[test]
     fn canceling_a_draft_restores_ui_typography_source() {
         let mut cx = TestAppContext::single();
@@ -1167,6 +1293,7 @@ mod tests {
     fn shared_native_material_settings_refresh_other_workspaces_and_respect_dirty_drafts() {
         use crate::app_shell::{SharedStateDomain, SharedStateEvent};
         use zzclawterm_core::models::window_material::WindowMaterial;
+
         let mut cx = TestAppContext::single();
         let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let first = app(&mut cx);
@@ -1441,6 +1568,7 @@ mod tests {
     /// no message explains the block -- and apply must report the missing password.
     #[test]
     fn webdav_edits_with_a_staged_master_password_report_the_missing_password() {
+        use crate::models::CloudSyncInputField;
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
@@ -1498,6 +1626,7 @@ mod tests {
     /// sync stays disabled, but the endpoint edit persists when applied.
     #[test]
     fn webdav_edits_persist_without_a_master_password_while_cloud_stays_disabled() {
+        use crate::models::CloudSyncInputField;
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
@@ -1589,6 +1718,7 @@ mod tests {
     /// while a master password is staged without a stored one.
     #[test]
     fn flushed_panel_snapshot_reports_webdav_edits() {
+        use crate::models::CloudSyncInputField;
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
@@ -1634,6 +1764,264 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         cx.run_until_parked();
+    }
+
+    fn stage_invalid_cloud_draft(app: &mut ZzClawTermApp, cx: &mut gpui::Context<ZzClawTermApp>) {
+        app.settings
+            .toggle_master_password(false)
+            .expect("stage master password");
+        assert!(
+            app.settings
+                .edit_master_password_draft("fixture password".into())
+        );
+        app.cloud_sync.toggle_enabled();
+        app.apply_cloud_sync_input(
+            crate::models::CloudSyncInputField::WebdavEndpoint,
+            "   ".into(),
+            cx,
+        );
+        assert!(app.settings_draft_dirty());
+        assert!(app.pending_settings_validation_error().is_some());
+    }
+
+    fn stored_settings_and_cloud(
+        app: &gpui::Entity<ZzClawTermApp>,
+        cx: &mut TestAppContext,
+    ) -> (
+        zzclawterm_core::AppSettingsSummary,
+        zzclawterm_core::CloudSyncSettings,
+    ) {
+        app.update(cx, |app, _| {
+            app.store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    Ok((
+                        store.load_app_settings_summary()?,
+                        store.load_cloud_sync_settings()?,
+                    ))
+                })
+                .expect("load saved settings and cloud configuration")
+        })
+    }
+
+    fn finish_settings_apply(app: &gpui::Entity<ZzClawTermApp>, cx: &mut TestAppContext) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            if app.read_with(cx, |app, _| {
+                app.settings.store_status().message == rust_i18n::t!("settings.applied")
+            }) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "settings apply did not complete"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn invalid_settings_actions_preserve_both_drafts_without_starting_a_theme_save() {
+        use crate::features::settings::theme_designer::ThemeIntent;
+
+        for close in [false, true] {
+            for edit_theme in [false, true] {
+                let mut cx = TestAppContext::single();
+                let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+                let app = app(&mut cx);
+                app.update(&mut cx, |app, cx| {
+                    app.open_page(crate::models::NavItem::Settings, cx);
+                    if edit_theme {
+                        app.theme_designer_action(ThemeIntent::Copy("dracula".into()), cx);
+                        assert!(app.save_theme_designer(None, cx));
+                    }
+                });
+                finish_theme_jobs(&app, &mut cx);
+                let (original_settings, original_cloud) = stored_settings_and_cloud(&app, &mut cx);
+                let (theme_draft, error) = app.update(&mut cx, |app, cx| {
+                    if edit_theme {
+                        app.edit_theme_designer("primary", "#123456".into(), cx);
+                    }
+                    stage_invalid_cloud_draft(app, cx);
+                    let theme_draft = app.settings.theme_designer().draft.clone();
+                    let error = app.pending_settings_validation_error().unwrap();
+                    if close {
+                        app.confirm_settings_draft(cx);
+                    } else {
+                        app.apply_settings_draft(false, cx);
+                    }
+                    assert_eq!(app.settings.store_status().message, error);
+                    assert!(app.shell.status().contains(&error));
+                    assert!(app.settings.theme_designer().pending.is_none());
+                    assert!(!app.settings.theme_designer().submitting);
+                    (theme_draft, error)
+                });
+                cx.run_until_parked();
+                let (saved_settings, saved_cloud) = stored_settings_and_cloud(&app, &mut cx);
+                assert_eq!(saved_settings, original_settings);
+                assert!(
+                    saved_cloud == original_cloud,
+                    "cloud configuration must not be saved"
+                );
+                app.read_with(&cx, |app, _| {
+                    assert!(app.settings_tab_is_open());
+                    assert!(app.shell.has_settings_draft());
+                    assert!(app.settings_draft_dirty());
+                    assert_eq!(app.cloud_sync.settings().webdav.endpoint, "   ");
+                    assert!(app.settings.master_password().enabled);
+                    assert!(!app.settings.master_password().draft.is_empty());
+                    assert!(app.settings.theme_designer().draft == theme_draft);
+                    assert_eq!(app.settings.theme_designer().dirty(), edit_theme);
+                    assert_eq!(app.pending_settings_validation_error(), Some(error));
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn corrected_cloud_drafts_apply_and_confirm_successfully() {
+        for close in [false, true] {
+            let mut cx = TestAppContext::single();
+            let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let app = app(&mut cx);
+            app.update(&mut cx, |app, cx| {
+                app.open_page(crate::models::NavItem::Settings, cx);
+                stage_invalid_cloud_draft(app, cx);
+                app.confirm_settings_draft(cx);
+                assert!(app.settings_tab_is_open());
+                app.apply_cloud_sync_input(
+                    crate::models::CloudSyncInputField::WebdavEndpoint,
+                    "https://dav.example.com".into(),
+                    cx,
+                );
+                assert!(app.pending_settings_validation_error().is_none());
+                if close {
+                    app.confirm_settings_draft(cx);
+                } else {
+                    app.apply_settings_draft(false, cx);
+                }
+            });
+            finish_settings_apply(&app, &mut cx);
+            let (saved, cloud) = stored_settings_and_cloud(&app, &mut cx);
+            assert!(saved.has_master_password);
+            assert!(cloud.enabled);
+            assert_eq!(cloud.webdav.endpoint, "https://dav.example.com");
+            app.read_with(&cx, |app, _| {
+                assert_eq!(app.settings_tab_is_open(), !close);
+                assert_eq!(app.shell.has_settings_draft(), !close);
+                assert!(!app.settings_draft_dirty());
+            });
+        }
+    }
+
+    #[test]
+    fn theme_save_resumes_valid_apply_and_confirm_intents() {
+        use crate::features::settings::theme_designer::ThemeIntent;
+        for close in [false, true] {
+            let mut cx = TestAppContext::single();
+            let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let app = app(&mut cx);
+            app.update(&mut cx, |app, cx| {
+                app.open_page(crate::models::NavItem::Settings, cx);
+                app.set_header_status_mode(HeaderStatusMode::Host, cx);
+                app.theme_designer_action(ThemeIntent::Copy("dracula".into()), cx);
+                app.edit_theme_designer("primary", "#123456".into(), cx);
+                if close {
+                    app.confirm_settings_draft(cx);
+                } else {
+                    app.apply_settings_draft(false, cx);
+                }
+                assert_eq!(
+                    app.settings.theme_designer().pending,
+                    Some(ThemeIntent::Apply(close))
+                );
+                app.resolve_theme_designer_pending(Some(true), cx);
+            });
+            finish_theme_jobs(&app, &mut cx);
+            finish_settings_apply(&app, &mut cx);
+            let (saved, _) = stored_settings_and_cloud(&app, &mut cx);
+            assert_eq!(saved.ui_header_status_mode, "host");
+            assert_eq!(saved.custom_themes.available()[0].colors.primary, "#123456");
+            app.read_with(&cx, |app, _| {
+                assert_eq!(app.settings_tab_is_open(), !close);
+                assert!(!app.settings_draft_dirty());
+                assert!(!app.settings.theme_designer().dirty());
+                assert!(app.settings.theme_designer().pending.is_none());
+                assert!(!app.settings.theme_designer().submitting);
+            });
+        }
+    }
+
+    #[test]
+    fn theme_only_actions_do_not_validate_unchanged_ordinary_settings() {
+        use crate::features::settings::theme_designer::ThemeIntent;
+        for invalid_baseline in [false, true] {
+            for close in [false, true] {
+                let mut cx = TestAppContext::single();
+                let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+                let app = app(&mut cx);
+                app.update(&mut cx, |app, cx| {
+                    if invalid_baseline {
+                        app.cloud_sync.toggle_enabled();
+                    }
+                    app.open_page(crate::models::NavItem::Settings, cx);
+                    assert!(!app.settings_draft_dirty());
+                    assert_eq!(
+                        app.pending_settings_validation_error().is_some(),
+                        invalid_baseline
+                    );
+                    app.theme_designer_action(ThemeIntent::Copy("dracula".into()), cx);
+                    if close {
+                        app.confirm_settings_draft(cx);
+                    } else {
+                        app.apply_settings_draft(false, cx);
+                    }
+                    assert_eq!(
+                        app.settings.theme_designer().pending,
+                        Some(ThemeIntent::Apply(close))
+                    );
+                    app.resolve_theme_designer_pending(Some(true), cx);
+                });
+                finish_theme_jobs(&app, &mut cx);
+                finish_settings_apply(&app, &mut cx);
+                let (saved, cloud) = stored_settings_and_cloud(&app, &mut cx);
+                assert_eq!(saved.custom_themes.available().len(), 1);
+                assert!(
+                    !cloud.enabled,
+                    "unchanged cloud configuration must not be persisted"
+                );
+                app.read_with(&cx, |app, _| {
+                    assert_eq!(app.settings_tab_is_open(), !close);
+                    assert!(!app.settings.theme_designer().dirty());
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_theme_save_still_succeeds_with_an_invalid_ordinary_draft() {
+        use crate::features::settings::theme_designer::ThemeIntent;
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        let (original, original_cloud) = stored_settings_and_cloud(&app, &mut cx);
+        app.update(&mut cx, |app, cx| {
+            app.open_page(crate::models::NavItem::Settings, cx);
+            stage_invalid_cloud_draft(app, cx);
+            app.theme_designer_action(ThemeIntent::Copy("dracula".into()), cx);
+            assert!(app.save_theme_designer(None, cx));
+        });
+        finish_theme_jobs(&app, &mut cx);
+        let (saved, cloud) = stored_settings_and_cloud(&app, &mut cx);
+        assert_eq!(saved.custom_themes.available().len(), 1);
+        assert_eq!(saved.has_master_password, original.has_master_password);
+        assert!(cloud == original_cloud);
+        app.read_with(&cx, |app, _| {
+            assert!(app.settings_tab_is_open());
+            assert!(app.settings_draft_dirty());
+            assert!(app.pending_settings_validation_error().is_some());
+            assert!(!app.settings.theme_designer().dirty());
+        });
     }
 
     #[test]
@@ -1878,6 +2266,86 @@ mod tests {
             assert_eq!(app.settings.summary().terminal_font_size, 28);
             app.cancel_settings(cx);
             assert!(app.settings.summary().custom_themes.available().is_empty());
+        });
+    }
+
+    /// Write settings straight into the store, the way a cloud pull does.
+    fn pull_terminal_scrollback_into_store(
+        app: &gpui::Entity<ZzClawTermApp>,
+        cx: &mut TestAppContext,
+    ) {
+        cx.update_entity(app, |app, _| {
+            app.store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    let mut settings = store.load_app_settings_summary()?;
+                    settings.terminal_scrollback_lines = 4242;
+                    store.save_terminal_settings(&settings)
+                })
+                .unwrap();
+        });
+    }
+
+    /// Store replies are delivered from another thread, so `run_until_parked`
+    /// alone does not wait for them (`applying_a_draft_persists_the_header_status_mode`).
+    fn wait_for_the_pulled_settings(app: &gpui::Entity<ZzClawTermApp>, cx: &mut TestAppContext) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            if cx.update_entity(app, |app, _| {
+                app.settings.summary().terminal_scrollback_lines == 4242
+            }) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the store refresh never reached the in-memory settings"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn store_refresh_after_a_pull_rebases_an_untouched_settings_draft() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        cx.update_entity(&app, |app, cx| {
+            app.begin_settings_draft(cx);
+            assert!(!app.settings_draft_dirty());
+        });
+        pull_terminal_scrollback_into_store(&app, &mut cx);
+        cx.update_entity(&app, |app, cx| {
+            app.refresh_store_from_runtime_and_sync_theme(cx)
+        });
+        wait_for_the_pulled_settings(&app, &mut cx);
+        cx.update_entity(&app, |app, _| {
+            assert!(
+                !app.settings_draft_dirty(),
+                "a pull must not turn an untouched draft into unsaved edits"
+            );
+        });
+    }
+
+    #[test]
+    fn store_refresh_keeps_a_draft_the_user_actually_edited() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        cx.update_entity(&app, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.set_transfer_internal_editor_font_size(19, cx);
+            assert!(app.settings_draft_dirty());
+        });
+        pull_terminal_scrollback_into_store(&app, &mut cx);
+        cx.update_entity(&app, |app, cx| {
+            app.refresh_store_from_runtime_and_sync_theme(cx)
+        });
+        wait_for_the_pulled_settings(&app, &mut cx);
+        cx.update_entity(&app, |app, _| {
+            assert!(
+                app.settings_draft_dirty(),
+                "refreshing must not silently drop the user's edit"
+            );
         });
     }
 }

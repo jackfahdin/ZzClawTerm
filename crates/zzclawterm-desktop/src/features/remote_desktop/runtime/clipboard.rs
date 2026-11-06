@@ -5,7 +5,6 @@ use gpui::Context;
 use std::time::Duration;
 use std::time::Instant;
 use zzclawterm_remote_desktop::ClipboardOrigin;
-use zzclawterm_remote_desktop::RdpClipboardMode;
 use zzclawterm_remote_desktop::RemoteDesktopViewState;
 
 pub(super) const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -38,21 +37,22 @@ impl ZzClawTermApp {
         if !self.remote_desktop.is_session(&session_id) {
             return false;
         }
-        if !self
-            .remote_desktop
-            .sessions
-            .get(&session_id)
-            .is_some_and(|session| matches!(session.state, RemoteDesktopViewState::Connected))
-        {
+        let Some(active_session) = self.remote_desktop.sessions.get(&session_id) else {
+            return false;
+        };
+        if !matches!(active_session.state, RemoteDesktopViewState::Connected) {
+            return false;
+        }
+        #[cfg(windows)]
+        if active_session.native_rdp.is_some() {
+            // The Microsoft control owns clipboard redirection for this session.
             return false;
         }
         let clipboard_target =
             self.session
                 .metadata(&session_id)
                 .and_then(|metadata| match &metadata.launch_config {
-                    crate::models::SessionLaunchConfig::Rdp(config)
-                        if config.clipboard.mode != RdpClipboardMode::Disabled =>
-                    {
+                    crate::models::SessionLaunchConfig::Rdp(_) => {
                         Some(RemoteDesktopClipboardTarget::Rdp)
                     }
                     crate::models::SessionLaunchConfig::Vnc(config) if config.clipboard.enabled => {

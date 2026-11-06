@@ -1,17 +1,15 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
-
-use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use std::time::Instant;
-
-use gpui::{FocusHandle, ScrollHandle, UniformListScrollHandle, point, px};
-use zzclawterm_core::{AiExecutionProfile, SavedConnection};
-use zzclawterm_transport::{
-    FileBrowserBackendKind, RemoteFileBackendPreferenceStore, RemoteFileService, SessionEvent,
-    SessionInfo, SessionKind, SessionManager, SshMultiplexHandle, SshSessionConfig,
+use super::SessionProtocolRuntimeState;
+use super::auth_runtime::{
+    AgentPromptBroker, AgentPromptRequest, CredentialPromptBroker, CredentialPromptRequest,
+    CredentialPromptState, HostKeyPromptBroker, HostKeyPromptRequest,
+    KeyboardInteractivePromptState, NativeOtpCodePreview, NativeOtpProvider,
 };
-
+use super::duplicate_prompts::{SftpDuplicatePromptBroker, SftpDuplicatePromptState};
+use super::trzsz_runtime::TrzszSessionState;
+use super::zmodem_runtime::ZmodemSessionState;
+use crate::app_shell::session_hub::ssh_connections::{SshConnectionLease, SshConnectionPool};
 use crate::features::runtime_jobs::SessionStartResult;
+use crate::features::shell::tab_mouse::TabActionTarget;
 use crate::models::event_wake::{ANY_INTEREST, EventWake};
 use crate::models::{
     SessionEventBridge, SessionEventBridgeDrain, SessionEventBridgeStats, SessionLaunchConfig,
@@ -19,18 +17,17 @@ use crate::models::{
     WorkspaceSplitDirection,
 };
 use crate::temporary_ssh_link::TemporaryLinkProtocol;
-
-use crate::app_shell::session_hub::ssh_connections::{SshConnectionLease, SshConnectionPool};
-
-use super::SessionProtocolRuntimeState;
-use super::auth_runtime::{
-    AgentPromptBroker, AgentPromptRequest, CredentialPromptBroker, CredentialPromptRequest,
-    CredentialPromptState, HostKeyPromptBroker, HostKeyPromptRequest,
-    KeyboardInteractivePromptState, NativeOtpCodePreview, NativeOtpProvider,
-    SftpDuplicatePromptBroker, SftpDuplicatePromptState,
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use gpui::{FocusHandle, ScrollHandle, UniformListScrollHandle, point, px};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+use std::time::Instant;
+use zzclawterm_core::{AiExecutionProfile, SavedConnection};
+use zzclawterm_files::file_browser::FileBrowserBackendKind;
+use zzclawterm_files::remote_file::{RemoteFileBackendPreferenceStore, RemoteFileService};
+use zzclawterm_transport::{
+    SessionEvent, SessionInfo, SessionKind, SessionManager, SshMultiplexHandle, SshSessionConfig,
 };
-use super::trzsz_runtime::TrzszSessionState;
-use super::zmodem_runtime::ZmodemSessionState;
 
 const COMMAND_HISTORY_LIMIT: usize = 128;
 const DEFAULT_DUPLICATE_STARTUP_DELAY_MS: u64 = 500;
@@ -40,6 +37,7 @@ const DEFAULT_DUPLICATE_STARTUP_DELAY_MS: u64 = 500;
 const ACTIVE_HISTORY_LIMIT: usize = 64;
 
 pub(in crate::features) struct SessionFeatureState {
+    pub(in crate::features) unsupported_restore_tabs: Vec<zzclawterm_core::RestorableOpenTab>,
     manager: Arc<SessionManager>,
     ssh_connections: SshConnectionPool,
     event_bridge: SessionEventBridge,
@@ -54,8 +52,6 @@ pub(in crate::features) struct SessionFeatureState {
     /// Shared by the active-sessions list and its scrollbar so both read one
     /// scroll position across re-renders.
     active_list_scroll: UniformListScrollHandle,
-    /// Same contract as `active_list_scroll`, for the recording panel list.
-    recording_list_scroll: UniformListScrollHandle,
     /// Per-session reconnect/disconnect busy state ("reconnect" | "disconnect").
     busy_actions: HashMap<String, String>,
     active: ActiveSessionState,
@@ -166,13 +162,16 @@ pub(in crate::features) struct PromptInputTarget {
 
 /// Session-scoped overlays, confirmations and editing dialogs.
 pub(super) struct SessionDialogState {
-    tab_actions_session_id: Option<String>,
+    tab_actions_target: Option<TabActionTarget>,
+    tab_actions_start_snapshot: Option<StartTabActionSnapshot>,
     tab_actions_anchor: Option<(f32, f32)>,
     tab_actions_submenu: Option<TabActionsSubmenu>,
     tab_actions_focus: FocusHandle,
+    tab_actions_restore_focus: Option<FocusHandle>,
     pending_quit_after_close_all: bool,
     pending_window_quit: bool,
-    rename_session_id: Option<String>,
+    rename_target: Option<TabActionTarget>,
+    rename_dialog_handle: Option<zzclawterm_ui::ZzClawDialogHandle>,
     rename_draft: String,
     color_picker_open: bool,
     color_picker_focus: FocusHandle,
@@ -197,7 +196,10 @@ pub(super) struct SessionDialogState {
 pub(in crate::features) enum RenameSessionSubmission {
     Inactive,
     Empty,
-    Ready { session_id: String, name: String },
+    Ready {
+        target: TabActionTarget,
+        name: String,
+    },
 }
 
 /// Pointer and offset at the moment the session-info header was grabbed, so
@@ -316,9 +318,11 @@ impl SessionFeatureState {
                 | SessionEvent::OutputBoundary { session_id, .. }
                 | SessionEvent::OutputDropped { session_id, .. }
                 | SessionEvent::CwdChanged { session_id, .. }
+                | SessionEvent::CommandContext { session_id, .. }
                 | SessionEvent::CommandAccepted { session_id, .. }
                 | SessionEvent::Exited { session_id, .. }
                 | SessionEvent::CleanupFailed { session_id, .. }
+                | SessionEvent::TmuxState { session_id, .. }
                 | SessionEvent::Error { session_id, .. } => session_id,
             };
             if selected.contains(session_id) {
@@ -449,6 +453,7 @@ impl SessionFeatureState {
         focus: SessionFeatureFocus,
     ) -> Self {
         Self {
+            unsupported_restore_tabs: Vec::new(),
             manager,
             ssh_connections,
             event_bridge,
@@ -457,13 +462,16 @@ impl SessionFeatureState {
             events: SessionEventQueueState::default(),
             prompts: SessionPromptState::new(otp_provider, focus.credential),
             dialogs: SessionDialogState {
-                tab_actions_session_id: None,
+                tab_actions_target: None,
+                tab_actions_start_snapshot: None,
                 tab_actions_anchor: None,
                 tab_actions_submenu: None,
                 tab_actions_focus: focus.tab_actions,
+                tab_actions_restore_focus: None,
                 pending_quit_after_close_all: false,
                 pending_window_quit: false,
-                rename_session_id: None,
+                rename_target: None,
+                rename_dialog_handle: None,
                 rename_draft: String::new(),
                 color_picker_open: false,
                 color_picker_focus: focus.color_picker,
@@ -488,7 +496,6 @@ impl SessionFeatureState {
             directly_recorded_command_history: HashMap::new(),
             active_search_draft: String::new(),
             active_list_scroll: UniformListScrollHandle::new(),
-            recording_list_scroll: UniformListScrollHandle::new(),
             busy_actions: HashMap::new(),
             active: ActiveSessionState::default(),
             order: Vec::new(),
@@ -510,6 +517,14 @@ impl SessionFeatureState {
 
     pub(in crate::features) fn manager_handle(&self) -> Arc<SessionManager> {
         Arc::clone(&self.manager)
+    }
+
+    pub(in crate::features) fn external_start_is_busy(&self) -> bool {
+        self.start.is_busy()
+    }
+
+    pub(in crate::features) fn start_is_busy(&self) -> bool {
+        self.start.is_busy()
     }
 
     pub(in crate::features) fn start_has_pending(&self) -> bool {
@@ -674,6 +689,12 @@ impl SessionFeatureState {
         self.prompts.active_credential()
     }
 
+    pub(in crate::features) fn prompt_restore_credential_focus(&mut self) {
+        if self.prompts.has_active_credential() {
+            self.prompts.credential_prompt_focus_pending = true;
+        }
+    }
+
     #[cfg(test)]
     pub(in crate::features) fn prompt_request_credential_focus_for_test(&mut self) {
         self.prompts.credential_prompt_focus_pending = true;
@@ -737,6 +758,16 @@ impl SessionFeatureState {
 
     pub(in crate::features) fn dialog_tab_actions_session_id(&self) -> Option<&str> {
         self.dialogs.tab_actions_session_id()
+    }
+
+    pub(in crate::features) fn dialog_tab_actions_target(&self) -> Option<&TabActionTarget> {
+        self.dialogs.tab_actions_target.as_ref()
+    }
+
+    pub(in crate::features) fn dialog_tab_actions_start_snapshot(
+        &self,
+    ) -> Option<&StartTabActionSnapshot> {
+        self.dialogs.tab_actions_start_snapshot.as_ref()
     }
 
     pub(in crate::features) fn dialog_tab_actions_anchor(&self) -> Option<(f32, f32)> {
@@ -942,9 +973,11 @@ impl SessionFeatureState {
                 | SessionEvent::OutputBoundary { session_id, .. }
                 | SessionEvent::OutputDropped { session_id, .. }
                 | SessionEvent::CwdChanged { session_id, .. }
+                | SessionEvent::CommandContext { session_id, .. }
                 | SessionEvent::CommandAccepted { session_id, .. }
                 | SessionEvent::Exited { session_id, .. }
                 | SessionEvent::CleanupFailed { session_id, .. }
+                | SessionEvent::TmuxState { session_id, .. }
                 | SessionEvent::Error { session_id, .. } => session_id,
             };
             if id == session_id {
@@ -983,9 +1016,11 @@ impl SessionFeatureState {
                 | SessionEvent::OutputBoundary { session_id, .. }
                 | SessionEvent::OutputDropped { session_id, .. }
                 | SessionEvent::CwdChanged { session_id, .. }
+                | SessionEvent::CommandContext { session_id, .. }
                 | SessionEvent::CommandAccepted { session_id, .. }
                 | SessionEvent::Exited { session_id, .. }
                 | SessionEvent::CleanupFailed { session_id, .. }
+                | SessionEvent::TmuxState { session_id, .. }
                 | SessionEvent::Error { session_id, .. } => session_id.clone(),
             })
             .collect();
@@ -1151,10 +1186,6 @@ impl SessionFeatureState {
 
     pub(in crate::features) fn active_list_scroll(&self) -> &UniformListScrollHandle {
         &self.active_list_scroll
-    }
-
-    pub(in crate::features) fn recording_list_scroll(&self) -> &UniformListScrollHandle {
-        &self.recording_list_scroll
     }
 
     pub(in crate::features) fn active_search_draft(&self) -> &str {
@@ -1645,6 +1676,13 @@ impl SessionFeatureState {
     }
 
     pub(in crate::features) fn clear_start_tab_placements(&mut self) {
+        // Placement reservations are temporary; an open rename must retain the
+        // formal session identity before the last reservation is released.
+        if let Some(target @ TabActionTarget::Start { .. }) = self.dialogs.rename_target.as_ref()
+            && let Some(id) = self.resolved_tab_action_session(target)
+        {
+            self.dialogs.rename_target = Some(TabActionTarget::Session(id));
+        }
         self.start_tab_placements.clear();
         self.start.placements.clear();
     }
@@ -1876,6 +1914,27 @@ impl SessionFeatureState {
             .is_some_and(|metadata| metadata.disconnected)
     }
 
+    /// Whether a session a configuration replacement could disturb is still
+    /// running.
+    ///
+    /// Deliberately narrow, and only for configuration-replacement blockers
+    /// (cloud-sync pulls and backup imports): a tab kept for reconnect
+    /// (`disconnected`) holds no backend, and a local shell is spawned by the
+    /// local runtime rather than from the connection catalog being rewritten,
+    /// so neither one may stop the replacement. RDP/VNC have a separate runtime
+    /// owner; its replacement predicate is authoritative for those protocols.
+    pub(in crate::features) fn has_live_remote_sessions(&self) -> bool {
+        self.metadata.values().any(|metadata| {
+            !metadata.disconnected
+                && !matches!(
+                    metadata.launch_config,
+                    crate::models::SessionLaunchConfig::Local(_)
+                        | crate::models::SessionLaunchConfig::Rdp(_)
+                        | crate::models::SessionLaunchConfig::Vnc(_)
+                )
+        })
+    }
+
     pub(in crate::features) fn tab_tooltip_lines(&self, session_id: &str) -> Vec<String> {
         let mut lines = Vec::new();
         if let Some(endpoint) = self.endpoint(session_id) {
@@ -1940,6 +1999,19 @@ impl SessionFeatureState {
         Some(SessionDisconnectUpdate {
             already_disconnected,
         })
+    }
+
+    /// Inverse for sessions revived in place: a tmux pane session adopted
+    /// again when the control client reattaches. Returns whether it had been
+    /// marked disconnected — the banner text stays in the grid until the next
+    /// capture-pane seed repaints it, which is what the caller drives next.
+    pub(in crate::features) fn clear_session_disconnected(&mut self, session_id: &str) -> bool {
+        let Some(metadata) = self.metadata.get_mut(session_id) else {
+            return false;
+        };
+        let was_disconnected = metadata.disconnected;
+        metadata.disconnected = false;
+        was_disconnected
     }
 
     pub(in crate::features) fn custom_name(&self, session_id: &str) -> Option<&str> {
@@ -2298,7 +2370,7 @@ impl SessionPromptState {
     /// Freeing the single active slot is what lets the next queued prompt in, and
     /// nothing is enqueued at that moment, so the activation pass has to be woken
     /// explicitly. Every `take_*` below does this.
-    fn signal_wake(&self) {
+    pub(in crate::features) fn signal_wake(&self) {
         self.wake.signal(ANY_INTEREST);
     }
 
@@ -2330,6 +2402,12 @@ impl SessionPromptState {
         }
         self.signal_wake();
         PromptResolution::Ready(prompt)
+    }
+
+    pub(in crate::features) fn active_credential_mut(
+        &mut self,
+    ) -> Option<&mut CredentialPromptState> {
+        self.active_credential_prompt.as_mut()
     }
 
     pub(in crate::features) fn take_credential(&mut self) -> Option<CredentialPromptState> {
@@ -2476,7 +2554,12 @@ impl SessionPromptState {
         let Some(state) = self.active_credential_prompt.as_mut() else {
             return false;
         };
-        if state.id != prompt_id {
+        if state.id != prompt_id
+            || state
+                .authentication
+                .as_ref()
+                .is_some_and(|form| form.is_busy())
+        {
             return false;
         }
         state.value = text;
@@ -2520,6 +2603,13 @@ impl SessionPromptState {
 
     pub(in crate::features) fn active_input_target(&self) -> Option<PromptInputTarget> {
         if let Some(state) = self.active_credential_prompt.as_ref() {
+            if state
+                .authentication
+                .as_ref()
+                .is_some_and(|form| !form.uses_secret_input())
+            {
+                return None;
+            }
             return Some(PromptInputTarget {
                 id: format!("ssh.credential.{}", state.id),
                 seed: state.value.clone(),
@@ -2661,6 +2751,7 @@ impl SessionPromptState {
             id: request.id,
             request: request.request,
             response_tx: request.response_tx,
+            upload_batch: request.upload_batch,
         });
         Some(target)
     }
@@ -2668,7 +2759,10 @@ impl SessionPromptState {
 
 impl SessionDialogState {
     pub(in crate::features) fn tab_actions_session_id(&self) -> Option<&str> {
-        self.tab_actions_session_id.as_deref()
+        match self.tab_actions_target.as_ref()? {
+            TabActionTarget::Session(id) => Some(id),
+            TabActionTarget::Start { .. } => None,
+        }
     }
 
     pub(in crate::features) fn tab_actions_anchor(&self) -> Option<(f32, f32)> {
@@ -2688,13 +2782,35 @@ impl SessionDialogState {
         session_id: String,
         anchor: Option<(f32, f32)>,
     ) {
-        self.tab_actions_session_id = Some(session_id);
+        self.tab_actions_target = Some(TabActionTarget::Session(session_id));
+        self.tab_actions_start_snapshot = None;
+        self.tab_actions_restore_focus = None;
         self.tab_actions_anchor = anchor;
         self.tab_actions_submenu = None;
     }
 
+    pub(in crate::features) fn open_start_tab_actions(
+        &mut self,
+        target: TabActionTarget,
+        snapshot: StartTabActionSnapshot,
+        anchor: (f32, f32),
+        restore_focus: Option<FocusHandle>,
+    ) {
+        self.tab_actions_restore_focus = restore_focus;
+        self.tab_actions_target = Some(target);
+        self.tab_actions_start_snapshot = Some(snapshot);
+        self.tab_actions_anchor = Some(anchor);
+        self.tab_actions_submenu = None;
+    }
+
+    pub(in crate::features) fn take_tab_actions_restore_focus(&mut self) -> Option<FocusHandle> {
+        self.tab_actions_restore_focus.take()
+    }
+
     pub(in crate::features) fn close_tab_actions(&mut self) {
-        self.tab_actions_session_id = None;
+        self.tab_actions_target = None;
+        self.tab_actions_start_snapshot = None;
+        self.tab_actions_restore_focus = None;
         self.tab_actions_anchor = None;
         self.tab_actions_submenu = None;
     }
@@ -2734,22 +2850,50 @@ impl SessionDialogState {
         quit_after
     }
 
+    pub(in crate::features) fn rename_dialog_handle(
+        &self,
+    ) -> Option<&zzclawterm_ui::ZzClawDialogHandle> {
+        self.rename_dialog_handle.as_ref()
+    }
+
+    pub(in crate::features) fn set_rename_dialog_handle(
+        &mut self,
+        handle: zzclawterm_ui::ZzClawDialogHandle,
+    ) {
+        self.rename_dialog_handle = Some(handle);
+    }
+
+    pub(in crate::features) fn rename_target(&self) -> Option<&TabActionTarget> {
+        self.rename_target.as_ref()
+    }
+
     pub(in crate::features) fn rename_draft(&self) -> &str {
         &self.rename_draft
     }
 
+    #[cfg(test)]
     pub(in crate::features) fn open_rename(&mut self, session_id: String, current_name: &str) {
-        self.rename_session_id = Some(session_id);
+        self.open_tab_rename(TabActionTarget::Session(session_id), current_name);
+    }
+
+    pub(in crate::features) fn open_tab_rename(
+        &mut self,
+        target: TabActionTarget,
+        current_name: &str,
+    ) {
+        self.rename_target = Some(target);
+        self.rename_dialog_handle = None;
         self.rename_draft = current_name.chars().take(64).collect();
     }
 
     pub(in crate::features) fn cancel_rename(&mut self) {
-        self.rename_session_id = None;
+        self.rename_target = None;
+        self.rename_dialog_handle = None;
         self.rename_draft.clear();
     }
 
     pub(in crate::features) fn take_rename_submission(&mut self) -> RenameSessionSubmission {
-        let Some(session_id) = self.rename_session_id.take() else {
+        let Some(target) = self.rename_target.take() else {
             return RenameSessionSubmission::Inactive;
         };
         let name = self
@@ -2760,10 +2904,11 @@ impl SessionDialogState {
             .collect::<String>();
         self.rename_draft.clear();
         if name.is_empty() {
-            self.rename_session_id = Some(session_id);
+            self.rename_target = Some(target);
             return RenameSessionSubmission::Empty;
         }
-        RenameSessionSubmission::Ready { session_id, name }
+        self.rename_dialog_handle = None;
+        RenameSessionSubmission::Ready { target, name }
     }
 
     pub(in crate::features) fn color_picker_is_open(&self) -> bool {
@@ -2979,6 +3124,8 @@ impl SessionDialogState {
 }
 
 pub(in crate::features) struct PendingSessionStart {
+    /// Retains an external override before a saved connection's config is built.
+    pub requested_ssh_runtime_mode: Option<zzclawterm_core::models::ssh_runtime::SshRuntimeMode>,
     pub attempt: zzclawterm_transport::connection_attempt::ConnectionAttempt,
     pub connection_name: String,
     pub launch_config: Option<SessionLaunchConfig>,
@@ -3000,6 +3147,19 @@ pub(in crate::features) struct PendingSessionStart {
     pub reconnect_session_id: Option<String>,
 }
 
+impl PendingSessionStart {
+    pub(in crate::features) fn ssh_runtime_mode(
+        &self,
+    ) -> Option<zzclawterm_core::models::ssh_runtime::SshRuntimeMode> {
+        self.requested_ssh_runtime_mode.or_else(|| {
+            self.launch_config.as_ref().and_then(|config| match config {
+                SessionLaunchConfig::Ssh(config) => Some(config.effective_runtime_mode()),
+                _ => None,
+            })
+        })
+    }
+}
+
 pub(in crate::features) struct PendingReconnectCompletion {
     pub old_id: String,
     pub new_id: String,
@@ -3010,14 +3170,23 @@ pub(in crate::features) struct PendingReconnectCompletion {
     pub startup_command: Option<StartupCommandRequest>,
 }
 
-/// A session start that remains visible after its worker failed.
-///
-/// Tauri keeps the failed pane in its original tab, so the GPUI shell must
-/// retain the pending metadata instead of reducing the failure to a global
-/// banner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::features) enum SessionStartEndReason {
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::features) struct StartTabActionSnapshot {
+    pub request_id: String,
+    pub reason: Option<SessionStartEndReason>,
+}
+
+/// A failed or cancelled start retains its metadata in the original tab for retry.
 pub(in crate::features) struct FailedSessionStart {
     pub pending: PendingSessionStart,
     pub error: String,
+    pub reason: SessionStartEndReason,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3060,6 +3229,7 @@ pub(in crate::features) enum SessionStartEventRequest {
 
 #[derive(Clone, Default)]
 pub(in crate::features) struct SavedConnectionStartOptions {
+    pub ssh_runtime_mode: Option<zzclawterm_core::models::ssh_runtime::SshRuntimeMode>,
     pub custom_name: Option<String>,
     pub tab_color: Option<u32>,
     pub locked: bool,
@@ -3106,6 +3276,10 @@ impl SessionStartFeatureState {
 
     pub(in crate::features) fn has_pending(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    pub(in crate::features) fn is_busy(&self) -> bool {
+        !self.pending.is_empty() || !self.preparing_saved_connections.is_empty()
     }
 
     pub(in crate::features) fn has_failed(&self) -> bool {
@@ -3382,6 +3556,7 @@ impl SessionStartFeatureState {
                 FailedSessionStart {
                     pending: *pending,
                     error,
+                    reason: SessionStartEndReason::Failed,
                 },
             );
             if was_active {
@@ -3496,12 +3671,50 @@ impl SessionStartFeatureState {
         true
     }
 
+    /// Cancel a worker but retain its metadata for retry under the same tab identity.
+    pub(in crate::features) fn cancel_pending(
+        &mut self,
+        request_id: &str,
+        message: String,
+    ) -> bool {
+        let was_active = self.active_pending.as_deref() == Some(request_id);
+        let Some(pending) = self.close_pending(request_id) else {
+            return false;
+        };
+        self.failed.insert(
+            request_id.to_string(),
+            FailedSessionStart {
+                pending,
+                error: message,
+                reason: SessionStartEndReason::Cancelled,
+            },
+        );
+        if was_active {
+            self.active_pending = None;
+            self.active_failed = Some(request_id.to_string());
+        }
+        true
+    }
+
     pub(in crate::features) fn close_pending(
         &mut self,
         request_id: &str,
     ) -> Option<PendingSessionStart> {
         let pending = self.pending.remove(request_id)?;
         pending.attempt.cancel();
+        if let (Some(connection_id), Some(placement)) = (
+            pending.source_connection_id.as_deref(),
+            pending.tab_placement,
+        ) && self
+            .preparing_saved_connections
+            .get(connection_id)
+            .is_some_and(|reserved| {
+                reserved.request_sequence == placement.request_sequence
+                    && reserved.requested_at == placement.requested_at
+            })
+        {
+            self.preparing_saved_connections.remove(connection_id);
+        }
         if !self.retry_preparations.remove(request_id) {
             self.cancelled.insert(request_id.to_string());
         }
@@ -3590,3 +3803,5 @@ pub(super) fn failed_session_start_display_name(failed: &FailedSessionStart) -> 
 
 #[cfg(test)]
 mod tests;
+
+mod tab_actions;

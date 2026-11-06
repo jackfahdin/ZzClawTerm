@@ -1,21 +1,21 @@
-use rust_i18n::t;
-
-use gpui::{Context, Window};
-use zzclawterm_transport::{
-    FileBrowserService, FileCopyRequest, RemoteFilePath, SftpDuplicatePolicy,
-    SftpDuplicateResolver, SftpFileEntry, SftpPathTransferOptions, SftpTransferControl,
-    file_browser_join, file_browser_name, file_browser_parent,
+use super::super::context_menu_policy::{
+    SendToCandidate, send_to_candidate_is_eligible, send_to_target_directory,
 };
-
 use crate::features::ZzClawTermApp;
 use crate::features::transfers::transfer_jobs::TransferProgressEventSender;
 use crate::models::{
     TransferJobEvent, TransferJobKind, TransferJobOutput, TransferJobResult, TransferJobState,
     TransferJobStatus,
 };
-
-use super::super::context_menu_policy::{
-    SendToCandidate, send_to_candidate_is_eligible, send_to_target_directory,
+use gpui::{Context, Window};
+use rust_i18n::t;
+use zzclawterm_files::file_browser::{
+    FileBrowserService, file_browser_join, file_browser_name, file_browser_parent,
+};
+use zzclawterm_files::remote_file::FileCopyRequest;
+use zzclawterm_files::sftp::{RemoteFilePath, SftpFileEntry, SftpTransferControl};
+use zzclawterm_files::sftp_transfer_types::{
+    SftpDuplicatePolicy, SftpDuplicateResolver, SftpPathTransferOptions,
 };
 
 /// A session the current selection can be sent to.
@@ -233,7 +233,7 @@ struct SendToRequest {
 /// mixed backends stage through a local temp directory.
 fn run_send_to(
     request: SendToRequest,
-    progress: impl FnMut(zzclawterm_transport::SftpTransferProgress) + Send + 'static,
+    progress: impl FnMut(zzclawterm_files::sftp_transfer_types::SftpTransferProgress) + Send + 'static,
 ) -> Result<TransferJobOutput, String> {
     let SendToRequest {
         source_service,
@@ -299,9 +299,9 @@ mod tests {
     use super::{SendToRequest, run_send_to};
     use crate::models::TransferJobOutput;
     use std::sync::{Arc, Mutex};
-    use zzclawterm_transport::{
-        FileBrowserService, RemoteFilePath, SftpPathTransferOptions, SftpTransferControl,
-    };
+    use zzclawterm_files::file_browser::FileBrowserService;
+    use zzclawterm_files::sftp::{RemoteFilePath, SftpTransferControl};
+    use zzclawterm_files::sftp_transfer_types::SftpPathTransferOptions;
 
     #[test]
     fn send_to_reports_partial_progress_and_keeps_the_content_size_in_its_output() {

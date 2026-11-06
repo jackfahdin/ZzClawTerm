@@ -1,15 +1,13 @@
-use std::time::{Duration, Instant};
-
-use gpui::{Context, KeyDownEvent, KeyUpEvent, MouseButton, MouseMoveEvent, MouseUpEvent, Window};
-use zzclawterm_core::{
-    TerminalMouseReportEligibility, TerminalWireWriteKind, terminal_input_fanout_status,
-    terminal_mouse_report_should_send, terminal_wire_write_disposition,
-};
-
 use crate::features::ZzClawTermApp;
 use crate::models::recording::ExecutionRecordingEvent;
 use crate::terminal::{
     TerminalKeyMode, terminal_key_bytes_with_mode, terminal_key_release_bytes_with_mode,
+};
+use gpui::{Context, KeyDownEvent, KeyUpEvent, MouseButton, MouseMoveEvent, MouseUpEvent, Window};
+use std::time::{Duration, Instant};
+use zzclawterm_core::{
+    TerminalMouseReportEligibility, TerminalWireWriteKind, terminal_input_fanout_status,
+    terminal_mouse_report_should_send, terminal_wire_write_disposition,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +117,24 @@ impl ZzClawTermApp {
         track_suggestions: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.send_terminal_input_with_delivery(bytes, track_suggestions, false, cx)
+    }
+
+    pub(in crate::features) fn send_terminal_literal_input(
+        &mut self,
+        bytes: Vec<u8>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.send_terminal_input_with_delivery(bytes, true, true, cx)
+    }
+
+    fn send_terminal_input_with_delivery(
+        &mut self,
+        bytes: Vec<u8>,
+        track_suggestions: bool,
+        literal: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let input_started_at = Instant::now();
         if bytes.is_empty() || self.active_terminal_input_blocked() {
             return false;
@@ -164,7 +180,12 @@ impl ZzClawTermApp {
         // pending Enter submission is applied to every successful peer.
         let mut ok_sessions = Vec::new();
         let write_started_at = Instant::now();
-        match self.write_session_input_recorded(&session_id, &bytes) {
+        let result = if literal {
+            self.write_session_literal_input_recorded(&session_id, &bytes)
+        } else {
+            self.write_session_input_recorded(&session_id, &bytes)
+        };
+        match result {
             Ok(()) => ok_sessions.push(session_id),
             Err(error) => {
                 if self.set_terminal_status_if_changed(format!("input failed: {error}")) {
@@ -177,7 +198,12 @@ impl ZzClawTermApp {
         let mut synced = 0usize;
         let mut failed = 0usize;
         for peer_id in peers {
-            match self.write_session_input_recorded(&peer_id, &bytes) {
+            let result = if literal {
+                self.write_session_literal_input_recorded(&peer_id, &bytes)
+            } else {
+                self.write_session_input_recorded(&peer_id, &bytes)
+            };
+            match result {
                 Ok(()) => {
                     ok_sessions.push(peer_id);
                     synced += 1;
@@ -357,7 +383,15 @@ impl ZzClawTermApp {
         }
         let input_wake_duration = input_wake_started_at.elapsed();
 
-        self.note_shell_editing_input(&primary_bytes, cx);
+        // Kitty can encode Enter as CSI-u. Tracking/history still consume its
+        // logical submission, while each session keeps its own wire encoding.
+        let logical_bytes: &[u8] =
+            if event.keystroke.key == "enter" && !event.keystroke.modifiers.modified() {
+                b"\r"
+            } else {
+                &primary_bytes
+            };
+        self.note_shell_editing_input(logical_bytes, cx);
         let suggestion_started_at = Instant::now();
         if terminal_should_track_command_suggestion_input(
             track_suggestions,
@@ -365,13 +399,13 @@ impl ZzClawTermApp {
                 .summary()
                 .interaction_command_suggestions_enabled,
         ) {
-            self.note_command_suggestion_input(&primary_bytes, cx);
+            self.note_command_suggestion_input(logical_bytes, cx);
         }
         let suggestion_duration = suggestion_started_at.elapsed();
 
         let session_refs: Vec<&str> = ok_sessions.iter().map(String::as_str).collect();
         let history_started_at = Instant::now();
-        self.record_command_history_for_sessions(&session_refs, &primary_bytes);
+        self.record_command_history_for_sessions(&session_refs, logical_bytes);
         let history_duration = history_started_at.elapsed();
 
         let should_notify = synced > 0 || failed > 0;
@@ -556,10 +590,14 @@ impl ZzClawTermApp {
             motion,
             modifiers,
         } = report;
+        let allowed_peers = self.sync_peer_session_ids(session_id);
         let result = self.write_mouse_report_to_session(report, cx);
         if !press && self.terminal.selection.mouse_report_button.is_some() {
             let peers = std::mem::take(&mut self.terminal.selection.mouse_report_peer_session_ids);
             for peer_id in peers {
+                if !allowed_peers.contains(&peer_id) {
+                    continue;
+                }
                 let _ = self.write_mouse_report_to_session(
                     TerminalMouseReportRequest {
                         session_id: &peer_id,
@@ -590,6 +628,9 @@ impl ZzClawTermApp {
                 .mouse_report_peer_session_ids
                 .clone();
             for peer_id in peers {
+                if !allowed_peers.contains(&peer_id) {
+                    continue;
+                }
                 let _ = self.write_mouse_report_to_session(
                     TerminalMouseReportRequest {
                         session_id: &peer_id,
@@ -885,8 +926,25 @@ impl ZzClawTermApp {
         session_id: &str,
         bytes: &[u8],
     ) -> Result<(), String> {
+        if let Some(state) = self.terminal.editing.sessions.get_mut(session_id) {
+            state.suggestion_fill = None;
+        }
         self.commands.cancel_staged_quick_command(session_id);
         self.write_guarded_terminal_input(session_id, bytes)
+    }
+
+    /// Literal text still uses the session charset, but bypasses transport text
+    /// rewriting (notably Telnet Enter-mode newline normalization).
+    pub(in crate::features) fn write_session_literal_input_recorded(
+        &mut self,
+        session_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        if let Some(state) = self.terminal.editing.sessions.get_mut(session_id) {
+            state.suggestion_fill = None;
+        }
+        let encoded = self.encode_session_outgoing(session_id, bytes)?;
+        self.write_session_raw_input_recorded(session_id, &encoded)
     }
 
     /// Only the current script owner may bypass cancellation by competing input.
@@ -957,6 +1015,24 @@ impl ZzClawTermApp {
             return Err("screen locked".to_string());
         }
         // Charset-encode paste/typed text; pure ASCII CSI/mouse reports pass through.
+        if self.recording_input_is_sensitive(session_id) {
+            self.commands.mark_completion_sensitive(session_id);
+        }
+        if bytes.contains(&b'\r') || bytes.contains(&b'\n') {
+            let confirmed = self
+                .terminal
+                .editing
+                .sessions
+                .get(session_id)
+                .is_some_and(|state| {
+                    !state.awaiting_snapshot
+                        && state.model.phase == zzclawterm_core::terminal::editing::EditPhase::Ready
+                        && state.mapping.is_some()
+                        && state.allows_editing()
+                });
+            self.commands
+                .mark_completion_confirmed(session_id, confirmed);
+        }
         let disposition = terminal_wire_write_disposition(TerminalWireWriteKind::LogicalInput);
         let terminal_line = (bytes == b"\r" || bytes == b"\n")
             .then(|| self.read_terminal_input_line_for_session(session_id))
@@ -975,6 +1051,9 @@ impl ZzClawTermApp {
             self.record_terminal_session_write_failure(session_id, "input", &error);
             return Err(error);
         }
+        if bytes.contains(&b'\r') || bytes.contains(&b'\n') {
+            self.commands.complete_completion_submission(session_id);
+        }
         if self.session.active_id() == Some(session_id)
             && bytes.iter().any(|byte| matches!(byte, b'\r' | b'\n'))
         {
@@ -983,7 +1062,7 @@ impl ZzClawTermApp {
         }
         if let Some(command) = command {
             if self.recording.writer().capture_policy(session_id).mode
-                == zzclawterm_transport::RecordingMode::Raw
+                == zzclawterm_recording::recording::RecordingMode::Raw
             {
                 if self
                     .recording
@@ -1008,7 +1087,7 @@ impl ZzClawTermApp {
             && !self.recording_input_is_sensitive(session_id)
         {
             let policy = self.recording.writer().capture_policy(session_id);
-            if policy.mode == zzclawterm_transport::RecordingMode::Raw {
+            if policy.mode == zzclawterm_recording::recording::RecordingMode::Raw {
                 self.recording.write_raw_input(session_id, encoded);
                 return Ok(());
             }
@@ -1085,6 +1164,7 @@ impl ZzClawTermApp {
         if self.security.screen_locked() {
             return Err("screen locked".to_string());
         }
+        self.commands.mark_completion_sensitive(session_id);
         let disposition = terminal_wire_write_disposition(TerminalWireWriteKind::SensitiveInput);
         debug_assert!(disposition.encode_session_charset);
         debug_assert!(!disposition.record_logical_input);
@@ -1094,7 +1174,11 @@ impl ZzClawTermApp {
         self.session
             .manager()
             .write(session_id, &encoded)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        if bytes.contains(&b'\r') || bytes.contains(&b'\n') {
+            self.commands.complete_completion_submission(session_id);
+        }
+        Ok(())
     }
 
     pub(in crate::features) fn send_sensitive_input_to_active_session(
@@ -1147,6 +1231,9 @@ impl ZzClawTermApp {
         wire_bytes: &[u8],
         recording_bytes: &[u8],
     ) -> Result<(), String> {
+        if let Some(state) = self.terminal.editing.sessions.get_mut(session_id) {
+            state.suggestion_fill = None;
+        }
         self.commands.cancel_staged_quick_command(session_id);
         if self.security.screen_locked() {
             return Err("screen locked".to_string());
@@ -1172,7 +1259,7 @@ impl ZzClawTermApp {
         {
             let policy = self.recording.writer().capture_policy(session_id);
             if policy.include_input {
-                if policy.mode == zzclawterm_transport::RecordingMode::Raw {
+                if policy.mode == zzclawterm_recording::recording::RecordingMode::Raw {
                     self.recording
                         .write_raw_input(session_id, wire_bytes.to_vec());
                 } else {
@@ -1325,6 +1412,7 @@ impl ZzClawTermApp {
         self.terminal.input.focus_active = focused;
         if !focused {
             self.dismiss_command_suggestions(cx);
+            self.clear_terminal_composition(cx);
         }
         let Some(session_id) = self.session.active_id_owned() else {
             return;
@@ -1518,6 +1606,7 @@ impl ZzClawTermApp {
             kitty_keyboard_report_alternate_keys,
             kitty_keyboard_report_all_keys_as_esc,
             kitty_keyboard_report_associated_text,
+            alt_arrows_word_jump: self.settings.summary().interaction_alt_as_meta,
         }
     }
 
@@ -1538,7 +1627,7 @@ impl ZzClawTermApp {
         event: &KeyDownEvent,
     ) -> bool {
         terminal_should_defer_key_text_to_input_handler_for_state(
-            &self.terminal.input.ime_marked_text,
+            self.terminal.input.ime.text(),
             event,
         )
     }

@@ -1,21 +1,19 @@
-use std::hash::{Hash, Hasher};
-use std::time::Duration;
-
-use futures::StreamExt as _;
-use gpui::{Context, KeyDownEvent, Window};
-use zzclawterm_transport::{
-    SftpDuplicateDecision, SftpDuplicateRequest, SshAgentPromptAction, SshCredentialPrompt,
-    SshHostKey, SshKeyboardInteractiveRequest,
-};
-
 use super::state::PromptResolution;
 use super::{
-    CredentialPromptRequest, CredentialPromptState, HostKeyPromptChoice,
+    CredentialPromptRequest, CredentialPromptState, DuplicatePromptAction, HostKeyPromptChoice,
     KeyboardInteractivePromptState, unix_seconds_now,
 };
 use crate::features::{
     ZzClawTermApp, runtime_jobs::await_blocking_job, text_inputs::TextInputSetup,
     transfers::duplicate_decision_label,
+};
+use futures::StreamExt as _;
+use gpui::{Context, KeyDownEvent, Window};
+use std::hash::{Hash, Hasher};
+use std::time::Duration;
+use zzclawterm_files::sftp_transfer_types::{SftpDuplicateDecision, SftpDuplicateRequest};
+use zzclawterm_transport::{
+    SshAgentPromptAction, SshCredentialPrompt, SshHostKey, SshKeyboardInteractiveRequest,
 };
 
 #[derive(Clone, Copy)]
@@ -99,6 +97,19 @@ impl ZzClawTermApp {
         decision: SftpDuplicateDecision,
         cx: &mut Context<Self>,
     ) {
+        self.resolve_duplicate_prompt_action(
+            request_id,
+            DuplicatePromptAction::Current(decision),
+            cx,
+        );
+    }
+
+    pub(in crate::features) fn resolve_duplicate_prompt_action(
+        &mut self,
+        request_id: String,
+        action: DuplicatePromptAction,
+        cx: &mut Context<Self>,
+    ) {
         let prompt = match self.session.prompts.take_duplicate_resolution(&request_id) {
             PromptResolution::Inactive => {
                 self.shell
@@ -117,7 +128,18 @@ impl ZzClawTermApp {
         };
 
         let target = prompt.request.target_path.clone();
-        let _ = prompt.response_tx.send(decision);
+        let decision = match self
+            .session
+            .prompt_duplicate_broker()
+            .resolve(prompt, action)
+        {
+            Ok(decision) => decision,
+            Err(error) => {
+                self.shell.set_status(error);
+                cx.notify();
+                return;
+            }
+        };
         self.shell.set_status(format!(
             "remote transfer duplicate decision for {target}: {}",
             duplicate_decision_label(decision)
@@ -130,6 +152,15 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .session
+            .prompts
+            .active_credential()
+            .is_some_and(|s| s.authentication.is_some())
+        {
+            self.submit_runtime_authentication(window, cx);
+            return;
+        }
         let Some(state) = self.session.prompts.take_credential() else {
             return;
         };
@@ -306,8 +337,14 @@ impl ZzClawTermApp {
             return false;
         }
 
+        if self.select_menu_with_prefix_is_focused("ssh-auth-", window, cx) {
+            return false;
+        }
         match keystroke.key.as_str() {
             "enter" => {
+                if self.select_with_prefix_is_focused("ssh-auth-", window, cx) {
+                    return false;
+                }
                 self.submit_credential_prompt(window, cx);
             }
             "escape" => {
@@ -393,7 +430,15 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(target) = self.session.prompts.active_input_target() else {
-            return false;
+            let Some(form) = self
+                .session
+                .prompts
+                .active_credential()
+                .and_then(|state| state.authentication.as_ref())
+            else {
+                return false;
+            };
+            return self.focus_select(form.selection_focus_id(), window, cx);
         };
         let setup = prompt_input_setup(target.kind, target.echo);
         let field = self.text_input(target.id, &target.seed, setup, cx);
@@ -488,8 +533,46 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn drain_credential_prompts(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut completed = false;
+        while let Some(CredentialPromptRequest::Authenticated { id, saves, attempt }) =
+            self.session.prompts.credential_broker().pop_completed()
+        {
+            self.save_authenticated_credentials(id, saves, attempt, cx);
+            completed = true;
+        }
         if let Some(request) = self.session.prompts.take_next_credential_request() {
             match request {
+                CredentialPromptRequest::Authentication {
+                    id,
+                    request,
+                    context,
+                    response_tx,
+                } => {
+                    self.forget_text_inputs("ssh.credential.");
+                    self.forget_text_inputs("ssh.auth.");
+                    self.session
+                        .prompts
+                        .activate_credential(CredentialPromptState {
+                            id,
+                            prompt: request.prompt.clone(),
+                            response_tx:
+                                super::runtime_auth::CredentialResponseSender::Authentication(
+                                    response_tx,
+                                ),
+                            authentication: Some(
+                                super::runtime_auth::RuntimeAuthenticationForm::new(
+                                    request, context,
+                                ),
+                            ),
+                            value: String::new(),
+                        });
+                    self.refresh_security_catalog(cx);
+                }
+                CredentialPromptRequest::Authenticated { id, saves, attempt } => {
+                    self.save_authenticated_credentials(id, saves, attempt, cx);
+                    // Completion events do not occupy a prompt slot.
+                    self.session.prompts.signal_wake();
+                }
                 CredentialPromptRequest::Secret {
                     id,
                     prompt,
@@ -505,7 +588,8 @@ impl ZzClawTermApp {
                         .activate_credential(CredentialPromptState {
                             id,
                             prompt,
-                            response_tx,
+                            response_tx: response_tx.into(),
+                            authentication: None,
                             value: String::new(),
                         });
                 }
@@ -556,7 +640,7 @@ impl ZzClawTermApp {
             }
             return true;
         }
-        false
+        completed
     }
 
     /// Keep the shown TOTP code current while a keyboard-interactive prompt displays

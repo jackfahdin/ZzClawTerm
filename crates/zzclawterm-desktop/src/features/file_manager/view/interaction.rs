@@ -1,15 +1,14 @@
-use std::cell::Cell;
-use std::rc::Rc;
-
-use gpui::{Context, KeyDownEvent, Modifiers, Render, Window, div, prelude::*};
-use rust_i18n::t;
-use zzclawterm_transport::{RemoteFilePath, SftpFileEntry, file_browser_copy_destination_invalid};
-
 use super::FileManagerNameKind;
 use crate::features::file_manager::pane::{PaneEndpoint, PaneId};
 use crate::features::file_manager::workspace::FileManagerWorkspace;
 use crate::features::transfers::file_open::FileOpenMode;
 use crate::features::transfers::file_operations::{FileTransferIntent, FileTransferOperation};
+use gpui::{Context, KeyDownEvent, Modifiers, Render, Window, div, prelude::*};
+use rust_i18n::t;
+use std::cell::Cell;
+use std::rc::Rc;
+use zzclawterm_files::file_browser::file_browser_copy_destination_invalid;
+use zzclawterm_files::sftp::{RemoteFilePath, SftpFileEntry};
 
 #[derive(Clone)]
 pub(super) struct FileManagerDragPayload {
@@ -53,18 +52,20 @@ pub(super) fn accepts_drop(
         && !matches!(endpoint, PaneEndpoint::OfflineConnection(_))
         && !payload.entries.is_empty()
         && payload.entries.iter().all(|entry| {
-            !zzclawterm_transport::file_browser_path_is_root(payload.endpoint.kind(), &entry.path)
-                && (payload.endpoint != *endpoint
-                    || !file_browser_copy_destination_invalid(
+            !zzclawterm_files::file_browser::file_browser_path_is_root(
+                payload.endpoint.kind(),
+                &entry.path,
+            ) && (payload.endpoint != *endpoint
+                || !file_browser_copy_destination_invalid(
+                    endpoint.kind(),
+                    &entry.path,
+                    &zzclawterm_files::file_browser::file_browser_join(
                         endpoint.kind(),
-                        &entry.path,
-                        &zzclawterm_transport::file_browser_join(
-                            endpoint.kind(),
-                            &directory.display_path,
-                            &entry.name,
-                        ),
-                        entry.is_directory(),
-                    ))
+                        &directory.display_path,
+                        &entry.name,
+                    ),
+                    entry.is_directory(),
+                ))
         })
 }
 
@@ -224,14 +225,15 @@ impl FileManagerWorkspace {
         cx: &mut Context<Self>,
     ) {
         let state = self.pane(pane);
-        let path = if state.endpoint.kind() == zzclawterm_transport::FileBrowserBackendKind::Remote
+        let path = if state.endpoint.kind()
+            == zzclawterm_files::file_browser::FileBrowserBackendKind::Remote
         {
             match state.path.parent() {
                 Ok(path) => path,
                 Err(_) => return,
             }
         } else {
-            RemoteFilePath::new(zzclawterm_transport::file_browser_parent(
+            RemoteFilePath::new(zzclawterm_files::file_browser::file_browser_parent(
                 state.endpoint.kind(),
                 &state.path.display_path,
             ))

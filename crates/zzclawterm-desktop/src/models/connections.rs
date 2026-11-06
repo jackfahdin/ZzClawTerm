@@ -4,9 +4,12 @@ use rust_i18n::t;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use zzclawterm_core::mac_address::MacAddressFormat;
 use zzclawterm_core::{
     CredentialPromptKind, SavedCredential, compile_prompt_regex, get_credential_prompt_pattern,
 };
+
+use crate::action_links::ActionLinkTarget;
 
 use super::event_wake::{ANY_INTEREST, EventWake};
 
@@ -62,7 +65,6 @@ pub(crate) enum ConnectionEditorSection {
     Display,
     Session,
     Serial,
-    Startup,
 }
 
 impl ConnectionEditorSection {
@@ -91,7 +93,7 @@ impl ConnectionEditorSection {
                 Self::Session,
             ],
             ConnectionKindTab::Serial => &[Self::Basic, Self::Serial, Self::Terminal],
-            ConnectionKindTab::Local => &[Self::Basic, Self::Startup, Self::Terminal],
+            ConnectionKindTab::Local => &[Self::Basic, Self::Terminal],
         }
     }
 
@@ -110,7 +112,6 @@ impl ConnectionEditorSection {
             Self::Display => "display",
             Self::Session => "session",
             Self::Serial => "serial",
-            Self::Startup => "startup",
         }
     }
 
@@ -129,7 +130,6 @@ impl ConnectionEditorSection {
             Self::Display => t!("dialog.editorSections.display"),
             Self::Session => t!("dialog.editorSections.session"),
             Self::Serial => t!("dialog.editorSections.serial"),
-            Self::Startup => t!("dialog.editorSections.startup"),
         }
     }
 }
@@ -154,9 +154,9 @@ pub(crate) enum ConnectionEditorSelect {
     SshAlgorithmMode,
     SshProfile,
     SshTerminalType,
+    RdpBackend,
     RdpCertificatePolicy,
     RdpDisplayMode,
-    RdpClipboardMode,
     VncSecurityMode,
     VncScaleMode,
     RecordingMode,
@@ -263,13 +263,13 @@ impl ConnectionEditorField {
             | Self::Username
             | Self::Domain
             | Self::Password
+            | Self::ShellPath
+            | Self::ShellArgs
+            | Self::WorkingDir
             | Self::AgentEnvironmentVariable
             | Self::AgentUnixSocket => ConnectionEditorSection::Basic,
             Self::AgentForwardingEnvironmentVariable | Self::AgentForwardingSocketPath => {
                 ConnectionEditorSection::Forwarding
-            }
-            Self::ShellPath | Self::ShellArgs | Self::WorkingDir => {
-                ConnectionEditorSection::Startup
             }
             Self::SerialPort | Self::BaudRate => ConnectionEditorSection::Serial,
             Self::PostLoginCommand | Self::PostLoginDelay => ConnectionEditorSection::PostLogin,
@@ -310,6 +310,7 @@ pub(crate) struct ConnectionEditorState {
     pub(crate) username: String,
     pub(crate) domain: String,
     pub(crate) auth_mode: String,
+    pub(crate) rdp_backend: String,
     pub(crate) rdp_security: zzclawterm_core::RdpSecuritySettings,
     pub(crate) rdp_display: zzclawterm_core::RdpDisplaySettings,
     pub(crate) rdp_clipboard: zzclawterm_core::RdpClipboardSettings,
@@ -405,6 +406,22 @@ pub(crate) struct ConnectionEditorState {
 }
 
 impl ConnectionEditorState {
+    pub(crate) fn uses_mstsc_rdp(&self) -> bool {
+        self.kind == ConnectionKindTab::Rdp && self.rdp_backend == "mstsc"
+    }
+
+    pub(crate) fn uses_windows_rdp(&self) -> bool {
+        matches!(self.rdp_backend.as_str(), "windows" | "active-x")
+    }
+
+    pub(crate) fn normalize_rdp_backend_settings(&mut self) {
+        if self.uses_windows_rdp() {
+            self.rdp_security
+                .windows_authentication
+                .get_or_insert_with(|| "system".into());
+        }
+    }
+
     pub(crate) fn select_section(&mut self, section: ConnectionEditorSection) -> bool {
         if !ConnectionEditorSection::for_kind(self.kind).contains(&section) {
             return false;
@@ -450,6 +467,17 @@ impl std::fmt::Debug for ConnectionEditorState {
     }
 }
 
+impl ConnectionEditorState {
+    pub(crate) fn password_account_id(&self) -> Option<&str> {
+        match self.kind {
+            ConnectionKindTab::Ssh | ConnectionKindTab::Telnet => self.account_id.as_deref(),
+            ConnectionKindTab::Rdp | ConnectionKindTab::Vnc => self.password_id.as_deref(),
+            _ => None,
+        }
+        .filter(|id| !id.is_empty())
+    }
+}
+
 /// What the saved-connections list's context menu was opened on.
 ///
 /// The list owns exactly one context menu and picks its items from this. Giving
@@ -487,13 +515,16 @@ pub(crate) struct ConnectionGroupEditorState {
 pub(crate) struct ActionLinkMenuAction {
     pub(crate) id: String,
     pub(crate) label: String,
-    pub(crate) command: Option<String>,
-    pub(crate) open_url: Option<String>,
+    pub(crate) target: ActionLinkTarget,
+    pub(crate) mac_format: Option<MacAddressFormat>,
     pub(crate) is_default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ActionLinkMenuState {
+    /// Distinguishes reopened menus even at the same location in the same session.
+    pub(crate) generation: u64,
+    pub(crate) session_id: String,
     pub(crate) x: Pixels,
     pub(crate) y: Pixels,
     pub(crate) kind_label: String,
@@ -524,6 +555,8 @@ pub(crate) struct TranslationDialogState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CommandSuggestionItem {
+    pub(crate) fillable: bool,
+    pub(crate) description: String,
     pub(crate) command: String,
     pub(crate) display: String,
     pub(crate) source: String,
@@ -533,7 +566,12 @@ pub(crate) struct CommandSuggestionItem {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CommandSuggestionState {
+    pub(crate) mode: zzclawterm_core::completion::types::CompletionMode,
+    pub(crate) completion_revision: u64,
+    pub(crate) scope: Option<zzclawterm_core::completion::types::CompletionScope>,
     pub(crate) session_id: String,
+    pub(crate) input_version: u64,
+    pub(crate) sync_revision: u64,
     pub(crate) draft: String,
     pub(crate) items: Vec<CommandSuggestionItem>,
     pub(crate) selected_index: Option<usize>,

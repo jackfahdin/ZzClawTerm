@@ -1,19 +1,21 @@
 //! Session lifecycle, prompts, recording and file-transfer session runtimes.
 mod transfer_wire;
 
-use std::collections::HashMap;
-
 use crate::app_shell::session_hub::ssh_connections::SshConnectionLease;
-use zzclawterm_transport::RemoteFileService;
+use std::collections::HashMap;
+use zzclawterm_files::remote_file::RemoteFileService;
 
 mod auth_runtime;
+mod duplicate_prompts;
 mod prompt_runtime;
 mod recording_runtime;
+pub(in crate::features) mod runtime_auth;
 mod session_dialog_runtime;
 mod session_lifecycle;
 mod session_order;
 mod session_runtime;
 mod session_state;
+mod start_tab_actions;
 mod startup_restore_runtime;
 mod state;
 mod temporary_ssh_link;
@@ -56,7 +58,10 @@ pub(in crate::features) use auth_runtime::{
     AgentPromptBroker, AgentPromptRequest, AgentPromptState, CredentialPromptBroker,
     CredentialPromptRequest, CredentialPromptState, HostKeyPromptBroker, HostKeyPromptChoice,
     HostKeyPromptIssue, HostKeyPromptRequest, KeyboardInteractivePromptState,
-    NativeHostKeyVerifier, NativeOtpProvider, SftpDuplicatePromptState, unix_seconds_now,
+    NativeHostKeyVerifier, NativeOtpProvider, unix_seconds_now,
+};
+pub(in crate::features) use duplicate_prompts::{
+    DuplicatePromptAction, SftpDuplicatePromptState, UploadBatchDuplicateResolver,
 };
 pub(in crate::features) use prompt_runtime::{
     credential_prompt_id, credential_prompt_target, credential_text_input_id,

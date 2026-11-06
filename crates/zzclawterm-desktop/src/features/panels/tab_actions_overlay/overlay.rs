@@ -5,6 +5,7 @@ use super::{
     CompactTabActionsMenuState, TabActionPolicy, TabActionPolicyInput, TabSessionCapability,
 };
 use crate::features::ZzClawTermApp;
+use crate::features::formatting::recent_terminal_output;
 
 impl ZzClawTermApp {
     fn tab_action_session_capability(&self, session_id: &str) -> Option<TabSessionCapability> {
@@ -65,6 +66,11 @@ impl ZzClawTermApp {
         &mut self,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
+        if let Some(target @ crate::features::shell::tab_mouse::TabActionTarget::Start { .. }) =
+            self.session.dialog_tab_actions_target().cloned()
+        {
+            return self.start_tab_actions_menu(target, cx);
+        }
         let palette = self.theme_palette();
         let Some(tab_root_id) = self
             .session
@@ -104,7 +110,10 @@ impl ZzClawTermApp {
                 2_800,
             );
             let buffer = terminal_action_prompt_text(
-                self.terminal_buffer_tail_for_session(&session_id),
+                &recent_terminal_output(
+                    self.terminal_buffer_tail_for_session(&session_id),
+                    usize::MAX,
+                ),
                 4_000,
             );
             (visible, buffer)

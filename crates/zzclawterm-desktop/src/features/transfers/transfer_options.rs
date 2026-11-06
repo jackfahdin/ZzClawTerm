@@ -1,6 +1,5 @@
-use zzclawterm_transport::SftpTransferOptions;
-
 use crate::features::ZzClawTermApp;
+use zzclawterm_files::sftp_transfer_types::SftpTransferOptions;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn sftp_transfer_options(&self) -> SftpTransferOptions {

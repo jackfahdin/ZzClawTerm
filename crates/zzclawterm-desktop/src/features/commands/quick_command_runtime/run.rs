@@ -8,14 +8,22 @@ use crate::features::ZzClawTermApp;
 use crate::features::commands::staged::StagedCommandHistory;
 use crate::models::QuickCommandVariablePromptState;
 
-use super::escapes::{QuickCommandChunk, plan_quick_command, quick_command_needs_staging};
+use super::escapes::{
+    QuickCommandChunk, plan_literal_quick_command, plan_quick_command, quick_command_needs_staging,
+};
 use super::helpers::{
     ai_command_card_category_name, unique_quick_command_category_id, validated_quick_command_text,
 };
 use super::variables::parse_quick_command_variables;
 
+struct QuickCommandSendPlan {
+    chunks: Vec<QuickCommandChunk>,
+    literal: bool,
+}
+
 struct StagedQuickCommandTarget {
     session_id: String,
+    source_session_id: Option<String>,
     history: StagedCommandHistory,
 }
 
@@ -102,6 +110,7 @@ impl ZzClawTermApp {
                         icon_tag: Some("terminal".to_string()),
                         pinned: Some(false),
                         execution_mode: Some("append".to_string()),
+                        raw_send: None,
                         source: Some("ai".to_string()),
                         risk_level: card.risk_level.clone(),
                         updated_at: None,
@@ -218,6 +227,20 @@ impl ZzClawTermApp {
             return;
         };
         let execute = quick_command_executes(&command);
+        if command.raw_send.unwrap_or_default() {
+            self.send_quick_command_plan(
+                command.id,
+                command.label,
+                QuickCommandSendPlan {
+                    chunks: plan_literal_quick_command(&command_text, execute),
+                    literal: true,
+                },
+                execute,
+                send_to_all,
+                cx,
+            );
+            return;
+        }
         let variables = parse_quick_command_variables(&command_text);
         if !variables.is_empty() {
             self.commands
@@ -256,7 +279,32 @@ impl ZzClawTermApp {
         // `\r \n \t \p \\` are interpreted here rather than at save time: the
         // stored script keeps the escapes, so what the panel shows is what the
         // user wrote.
-        let mut chunks = plan_quick_command(&command_text, execute);
+        self.send_quick_command_plan(
+            command_id,
+            label,
+            QuickCommandSendPlan {
+                chunks: plan_quick_command(&command_text, execute),
+                literal: false,
+            },
+            execute,
+            send_to_all,
+            cx,
+        );
+    }
+
+    fn send_quick_command_plan(
+        &mut self,
+        command_id: String,
+        label: String,
+        plan: QuickCommandSendPlan,
+        execute: bool,
+        send_to_all: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let QuickCommandSendPlan {
+            mut chunks,
+            literal,
+        } = plan;
         self.queue_quick_command_use_count(command_id);
 
         if quick_command_needs_staging(&chunks) {
@@ -277,7 +325,7 @@ impl ZzClawTermApp {
                 .session
                 .ordered_sessions()
                 .into_iter()
-                .filter(|session| !self.session.is_disconnected(&session.id))
+                .filter(|session| self.sync_target_allowed(&session.id))
                 .collect::<Vec<_>>();
             if sessions.is_empty() {
                 self.shell.set_status(
@@ -290,7 +338,12 @@ impl ZzClawTermApp {
             let mut failed = 0usize;
             let mut ok_sessions = Vec::new();
             for session in sessions {
-                match self.write_session_input_recorded(&session.id, &command_bytes) {
+                let result = if literal {
+                    self.write_session_literal_input_recorded(&session.id, &command_bytes)
+                } else {
+                    self.write_session_input_recorded(&session.id, &command_bytes)
+                };
+                match result {
                     Ok(()) => {
                         sent += 1;
                         ok_sessions.push(session.id);
@@ -309,7 +362,12 @@ impl ZzClawTermApp {
             return;
         }
 
-        if self.send_terminal_input(command_bytes, cx) {
+        let sent = if literal {
+            self.send_terminal_literal_input(command_bytes, cx)
+        } else {
+            self.send_terminal_input(command_bytes, cx)
+        };
+        if sent {
             self.shell.set_status(if execute {
                 format!("ran quick command '{label}'")
             } else {
@@ -335,18 +393,20 @@ impl ZzClawTermApp {
         if !send_to_all && self.active_terminal_input_blocked() {
             return;
         }
+        let source_session_id = (!send_to_all)
+            .then(|| self.session.active_id_owned())
+            .flatten();
         let targets = if send_to_all {
             self.session
                 .ordered_sessions()
                 .into_iter()
-                .filter(|session| !self.session.is_disconnected(&session.id))
+                .filter(|session| self.sync_target_allowed(&session.id))
                 .map(|session| session.id)
                 .collect::<Vec<_>>()
         } else {
-            let primary = self
-                .session
-                .active_id_owned()
-                .filter(|session_id| !self.session.is_disconnected(session_id));
+            let primary = self.session.active_id_owned().filter(|session_id| {
+                !self.session.is_disconnected(session_id) && self.terminal_sync_session(session_id)
+            });
             match primary {
                 Some(session_id) => {
                     let peers = self.sync_peer_session_ids(&session_id);
@@ -363,9 +423,15 @@ impl ZzClawTermApp {
         }
 
         let run_id = self.commands.staged.begin(&targets);
+        for id in &targets {
+            if source_session_id.as_deref() != Some(id.as_str()) {
+                self.commands.staged.mark_receiver(id, run_id);
+            }
+        }
         let targets = targets
             .into_iter()
             .map(|session_id| StagedQuickCommandTarget {
+                source_session_id: source_session_id.clone(),
                 session_id,
                 history: StagedCommandHistory::default(),
             })
@@ -435,6 +501,16 @@ impl ZzClawTermApp {
         for mut target in targets {
             let session_id = &target.session_id;
             if !self.commands.staged.owns(session_id, run_id) {
+                cancelled = true;
+                continue;
+            }
+            let allowed = match target.source_session_id.as_deref() {
+                Some(source) if source == session_id => self.terminal_sync_session(session_id),
+                Some(source) => self.sync_peer_session_ids(source).contains(session_id),
+                None => self.sync_target_allowed(session_id),
+            };
+            if !allowed {
+                self.commands.staged.finish(session_id, run_id);
                 cancelled = true;
                 continue;
             }

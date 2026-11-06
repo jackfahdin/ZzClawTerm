@@ -5,6 +5,7 @@ use futures::{
         oneshot,
     },
 };
+
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{
@@ -15,7 +16,7 @@ use std::sync::{
 use std::task::{Context, Poll};
 use std::thread;
 use std::time::{Duration, Instant};
-use zzclawterm_transport::{
+use zzclawterm_recording::recording::{
     RecordingCapturePolicy, RecordingCompletion, RecordingContext, RecordingManager, RecordingMode,
     RecordingProfile, RecordingStatus, TerminalHistorySearchRequest, TerminalHistorySearchResponse,
 };
@@ -1208,19 +1209,17 @@ fn remove_dropped_payloads(dropped: &Mutex<DroppedPayloads>, id: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    use time::OffsetDateTime;
-    use zzclawterm_transport::{
-        ExistingFileBehavior, RecordingContext, RecordingMode, RecordingProfile,
-        RecordingRotationPolicy, RecordingStatusState,
-    };
-
     use super::{
         RECORDING_WRITE_QUEUE_BYTE_LIMIT, RecordingHistorySearchKey, RecordingWriteEvent,
         RecordingWritePipeline,
+    };
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use time::OffsetDateTime;
+    use zzclawterm_recording::recording::{
+        ExistingFileBehavior, RecordingContext, RecordingMode, RecordingProfile,
+        RecordingRotationPolicy, RecordingStatusState,
     };
 
     #[test]
@@ -1854,7 +1853,7 @@ mod tests {
         let mut recording = RecordingWritePipeline::spawn(4096);
         let writer = recording.writer();
         let mut profile = recording_profile(&path);
-        profile.mode = zzclawterm_transport::RecordingMode::Raw;
+        profile.mode = zzclawterm_recording::recording::RecordingMode::Raw;
         writer
             .start(
                 "raw".into(),

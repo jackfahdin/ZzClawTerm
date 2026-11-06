@@ -1,7 +1,7 @@
+use crate::features::ZzClawTermApp;
+use gpui::{AppContext as _, Context, Entity, ScrollHandle, Subscription, UniformListScrollHandle};
 use std::collections::HashSet;
 use std::sync::Arc;
-
-use gpui::{AppContext as _, Context, Entity, ScrollHandle, Subscription, UniformListScrollHandle};
 use zzclawterm_core::{
     AssetAcceleratorSnapshot, AssetAcceleratorType, AssetDiskSnapshot, AssetDisplayLabels,
     AssetFilterKey, AssetMonitoringCache, AssetRecord, AssetSortDirection, AssetSortKey,
@@ -11,12 +11,12 @@ use zzclawterm_core::{
     build_asset_records, build_group_options, connection_matches_filters,
     normalize_asset_sort_state, parse_start_workspace_mode, records_in_group, sort_asset_records,
 };
-use zzclawterm_transport::{RemoteGpuOverview, RemoteNpuOverview, RemoteStats};
+use zzclawterm_remote_ops::ascend_npu::RemoteNpuOverview;
+use zzclawterm_remote_ops::gpu::RemoteGpuOverview;
+use zzclawterm_remote_ops::stats::RemoteStats;
 use zzclawterm_ui::{
     ZzClawInputEvent, ZzClawInputState, ZzClawSelectEvent, ZzClawSelectOption, ZzClawSelectState,
 };
-
-use crate::features::ZzClawTermApp;
 
 pub(in crate::features) const ASSET_TABLE_ROW_HEIGHT: f32 = 56.;
 // The Tauri table uses an 88px action column. GPUI scrollbars overlay their

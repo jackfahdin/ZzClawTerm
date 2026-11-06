@@ -1,16 +1,16 @@
-use rust_i18n::t;
-
 use crate::features::ZzClawTermApp;
 use crate::models::{
     TransferJobEvent, TransferJobKind, TransferJobOutput, TransferJobResult, TransferJobState,
     TransferJobStatus, TransferMoveEntry, TransferMoveState,
 };
 use gpui::{Context, Window};
+use rust_i18n::t;
 use zzclawterm_core::truncate_preview;
-use zzclawterm_transport::{
-    FileBrowserBackendKind, RemoteFilePath, file_browser_join, file_browser_name,
-    file_browser_parent, file_browser_path_is_root,
+use zzclawterm_files::file_browser::{
+    FileBrowserBackendKind, file_browser_join, file_browser_name, file_browser_parent,
+    file_browser_path_is_root,
 };
+use zzclawterm_files::sftp::RemoteFilePath;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn open_transfer_move_dialog(
@@ -441,11 +441,11 @@ impl ZzClawTermApp {
                 entries: Vec::new(),
                 summary: None,
                 progress: None,
-                control: None,
+                control: Some(zzclawterm_files::sftp::SftpTransferControl::new()),
                 speed: Default::default(),
             });
             let transfer_tx = self.transfer.transfer_event_sender();
-            self.submit_transfer_blocking_job(
+            self.submit_bulk_transfer_job(
                 "sftp-delete",
                 id.clone(),
                 transfer_tx.clone(),

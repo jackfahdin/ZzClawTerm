@@ -24,6 +24,20 @@ impl ConnectionEditorValidationError {
             algorithm_tab: None,
         };
         match self {
+            Self::RdpRelayUnsupported | Self::RdpMstscRelayUnsupported => {
+                return location(
+                    ConnectionEditorSection::Network,
+                    ConnectionEditorFocusTarget::Heading,
+                );
+            }
+            Self::RdpWindowsAuthenticationRequired => {
+                return location(
+                    ConnectionEditorSection::Security,
+                    ConnectionEditorFocusTarget::Select(
+                        ConnectionEditorSelect::RdpCertificatePolicy,
+                    ),
+                );
+            }
             Self::SshAgentEndpoint(_) => {
                 let target = match editor.agent_endpoint {
                     zzclawterm_core::SshAgentEndpoint::Environment { .. } => {
@@ -90,15 +104,12 @@ impl ConnectionEditorValidationError {
             _ => {}
         }
         let field = match self {
-            ConnectionEditorValidationError::HostRequired => ConnectionEditorField::Host,
+            ConnectionEditorValidationError::HostRequired
+            | ConnectionEditorValidationError::RdpMstscHostInvalid => ConnectionEditorField::Host,
             ConnectionEditorValidationError::PortInvalid => ConnectionEditorField::Port,
             ConnectionEditorValidationError::UsernameRequired
             | ConnectionEditorValidationError::MissingAccount => ConnectionEditorField::Username,
-            ConnectionEditorValidationError::AccountPasswordMissing
-            | ConnectionEditorValidationError::PasswordReplacementRequired
-            | ConnectionEditorValidationError::VncPasswordTooLong => {
-                ConnectionEditorField::Password
-            }
+            ConnectionEditorValidationError::VncPasswordTooLong => ConnectionEditorField::Password,
             ConnectionEditorValidationError::ShellPathRequired => ConnectionEditorField::ShellPath,
             ConnectionEditorValidationError::SerialPortRequired => {
                 ConnectionEditorField::SerialPort
@@ -129,7 +140,10 @@ impl ConnectionEditorValidationError {
             ConnectionEditorValidationError::SftpShellDetectionTimeoutInvalid => {
                 ConnectionEditorField::SftpShellDetectionTimeout
             }
-            ConnectionEditorValidationError::SshAgentEndpoint(_)
+            ConnectionEditorValidationError::RdpWindowsAuthenticationRequired
+            | ConnectionEditorValidationError::RdpRelayUnsupported
+            | ConnectionEditorValidationError::RdpMstscRelayUnsupported
+            | ConnectionEditorValidationError::SshAgentEndpoint(_)
             | ConnectionEditorValidationError::SshAgentForwarding { .. }
             | ConnectionEditorValidationError::SshAlgorithms(_) => {
                 unreachable!("specialized validation locations handled above")
@@ -149,18 +163,16 @@ impl ConnectionEditorValidationError {
             {
                 ConnectionEditorFocusTarget::Select(ConnectionEditorSelect::Account)
             }
-            _ if matches!(self, Self::MissingAccount | Self::AccountPasswordMissing) => {
-                ConnectionEditorFocusTarget::Select(
-                    if matches!(
-                        editor.kind,
-                        ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
-                    ) {
-                        ConnectionEditorSelect::Account
-                    } else {
-                        ConnectionEditorSelect::SavedPassword
-                    },
-                )
-            }
+            _ if matches!(self, Self::MissingAccount) => ConnectionEditorFocusTarget::Select(
+                if matches!(
+                    editor.kind,
+                    ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
+                ) {
+                    ConnectionEditorSelect::Account
+                } else {
+                    ConnectionEditorSelect::SavedPassword
+                },
+            ),
             _ => ConnectionEditorFocusTarget::Field(field),
         };
         location(field.section(), target)
@@ -199,11 +211,6 @@ mod tests {
                 ConnectionEditorValidationError::UsernameRequired,
                 ConnectionEditorSection::Basic,
                 ConnectionEditorField::Username,
-            ),
-            (
-                ConnectionEditorValidationError::PasswordReplacementRequired,
-                ConnectionEditorSection::Basic,
-                ConnectionEditorField::Password,
             ),
             (
                 ConnectionEditorValidationError::VncUsernameTooLong,

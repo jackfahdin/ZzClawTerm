@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,8 +14,8 @@ use crate::terminal::{
 };
 use gpui::prelude::*;
 use gpui::{
-    AppContext, Context, Entity, Render, ScrollDelta, ScrollWheelEvent, TestAppContext, Window,
-    bounds, div, point, px, size,
+    AppContext, Context, Entity, Render, ScrollDelta, ScrollEvent, TestAppContext, Window, bounds,
+    div, point, px, size,
 };
 use zzclawterm_core::{AppRuntime, RuntimeMode, uuid};
 use zzclawterm_terminal::{TerminalScreen, TerminalSnapshot};
@@ -30,7 +31,8 @@ use super::{
     terminal_gutter_metrics, terminal_keyword_highlight_prefetch_rows,
     terminal_keyword_highlight_prefetch_viewports, terminal_keyword_highlight_pressure_delay,
     terminal_keyword_highlight_request_key, terminal_keyword_highlight_visible_rows,
-    terminal_line_number_digits, terminal_snapshot_anchor_row_for_display_offset,
+    terminal_line_number_digits, terminal_retained_row_window_distance,
+    terminal_snapshot_absolute_window, terminal_snapshot_anchor_row_for_display_offset,
     terminal_snapshot_covers_display_offset, terminal_snapshot_row_estimated_bytes,
     terminal_surface_fractional_prefetch_offset, terminal_surface_synthesized_window_extra_rows,
     terminal_surface_text_first_repaint_ready, terminal_surface_visible_rows_for_viewport,
@@ -40,6 +42,151 @@ use super::{
 struct TerminalSurfaceLayoutTestView {
     surface: Entity<TerminalSurface>,
     mounted: bool,
+}
+
+#[test]
+fn ime_native_bounds_follow_fractional_horizontal_scroll_on_soft_wrapped_lines() {
+    use crate::features::test_support::app_with_visible_local_session;
+    use crate::test_support::TestConfigDir;
+    use gpui::EntityInputHandler;
+    use zzclawterm_terminal_gpui::unwrapped::TerminalUnwrappedLayout;
+
+    let dir = TestConfigDir::new("zzclawterm-ime-horizontal-anchor");
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+    let surface = cx.update_entity(&app, |app, cx| app.ensure_terminal_surface("s1", cx));
+    let (_, vcx) = cx.add_window_view(|_, _| TerminalSurfaceLayoutTestView {
+        surface: surface.clone(),
+        mounted: true,
+    });
+    let mut screen = TerminalScreen::new(20, 4);
+    screen.set_logical_line_snapshots(true);
+    screen.advance(&[b'x'; 45]);
+    let snapshot = Arc::new(screen.viewport_snapshot(0));
+    let grid = bounds(point(px(30.), px(50.)), size(px(160.), px(72.)));
+    vcx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.terminal
+                .layout
+                .session_surface_bounds
+                .insert("s1".into(), grid);
+            window.focus(&app.terminal.input.focus, cx);
+            app.replace_and_mark_text_in_range(None, "中", Some(0..0), window, cx);
+        });
+        for offset in [29.5, 35., 40.] {
+            surface.update(cx, |surface, _| {
+                // The same painted mapping consumed by grid rendering and hit
+                // testing, including a cursor on the third physical segment.
+                surface.painted_hit_test_snapshot = Some(snapshot.clone());
+                surface.painted_hit_test_geometry = Some(TerminalPaintedHitTestGeometry {
+                    grid_bounds: Some(grid),
+                    display_offset: 0,
+                    viewport_anchor_row: 0,
+                    snapshot_rows: snapshot.row_count(),
+                    viewport_rows: 4,
+                    visual_y_offset: 0.,
+                    cell_width: 8.,
+                    cell_height: 18.,
+                    revision: 0,
+                });
+                surface.painted_unwrapped =
+                    TerminalUnwrappedLayout::new(&snapshot, 0, 4, offset).map(Arc::new);
+            });
+            app.update(cx, |app, cx| {
+                let anchor = app.terminal_ime_anchor_bounds(grid, cx);
+                assert_eq!(anchor.left(), grid.left() + px((45. - offset) * 8.));
+                assert_eq!(anchor.top(), grid.top());
+                let native = app.bounds_for_range(0..0, grid, window, cx).unwrap();
+                assert_eq!(native.left(), anchor.left());
+                assert_eq!(native.top(), anchor.top());
+            });
+        }
+    });
+}
+
+#[test]
+fn row_stripes_repaint_grid_and_gutter_together_and_respect_protocol_modes() {
+    let mut screen = TerminalScreen::new(40, 3);
+    screen.advance(b"first\r\nsecond");
+    let snapshot = Arc::new(screen.viewport_snapshot(0));
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let surface = cx.new(|_| TerminalSurface::new("row-stripes"));
+    cx.update_entity(&surface, |surface, _| {
+        surface.show_line_numbers = true;
+        surface.show_timestamps = true;
+        surface.apply_frame_snapshot(TerminalSurfaceFrameSnapshot::new(
+            snapshot,
+            TerminalScrollVisualState {
+                history: screen.history_state(),
+                session_id: "row-stripes".into(),
+                scroll_offset: 0,
+                scroll_residual_lines: 0.0,
+                display_offset: 0,
+                scrollback_len: 0,
+                viewport_rows: 3,
+                has_new_while_scrolled: false,
+                performance_overlay: None,
+                skipped_output_chars: 0,
+            },
+        ));
+        assert!(surface.set_zebra_stripes(true, true, None));
+        assert!(!surface.set_zebra_stripes(true, true, None));
+    });
+    let window = cx.open_window(size(px(600.), px(240.)), {
+        let surface = surface.clone();
+        move |_, _| TerminalSurfaceLayoutTestView {
+            surface,
+            mounted: true,
+        }
+    });
+    for (protocol, enabled, by_row, expected) in [
+        (TerminalProtocolState::default(), true, true, 2),
+        (
+            TerminalProtocolState {
+                alternate_screen: true,
+                ..Default::default()
+            },
+            true,
+            true,
+            0,
+        ),
+        (
+            TerminalProtocolState {
+                mouse_reporting: true,
+                ..Default::default()
+            },
+            true,
+            true,
+            0,
+        ),
+        (TerminalProtocolState::default(), false, true, 0),
+        (TerminalProtocolState::default(), true, false, 0),
+        (TerminalProtocolState::default(), true, true, 2),
+    ] {
+        cx.update_entity(&surface, |surface, cx| {
+            surface.set_protocol_state(protocol);
+            surface.set_zebra_stripes(enabled, by_row, None);
+            cx.notify();
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            let palette = crate::theme::theme_palette("github-dark");
+            let color = gpui::Background::from(gpui::rgba((palette.terminal_fg << 8) | 0x0f));
+            let stripes = window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| quad.background == color)
+                .collect::<Vec<_>>();
+            assert_eq!(stripes.len(), expected);
+            if expected == 2 {
+                assert_eq!(stripes[0].bounds.top(), stripes[1].bounds.top());
+                assert_eq!(stripes[0].bounds.size.height, stripes[1].bounds.size.height);
+            }
+        })
+        .unwrap();
+    }
 }
 
 #[test]
@@ -200,14 +347,32 @@ fn terminal_surface_mouse_cursor(
 }
 
 fn rendered_terminal_grid_bounds(show_line_numbers: bool) -> gpui::Bounds<gpui::Pixels> {
+    rendered_terminal_wrapping_grid_bounds(
+        show_line_numbers,
+        false,
+        zzclawterm_core::models::settings::TerminalWrapMode::Character,
+    )
+}
+
+fn rendered_terminal_wrapping_grid_bounds(
+    show_line_numbers: bool,
+    show_markers: bool,
+    mode: zzclawterm_core::models::settings::TerminalWrapMode,
+) -> gpui::Bounds<gpui::Pixels> {
     let mut cx = TestAppContext::single();
     let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
     let surface = cx.new(|_| TerminalSurface::new("session"));
-    let snapshot = Arc::new(TerminalScreen::default().viewport_snapshot(0));
+    let mut screen = TerminalScreen::default();
+    screen.set_logical_line_snapshots(
+        mode == zzclawterm_core::models::settings::TerminalWrapMode::None,
+    );
+    let snapshot = Arc::new(screen.viewport_snapshot(0));
     let rows = snapshot.row_count();
     let history = snapshot.history;
     cx.update_entity(&surface, |surface, _cx| {
         surface.show_line_numbers = show_line_numbers;
+        surface.show_wrap_markers = show_markers;
+        surface.wrap_mode = mode;
         surface.apply_frame_snapshot(
             TerminalSurfaceFrameSnapshot::new(
                 snapshot,
@@ -245,6 +410,169 @@ fn rendered_terminal_grid_bounds(show_line_numbers: bool) -> gpui::Bounds<gpui::
         let geometry = surface.painted_hit_test_geometry.expect("painted geometry");
         geometry.grid_bounds.expect("painted grid bounds")
     })
+}
+
+#[test]
+fn trailing_marker_lane_preserves_grid_origin_and_wrap_mode_keeps_the_same_grid_size() {
+    use zzclawterm_core::models::settings::TerminalWrapMode;
+    let plain = rendered_terminal_wrapping_grid_bounds(false, false, TerminalWrapMode::Character);
+    let markers = rendered_terminal_wrapping_grid_bounds(false, true, TerminalWrapMode::Character);
+    let unwrapped = rendered_terminal_wrapping_grid_bounds(false, true, TerminalWrapMode::None);
+    assert_eq!(markers.left(), plain.left());
+    assert_eq!(plain.right() - markers.right(), px(8.0));
+    assert_eq!(plain.size.width - markers.size.width, px(8.0));
+    assert_eq!(markers, unwrapped);
+    let numbered = rendered_terminal_wrapping_grid_bounds(true, false, TerminalWrapMode::Character);
+    let numbered_markers =
+        rendered_terminal_wrapping_grid_bounds(true, true, TerminalWrapMode::Character);
+    assert_eq!(numbered.left(), numbered_markers.left());
+    assert_eq!(numbered.right() - numbered_markers.right(), px(8.0));
+}
+
+#[test]
+fn horizontal_offset_is_local_to_each_surface_and_history_preserves_manual_position() {
+    use zzclawterm_core::models::settings::TerminalWrapMode;
+    let mut screen = TerminalScreen::new(4, 2);
+    screen.set_logical_line_snapshots(true);
+    screen.advance(b"abcdefghijklmnop\r\na\r\nb\r\nc");
+    let mut first = TerminalSurface::new("first");
+    let second = TerminalSurface::new("second");
+    first.wrap_mode = TerminalWrapMode::None;
+    first.viewport_rows = 2;
+    first.scroll_offset = 1;
+    first.display_offset = 1;
+    first
+        .horizontal_scroll
+        .set_offset(point(px(-64.0), px(0.0)));
+    let snapshot = screen.viewport_snapshot(1);
+    let layout = first.unwrapped_layout(&snapshot).unwrap();
+    assert_eq!(layout.horizontal_offset, 8.0);
+    assert_eq!(f32::from(second.horizontal_scroll.offset().x), 0.0);
+    assert_eq!(f32::from(first.horizontal_scroll.offset().x), -64.0);
+}
+
+#[test]
+fn unwrapped_wheel_input_scrolls_only_the_requested_axis_once() {
+    struct ScrollFixture {
+        surface: Entity<TerminalSurface>,
+    }
+
+    use zzclawterm_core::models::settings::TerminalWrapMode;
+    impl Render for ScrollFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let surface = self.surface.clone();
+            div()
+                .w(px(400.))
+                .h(px(64.))
+                .flex()
+                // Exercise the actual measuring layer and terminal handler
+                // without an app/transport worker replacing the test frames.
+                .on_scroll(move |event, _, cx| {
+                    surface.update(cx, |surface, cx| {
+                        surface.handle_unwrapped_scroll(event, cx);
+                    });
+                })
+                .child(self.surface.clone())
+        }
+    }
+
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let mut screen = TerminalScreen::new(40, 4);
+    screen.set_logical_line_snapshots(true);
+    screen.advance(
+        format!("{}\r\n", "0123456789".repeat(20))
+            .repeat(20)
+            .as_bytes(),
+    );
+    let offset = screen.scrollback_len();
+    let snapshot = Arc::new(screen.viewport_snapshot_with_window(offset, 0, offset));
+    let surface = cx.new(|_| TerminalSurface::new("scroll-axes"));
+    surface.update(&mut cx, |surface, _| {
+        surface.wrap_mode = TerminalWrapMode::None;
+        surface.apply_frame_snapshot(TerminalSurfaceFrameSnapshot::new(
+            snapshot,
+            TerminalScrollVisualState {
+                history: screen.history_state(),
+                session_id: "scroll-axes".into(),
+                scroll_offset: offset,
+                scroll_residual_lines: 0.0,
+                display_offset: offset,
+                scrollback_len: offset,
+                viewport_rows: 4,
+                has_new_while_scrolled: false,
+                performance_overlay: None,
+                skipped_output_chars: 0,
+            },
+        ));
+        surface
+            .horizontal_scroll
+            .set_offset(point(px(-32.), px(0.)));
+    });
+    let (_, vcx) = cx.add_window_view({
+        let surface = surface.clone();
+        move |_, _| ScrollFixture { surface }
+    });
+    vcx.update(|window, cx| {
+        _ = window.draw(cx);
+        let surface = surface.read(cx);
+        assert!(surface.painted_unwrapped.is_some());
+        assert!(surface.horizontal_scroll.max_offset().x > px(0.));
+    });
+    let mut scroll = |delta, shift| {
+        let before = vcx.update(|_, cx| {
+            let surface = surface.read(cx);
+            (surface.scroll_offset, surface.horizontal_scroll.offset().x)
+        });
+        vcx.simulate_event(ScrollEvent {
+            position: point(px(20.), px(20.)),
+            delta,
+            modifiers: gpui::Modifiers {
+                shift,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let after = vcx.update(|window, cx| {
+            _ = window.draw(cx);
+            let surface = surface.read(cx);
+            (surface.scroll_offset, surface.horizontal_scroll.offset().x)
+        });
+        (before, after)
+    };
+    for delta in [
+        ScrollDelta::Lines(point(0., -1.)),
+        ScrollDelta::Pixels(point(px(0.), px(-16.))),
+        ScrollDelta::Pixels(point(px(-1.), px(-16.))),
+    ] {
+        let (before, after) = scroll(delta, false);
+        assert!(after.0 < before.0, "vertical input must scroll history");
+        assert_eq!(after.1, before.1, "vertical input must preserve X");
+    }
+    let (before, after) = scroll(ScrollDelta::Pixels(point(px(-32.), px(0.))), false);
+    assert_eq!(after.0, before.0);
+    assert_eq!(after.1, before.1 - px(32.));
+    let (before, after) = scroll(ScrollDelta::Lines(point(0., -1.)), true);
+    assert_eq!(after.0, before.0);
+    assert_eq!(after.1, before.1 - px(16.));
+}
+
+#[test]
+fn switching_to_no_wrap_does_not_replay_cursor_reveals_from_character_mode() {
+    use zzclawterm_core::models::settings::TerminalWrapMode;
+    let mut screen = TerminalScreen::new(4, 2);
+    screen.advance(b"abcdefghijk");
+    let mut surface = TerminalSurface::new("session");
+    surface.is_active = true;
+    surface.snapshot = Some(Arc::new(screen.snapshot()));
+    let input_at = Instant::now();
+    assert!(!surface.reveal_input_cursor(Some(input_at)));
+    assert!(surface.horizontal_reveal.is_none());
+    surface.wrap_mode = TerminalWrapMode::None;
+    assert!(!surface.reveal_input_cursor(Some(input_at)));
+    assert!(surface.horizontal_reveal.is_none());
+    assert!(surface.reveal_input_cursor(Some(input_at + Duration::from_millis(1))));
+    assert!(surface.horizontal_reveal.is_some());
 }
 
 #[test]
@@ -701,6 +1029,61 @@ fn retained_row_cache_refreshes_only_changed_snapshot_rows() {
 }
 
 #[test]
+fn retained_row_cache_resets_when_numbering_base_changes() {
+    // A reflow or local clear can repin the numbering origin. Rows cached
+    // against the old base must never be stitched into the new window, or the
+    // gutter restarts mid-screen while content keeps counting.
+    let mut screen = TerminalScreen::default();
+    screen.advance_decoded_text(&terminal_test_output_lines(80));
+    let snapshot = Arc::new(screen.viewport_snapshot(0));
+    let rows = snapshot.row_count();
+    let scrollback_len = snapshot.scrollback_len;
+    let mut surface = TerminalSurface::new("session");
+    apply_test_frame_snapshot!(
+        surface,
+        snapshot.clone(),
+        0,
+        0.0,
+        0,
+        scrollback_len,
+        rows,
+        false,
+        None,
+        0,
+        false,
+        false,
+        "block",
+    );
+    assert!(!surface.retained_snapshots.is_empty());
+
+    let mut rebased = (*snapshot).clone();
+    rebased.line_number_base = snapshot.line_number_base.map(|base| base + 1);
+    let rebased = Arc::new(rebased);
+    apply_test_frame_snapshot!(
+        surface,
+        rebased.clone(),
+        0,
+        0.0,
+        0,
+        scrollback_len,
+        rows,
+        false,
+        None,
+        0,
+        false,
+        false,
+        "block",
+    );
+
+    assert_eq!(surface.retained_snapshots.len(), 1);
+    assert!(Arc::ptr_eq(
+        surface.retained_snapshots.first().unwrap(),
+        &rebased
+    ));
+    assert_eq!(surface.retained_rows.len(), rows);
+}
+
+#[test]
 fn retained_row_cache_respects_estimated_byte_budget() {
     let mut screen = TerminalScreen::default();
     screen.advance_decoded_text(&terminal_test_output_lines(80));
@@ -716,6 +1099,120 @@ fn retained_row_cache_respects_estimated_byte_budget() {
 
     assert!(surface.retained_row_estimated_bytes <= max_bytes);
     assert!(surface.retained_rows.len() < snapshot.row_count());
+}
+
+#[test]
+fn retained_row_window_distance_prefers_rows_outside_the_target() {
+    assert_eq!(terminal_retained_row_window_distance(50, 60, 100), 10);
+    assert_eq!(terminal_retained_row_window_distance(59, 60, 100), 1);
+    assert_eq!(terminal_retained_row_window_distance(70, 60, 100), 0);
+    assert_eq!(terminal_retained_row_window_distance(99, 60, 100), 0);
+    assert_eq!(terminal_retained_row_window_distance(105, 60, 100), 6);
+}
+
+#[test]
+fn retained_row_cache_follows_upward_scroll_target() {
+    let mut screen = TerminalScreen::new(40, 8);
+    screen.set_scrollback_limit(400);
+    screen.advance_decoded_text(&terminal_test_output_lines(400));
+
+    let viewport_rows = 8;
+    let live = screen.viewport_snapshot_with_window(0, 16, 16);
+    let scrollback_len = live.scrollback_len;
+    let real_total_rows = scrollback_len.saturating_add(viewport_rows);
+
+    let mut surface = TerminalSurface::new("upward-scroll-retention");
+    // Keep fewer rows than the total scrollback so eviction is exercised on
+    // every upward step, as it is on a terminal with a long scrollback.
+    let max_rows = 48;
+    surface.remember_retained_snapshot_rows_with_limits(&live, max_rows, usize::MAX);
+
+    let mut covered = 0usize;
+    let mut total = 0usize;
+    let mut offset = 8usize;
+    while offset <= scrollback_len.min(320) {
+        let snapshot = screen.viewport_snapshot_with_window(offset, 16, 16);
+        surface.remember_retained_snapshot_rows_with_limits(&snapshot, max_rows, usize::MAX);
+        let desired_end = real_total_rows.saturating_sub(offset);
+        let desired_start = desired_end.saturating_sub(viewport_rows);
+        total += 1;
+        if surface.retained_rows_cover_absolute_range(desired_start, desired_end) {
+            covered += 1;
+        }
+        offset += 16;
+    }
+
+    println!("retained upward scroll coverage: {covered}/{total}");
+    assert_eq!(
+        covered, total,
+        "the retained row cache must keep the upward scroll target covered"
+    );
+}
+
+#[test]
+#[ignore = "measurement: run with --ignored --nocapture on a 12k-line scrollback"]
+fn large_scrollback_upward_scroll_coverage_measurement() {
+    const VIEWPORT_ROWS: usize = 50;
+    const MAX_RETAINED_ROWS: usize = 4096;
+    const EXTRA_ROWS: usize = 192;
+    const SCROLLBACK_LINES: usize = 12_000;
+
+    let mut screen = TerminalScreen::new(200, VIEWPORT_ROWS as u16);
+    screen.set_scrollback_limit(SCROLLBACK_LINES + VIEWPORT_ROWS);
+    screen.advance_decoded_text(&terminal_test_output_lines(SCROLLBACK_LINES));
+
+    let live = screen.viewport_snapshot_with_window(0, EXTRA_ROWS, EXTRA_ROWS);
+    let scrollback_len = live.scrollback_len;
+    let real_total_rows = scrollback_len.saturating_add(VIEWPORT_ROWS);
+    let mut surface = TerminalSurface::new("large-scrollback-measurement");
+    surface.remember_retained_snapshot_rows_with_limits(&live, MAX_RETAINED_ROWS, usize::MAX);
+
+    // Reference model of the previous eviction policy (always drop the smallest
+    // absolute row), used only to quantify the improvement.
+    let mut old_rows = BTreeMap::new();
+    if let Some((start, end)) = terminal_snapshot_absolute_window(&live) {
+        for abs_row in start..end {
+            old_rows.insert(abs_row, ());
+        }
+    }
+
+    let mut new_covered = 0usize;
+    let mut old_covered = 0usize;
+    let mut total = 0usize;
+    let mut offset = 0usize;
+    while offset.saturating_add(8) <= scrollback_len {
+        offset += 8;
+        let snapshot = screen.viewport_snapshot_with_window(offset, EXTRA_ROWS, EXTRA_ROWS);
+        surface.remember_retained_snapshot_rows_with_limits(
+            &snapshot,
+            MAX_RETAINED_ROWS,
+            usize::MAX,
+        );
+        if let Some((start, end)) = terminal_snapshot_absolute_window(&snapshot) {
+            for abs_row in start..end {
+                old_rows.insert(abs_row, ());
+            }
+        }
+        while old_rows.len() > MAX_RETAINED_ROWS {
+            let Some(oldest) = old_rows.keys().next().copied() else {
+                break;
+            };
+            old_rows.remove(&oldest);
+        }
+
+        let desired_end = real_total_rows.saturating_sub(offset);
+        let desired_start = desired_end.saturating_sub(VIEWPORT_ROWS);
+        total += 1;
+        if surface.retained_rows_cover_absolute_range(desired_start, desired_end) {
+            new_covered += 1;
+        }
+        if (desired_start..desired_end).all(|abs_row| old_rows.contains_key(&abs_row)) {
+            old_covered += 1;
+        }
+    }
+    println!(
+        "12k scrollback upward scroll coverage: old={old_covered}/{total} new={new_covered}/{total}"
+    );
 }
 
 #[test]
@@ -2359,10 +2856,10 @@ fn protocol_scroll_wheel_defers_parent_update_until_surface_lease_is_released() 
     // must wait until the callback returns before reading the geometry.
     cx.update_entity(&surface, |surface, cx| {
         surface.handle_scroll_wheel(
-            &ScrollWheelEvent {
+            &ScrollEvent {
                 position: point(px(8.), px(8.)),
                 delta: ScrollDelta::Lines(point(0., 1.)),
-                ..ScrollWheelEvent::default()
+                ..ScrollEvent::default()
             },
             cx,
         );
@@ -2502,13 +2999,13 @@ fn assert_return_to_live_paints_latest_last_row(
     cx.update_entity(&surface, |surface, cx| {
         surface.set_app(app.clone());
         surface.handle_scroll_wheel(
-            &ScrollWheelEvent {
+            &ScrollEvent {
                 delta: if fractional {
                     ScrollDelta::Pixels(point(px(0.), px(-0.6 * surface.cell_height)))
                 } else {
                     ScrollDelta::Lines(point(0., -1.))
                 },
-                ..ScrollWheelEvent::default()
+                ..ScrollEvent::default()
             },
             cx,
         );
@@ -2713,9 +3210,9 @@ fn reversing_local_scroll_before_app_sync_keeps_the_latest_wheel_target() {
     let wheel = |cx: &mut TestAppContext, lines| {
         cx.update_entity(&surface, |surface, cx| {
             surface.handle_scroll_wheel(
-                &ScrollWheelEvent {
+                &ScrollEvent {
                     delta: ScrollDelta::Lines(point(0., lines)),
-                    ..ScrollWheelEvent::default()
+                    ..ScrollEvent::default()
                 },
                 cx,
             );

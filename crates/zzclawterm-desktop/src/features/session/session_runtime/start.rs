@@ -11,7 +11,7 @@ use zzclawterm_core::{
 };
 use zzclawterm_remote_desktop::{
     RdpClipboardConfig, RdpDisplayConfig, RdpReconnectConfig, RdpSessionConfig, VncClipboardConfig,
-    VncDisplayConfig, VncReconnectConfig, VncSecurityConfig, VncSessionConfig,
+    VncDisplayConfig, VncReconnectConfig, VncSecurityConfig, VncSessionConfig, parse_rdp_backend,
     parse_rdp_certificate_policy, parse_rdp_clipboard_mode, parse_vnc_scale_mode,
     parse_vnc_security_mode,
 };
@@ -172,9 +172,13 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let external_rdp =
+            matches!(&connection.config, ConnectionType::Rdp { backend, .. } if backend == "mstsc");
         let focus_target = session_start_focus_target(&connection.config);
         self.continue_saved_connection_start(connection, options, cx);
-        self.focus_user_started_session_surface(focus_target, window, cx);
+        if !external_rdp {
+            self.focus_user_started_session_surface(focus_target, window, cx);
+        }
     }
 
     pub(in crate::features::session) fn focus_user_started_session_surface(
@@ -203,11 +207,81 @@ impl ZzClawTermApp {
         options: SavedConnectionStartOptions,
         cx: &mut Context<Self>,
     ) {
+        self.continue_saved_connection_start_with_launcher(
+            connection,
+            options,
+            crate::platform::mstsc::launch,
+            cx,
+        );
+    }
+
+    fn continue_saved_connection_start_with_launcher(
+        &mut self,
+        connection: SavedConnection,
+        options: SavedConnectionStartOptions,
+        launcher: impl FnOnce(
+            crate::platform::mstsc::MstscTarget,
+        ) -> Result<(), crate::platform::mstsc::MstscError>
+        + Send
+        + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if !matches!(connection.config, ConnectionType::LocalTerminal { .. })
+            && self.remote_start_blocked_by_configuration_replacement(cx)
+        {
+            self.complete_mcp_session_open_failure(
+                &connection.id,
+                &t!("settings.configurationReplacementInProgress"),
+            );
+            return;
+        }
+
+        // External clients own no application tab, credential request, or Relay.
+        if matches!(&connection.config, ConnectionType::Rdp { backend, .. } if backend == "mstsc") {
+            self.start_mstsc_connection(connection, launcher, cx);
+            return;
+        }
+        self.continue_saved_connection_start_in_app(connection, options, cx);
+    }
+
+    fn continue_saved_connection_start_in_app(
+        &mut self,
+        connection: SavedConnection,
+        options: SavedConnectionStartOptions,
+        cx: &mut Context<Self>,
+    ) {
         if !self.session.start.retry_is_pending(&options) {
             return;
         }
         let options = self.prepare_session_start_options(options);
-        let Some(placement) = options.tab_placement else {
+        if let ConnectionType::Rdp { backend, .. } = &connection.config {
+            let has_relay = connection.network.as_ref().is_some_and(|network| {
+                network.proxy_id.is_some() || network.proxy_jump_id.is_some()
+            });
+            if let Err(error) =
+                parse_rdp_backend(backend).and_then(|backend| backend.validate_route(has_relay))
+            {
+                let message = error.to_string();
+                self.fail_retry_preparation(&options, message.clone(), cx);
+                self.complete_mcp_session_open_failure(&connection.id, &message);
+                self.shell.set_status(message.clone());
+                self.notify_operation(
+                    "rdp-backend",
+                    zzclawterm_ui::notification::ZzClawNotificationKind::Error,
+                    message,
+                    cx,
+                );
+                return;
+            }
+        }
+        let placement = options.tab_placement.or_else(|| {
+            options.reconnect_session_id.as_ref().map(|id| {
+                self.session
+                    .start
+                    .allocate_tab_placement(self.session.session_index(id).unwrap_or(0))
+            })
+        });
+        let Some(placement) = placement else {
             self.complete_mcp_session_open_failure(
                 &connection.id,
                 "could not reserve a tab position",
@@ -579,158 +653,65 @@ impl ZzClawTermApp {
                     cx,
                 );
             }
-            ConnectionType::Rdp {
-                host,
-                port,
-                username,
-                domain,
-                security,
-                display,
-                clipboard,
-                reconnect,
-            } => {
-                let config = RdpSessionConfig {
-                    relay: self
-                        .remote_desktop
-                        .prepared_routes
-                        .get(&connection.id)
-                        .map(|route| route.endpoint.clone()),
-                    name: connection.name.clone(),
-                    host,
-                    port,
-                    username,
-                    domain,
-                    password: inline_connection_password(connection.auth.as_ref()),
-                    use_nla: security.use_nla,
-                    certificate_policy: parse_rdp_certificate_policy(&security.certificate_policy),
-                    administrative_session: security.administrative_session,
-                    display: RdpDisplayConfig::from(&display),
-                    clipboard: RdpClipboardConfig {
-                        mode: parse_rdp_clipboard_mode(&clipboard.mode),
-                    },
-                    reconnect: RdpReconnectConfig {
-                        enabled: reconnect.enabled,
-                        max_attempts: reconnect.max_attempts,
-                    },
-                };
-                match self.create_rdp_runtime(config.clone()) {
-                    Ok(session_id) => {
-                        if let Some(route) =
-                            self.remote_desktop.prepared_routes.remove(&connection.id)
-                        {
-                            self.remote_desktop.routes.insert(session_id.clone(), route);
-                        }
-                        let source_connection_id = Some(connection.id.clone());
-                        self.register_session_for_start(
-                            &session_id,
-                            crate::models::SessionRuntimeMetadata {
-                                ssh_config: None,
-                                ssh_multiplex_key: None,
-                                source_connection_id: source_connection_id.clone(),
-                                ai_execution_profile: AiExecutionProfile::Disabled,
-                                launch_config: SessionLaunchConfig::Rdp(config),
-                                disconnected: false,
-                            },
-                            tab_placement,
-                            fallback_insert_index,
-                        );
-                        if let Some(custom_name) = options.custom_name {
-                            self.session
-                                .set_custom_name(session_id.clone(), custom_name);
-                        }
-                        if let Some(color) = options.tab_color {
-                            self.session.set_tab_color(&session_id, Some(color));
-                        }
-                        if options.locked {
-                            self.session.set_tab_locked(&session_id, true);
-                        }
-                        if tab_placement.is_none()
-                            && fallback_insert_index.is_none()
-                            && let Some(after_session_id) = options.after_session_id
-                        {
-                            self.session
-                                .move_session_after(&session_id, &after_session_id);
-                        }
-                        self.persist_connection_used(connection.id.clone(), cx);
-                        self.activate_session_id(&session_id, cx);
-                        self.apply_workspace_split_for_duplicate(
-                            cx,
-                            workspace_split.clone(),
-                            &session_id,
-                        );
-                        self.shell
-                            .set_status(format!("connecting RDP {}", connection.name));
-                    }
+            ConnectionType::Rdp { .. } => {
+                let config = match self.saved_remote_desktop_launch_config(&connection) {
+                    Ok(SessionLaunchConfig::Rdp(config)) => config,
+                    Ok(_) => unreachable!("RDP connection"),
                     Err(error) => {
-                        let message = format!("RDP connection failed: {error}");
-                        let session_id = self.create_failed_rdp_runtime(error);
-                        self.register_session_for_start(
-                            &session_id,
-                            crate::models::SessionRuntimeMetadata {
-                                ssh_config: None,
-                                ssh_multiplex_key: None,
-                                source_connection_id: Some(connection.id.clone()),
-                                ai_execution_profile: AiExecutionProfile::Disabled,
-                                launch_config: SessionLaunchConfig::Rdp(config),
-                                disconnected: false,
-                            },
-                            tab_placement,
-                            fallback_insert_index,
-                        );
-                        if let Some(custom_name) = options.custom_name {
-                            self.session
-                                .set_custom_name(session_id.clone(), custom_name);
-                        }
-                        if let Some(color) = options.tab_color {
-                            self.session.set_tab_color(&session_id, Some(color));
-                        }
-                        if options.locked {
-                            self.session.set_tab_locked(&session_id, true);
-                        }
-                        self.activate_session_id(&session_id, cx);
-                        self.shell.set_status(message);
+                        self.fail_retry_preparation(&options, error.clone(), cx);
+                        self.complete_mcp_session_open_failure(&connection.id, &error);
+                        self.session.start_release_saved_connection(&connection.id);
+                        self.shell.set_status(error);
+                        cx.notify();
+                        return;
                     }
+                };
+                let session_id = self.schedule_rdp_runtime(config.clone(), cx);
+                if let Some(route) = self.remote_desktop.prepared_routes.remove(&connection.id) {
+                    self.remote_desktop.routes.insert(session_id.clone(), route);
                 }
+                self.register_session_for_start(
+                    &session_id,
+                    crate::models::SessionRuntimeMetadata {
+                        ssh_config: None,
+                        ssh_multiplex_key: None,
+                        source_connection_id: Some(connection.id.clone()),
+                        ai_execution_profile: AiExecutionProfile::Disabled,
+                        launch_config: SessionLaunchConfig::Rdp(config),
+                        disconnected: false,
+                    },
+                    tab_placement,
+                    fallback_insert_index,
+                );
+                if let Some(custom_name) = options.custom_name {
+                    self.session
+                        .set_custom_name(session_id.clone(), custom_name);
+                }
+                if let Some(color) = options.tab_color {
+                    self.session.set_tab_color(&session_id, Some(color));
+                }
+                if options.locked {
+                    self.session.set_tab_locked(&session_id, true);
+                }
+                if tab_placement.is_none()
+                    && fallback_insert_index.is_none()
+                    && let Some(after_session_id) = options.after_session_id
+                {
+                    self.session
+                        .move_session_after(&session_id, &after_session_id);
+                }
+                self.persist_connection_used(connection.id.clone(), cx);
+                self.activate_session_id(&session_id, cx);
+                self.apply_workspace_split_for_duplicate(cx, workspace_split.clone(), &session_id);
+                self.shell
+                    .set_status(format!("connecting RDP {}", connection.name));
                 self.shell.show_workspace();
                 cx.notify();
             }
-            ConnectionType::Vnc {
-                username,
-                host,
-                port,
-                security,
-                display,
-                clipboard,
-                reconnect,
-                shared,
-                view_only,
-            } => {
-                let config = VncSessionConfig {
-                    username: username.clone(),
-                    relay: self
-                        .remote_desktop
-                        .prepared_routes
-                        .get(&connection.id)
-                        .map(|route| route.endpoint.clone()),
-                    name: connection.name.clone(),
-                    host,
-                    port,
-                    password: inline_connection_password(connection.auth.as_ref()),
-                    security: VncSecurityConfig {
-                        mode: parse_vnc_security_mode(&security.mode),
-                    },
-                    display: VncDisplayConfig {
-                        scale_mode: parse_vnc_scale_mode(&display.scale_mode),
-                    },
-                    clipboard: VncClipboardConfig {
-                        enabled: clipboard.enabled,
-                    },
-                    reconnect: VncReconnectConfig {
-                        enabled: reconnect.enabled,
-                        max_attempts: reconnect.max_attempts,
-                    },
-                    shared,
-                    view_only,
+            ConnectionType::Vnc { .. } => {
+                let config = match self.saved_remote_desktop_launch_config(&connection) {
+                    Ok(SessionLaunchConfig::Vnc(config)) => config,
+                    _ => unreachable!("VNC connection"),
                 };
                 match self.create_vnc_runtime(config.clone()) {
                     Ok(session_id) => {
@@ -817,6 +798,96 @@ impl ZzClawTermApp {
         self.session.start_release_saved_connection(&connection_id);
     }
 
+    pub(in crate::features) fn saved_remote_desktop_launch_config(
+        &self,
+        connection: &SavedConnection,
+    ) -> Result<SessionLaunchConfig, String> {
+        match connection.config.clone() {
+            ConnectionType::Rdp {
+                host,
+                port,
+                username,
+                domain,
+                backend,
+                security,
+                display,
+                clipboard,
+                reconnect,
+            } => {
+                let backend = parse_rdp_backend(&backend).map_err(|error| error.to_string())?;
+                let mut config = RdpSessionConfig {
+                    relay: self
+                        .remote_desktop
+                        .prepared_routes
+                        .get(&connection.id)
+                        .map(|route| route.endpoint.clone()),
+                    backend,
+                    windows_authentication: security.windows_authentication.clone(),
+                    name: connection.name.clone(),
+                    host,
+                    port,
+                    username,
+                    domain,
+                    password: inline_connection_password(connection.auth.as_ref()),
+                    use_nla: security.use_nla,
+                    certificate_policy: parse_rdp_certificate_policy(&security.certificate_policy),
+                    administrative_session: security.administrative_session,
+                    display: RdpDisplayConfig::from(&display),
+                    clipboard: RdpClipboardConfig {
+                        mode: parse_rdp_clipboard_mode(&clipboard.mode),
+                    },
+                    reconnect: RdpReconnectConfig {
+                        enabled: reconnect.enabled,
+                        max_attempts: reconnect.max_attempts,
+                    },
+                };
+                config.normalize_backend_settings();
+                Ok(SessionLaunchConfig::Rdp(config))
+            }
+            ConnectionType::Vnc {
+                username,
+                host,
+                port,
+                security,
+                display,
+                clipboard,
+                reconnect,
+                shared,
+                view_only,
+            } => {
+                let config = VncSessionConfig {
+                    username: username.clone(),
+                    relay: self
+                        .remote_desktop
+                        .prepared_routes
+                        .get(&connection.id)
+                        .map(|route| route.endpoint.clone()),
+                    name: connection.name.clone(),
+                    host,
+                    port,
+                    password: inline_connection_password(connection.auth.as_ref()),
+                    security: VncSecurityConfig {
+                        mode: parse_vnc_security_mode(&security.mode),
+                    },
+                    display: VncDisplayConfig {
+                        scale_mode: parse_vnc_scale_mode(&display.scale_mode),
+                    },
+                    clipboard: VncClipboardConfig {
+                        enabled: clipboard.enabled,
+                    },
+                    reconnect: VncReconnectConfig {
+                        enabled: reconnect.enabled,
+                        max_attempts: reconnect.max_attempts,
+                    },
+                    shared,
+                    view_only,
+                };
+                Ok(SessionLaunchConfig::Vnc(config))
+            }
+            _ => Err("connection is not a remote desktop".to_string()),
+        }
+    }
+
     pub(in crate::features) fn prepare_remote_route(
         &mut self,
         connection: SavedConnection,
@@ -870,7 +941,12 @@ impl ZzClawTermApp {
         options: SavedConnectionStartOptions,
         cx: &mut Context<Self>,
     ) {
+        if self.remote_start_blocked_by_configuration_replacement(cx) {
+            return;
+        }
+
         let SavedConnectionStartOptions {
+            ssh_runtime_mode,
             custom_name,
             tab_color,
             locked,
@@ -894,6 +970,7 @@ impl ZzClawTermApp {
         let multiplex_key = format!("ssh-session:{}", uuid());
         let request_id = self.register_pending_session_start(
             PendingSessionStartRegistration {
+                requested_ssh_runtime_mode: ssh_runtime_mode,
                 connection_name: connection_name.clone(),
                 launch_config: None,
                 kind: SessionKind::Ssh,
@@ -944,7 +1021,11 @@ impl ZzClawTermApp {
                     &mut Vec::new(),
                     &build_context,
                 )?;
+                if let Some(mode) = ssh_runtime_mode {
+                    config.runtime_mode = mode;
+                }
                 config.deferred_pty = true;
+                config.apply_runtime_policy()?;
                 if let Some(geometry) = desired_geometry {
                     config.cols = geometry.cols;
                     config.rows = geometry.rows;
@@ -1093,6 +1174,22 @@ pub(in crate::features) fn build_ssh_session_config_with_context(
     visited_proxy_jumps: &mut Vec<String>,
     context: &SshSessionConfigBuildContext,
 ) -> Result<SshSessionConfig, String> {
+    // Resolve saved connections afresh, including reconnects and jump hosts.
+    // Capture the optimistic-write baseline in the same store-owner request.
+    let id = connection.id.clone();
+    let (fresh, snapshot) = context
+        .store
+        .request_fn(StoreDomain::Security, move |store| {
+            let fresh = store.get_connection(&id)?;
+            let snapshot = if fresh.is_some() {
+                Some(store.runtime_connection_snapshot(&id)?)
+            } else {
+                None
+            };
+            Ok((fresh, snapshot))
+        })
+        .map_err(|error| error.to_string())?;
+    let connection = fresh.as_ref().unwrap_or(connection);
     let ConnectionType::Ssh {
         host,
         port,
@@ -1129,6 +1226,7 @@ pub(in crate::features) fn build_ssh_session_config_with_context(
     });
 
     Ok(SshSessionConfig {
+        runtime_mode: Default::default(),
         attempt: context.attempt.clone(),
         name: connection.name.clone(),
         host,
@@ -1136,7 +1234,7 @@ pub(in crate::features) fn build_ssh_session_config_with_context(
         host_key_alias,
         username,
         password,
-        key_auth,
+        key_auth: key_auth.clone(),
         agent_auth: auth.mode == "agent",
         agent_endpoint: match normalize_ssh_agent_endpoint(auth_agent_endpoint.unwrap_or_default())
         {
@@ -1158,7 +1256,7 @@ pub(in crate::features) fn build_ssh_session_config_with_context(
             .as_ref()
             .is_some_and(|config| config.enabled),
         agent_forwarding_config: agent_forwarding_config.map(map_agent_forwarding_config),
-        otp_id: auth.otp_id.filter(|value| !value.trim().is_empty()),
+        otp_id: auth.otp_id.clone().filter(|value| !value.trim().is_empty()),
         auto_fill_otp: auth.auto_fill_otp,
         proxy_jump,
         proxy,
@@ -1197,7 +1295,17 @@ pub(in crate::features) fn build_ssh_session_config_with_context(
             policy: context.host_key_policy.clone(),
             prompt_broker: context.host_key_prompts.clone(),
         })),
-        credential_provider: Some(context.credential_prompts.clone()),
+        credential_provider: Some(Arc::new(
+            context
+                .credential_prompts
+                .for_attempt(context.attempt.clone())
+                .for_connection(
+                    snapshot,
+                    auth.saved_account_id().map(str::to_owned),
+                    auth.key_id.clone(),
+                    key_auth,
+                ),
+        )),
         agent_prompt_provider: Some(context.agent_prompts.clone()),
         agent_stored_key_provider: Some(Arc::new(StoreSshAgentKeyProvider {
             store: context.store.clone(),
@@ -1500,6 +1608,9 @@ fn load_proxy_jump_config_with_context(
     visited_proxy_jumps.pop();
     Ok(Some(Box::new(jump_config)))
 }
+
+#[cfg(test)]
+mod mstsc_tests;
 
 #[cfg(test)]
 mod tests {

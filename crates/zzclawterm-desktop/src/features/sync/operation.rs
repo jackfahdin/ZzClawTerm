@@ -4,6 +4,9 @@ use zzclawterm_core::cloud_sync::control::{CloudSyncCancellation, CloudSyncOpera
 
 use crate::blocking_jobs::{JobRejected, JobTask};
 
+mod registry;
+pub(crate) use registry::{CloudSyncOperationRegistration, CloudSyncOperationRegistry};
+
 #[derive(Clone, Default)]
 pub(crate) struct AutoSyncOperationControls {
     pub sync: CloudSyncOperationControl,

@@ -1,0 +1,21 @@
+[package]
+name = "zzclawterm-remote-ops"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+zzclawterm-core.workspace = true
+zzclawterm-transport.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+zzclawterm-core = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["test-util"] }

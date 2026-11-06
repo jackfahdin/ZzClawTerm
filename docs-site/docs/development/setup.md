@@ -151,6 +151,18 @@ python scripts/release/verify_native_package.py \
   --artifact-version continuous-build --dist dist
 ```
 
+### 外部包管理器构建
+
+源码构建型打包者（例如 nixpkgs）可以在构建时设置 `ZZCLAWTERM_PACKAGE_MANAGER`，声明更新由外部包管理器负责：
+
+```bash
+ZZCLAWTERM_PACKAGE_MANAGER=nix cargo build -p zzclawterm-app --release --locked
+```
+
+该值在编译期写入二进制：应用跳过启动静默更新检查，隐藏标题栏与托盘中的应用内更新入口，并在“关于”窗口的支持信息里显示包管理器名称。未设置时行为与普通构建完全一致，开发构建应保持未设置；Cargo 会随该变量的变化重编相关 crate，不需要额外的 build script。
+
+该变量只对源码构建的包有意义。AUR 与 Homebrew cask 由发布产物（`.deb` / `.dmg`）重打包，更新仍由应用自身负责，无需设置。
+
 正式标签先把 release 建成草稿，上传全部产物后用 `scripts/ci/verify_remote_assets.py` 逐个比对远端 asset 的大小与 sha256 摘要，一致才公开（预发布版本带 `prerelease` 标记，不会占用 `releases/latest`）；同一 tag 重跑会重新暂存 release、替换旧附件并校验后公开。公开后的产物内含 `downloads.json` 与签名的 `latest.json`，GitHub 发布成功后才触发 GitCode tag 与附件同步。官网读取 `downloads.json`；签名的 `latest.json` 是已安装应用读取的更新清单。`Continuous Build` 每天东八区 0:00 自动检查 master，只有当前提交的快照已校验才跳过重建（也可手动触发）。快照覆盖远端附件并校验摘要后才记录完成状态，失败的覆盖会在下次定时运行时重试；已有快照会短暂转为草稿并重新发布，以刷新 GitHub 列表中的发布时间，同时保持预发布状态。当 workspace 版本号带预发布后缀时，它还会签名并发布 `latest.json` 与 `downloads.json`，作为预览通道（`releases/download/continuous-build/latest.json`）的清单；版本号是正式版形态时则不生成清单，因为正式版客户端只读稳定通道。
 
 正式版的更新对话框可选自动、GitCode、GitHub 来源。自动模式优先读取 GitCode 的固定 `update-stable/latest.json` 附件，并限时比较 GitHub 版本；GitCode 不可用或落后时使用 GitHub。固定清单仅在 GitCode 对应版本的所需更新附件与版本清单同步成功、且该版本仍为 GitHub 最新稳定版时更新。安装包继续验证 minisign 签名。预览版继续使用 GitHub `continuous-build`，因为该快照暂未镜像到 GitCode。
@@ -162,6 +174,18 @@ Release workflow 需要 Tauri updater 签名 Secrets；`ZZCLAWTERM_GITHUB_GIST_C
 原生打包依赖目标平台工具：Windows 使用 Inno Setup 7（安装包校验通过真实静默安装完成）；macOS 使用 `codesign` 和 `hdiutil`；Linux 使用 `appimagetool`、`dpkg-shlibdeps`、`dpkg-deb`、`rpmbuild`、`rpm`/`rpm2cpio` 等工具。因此在缺少对应工具的平台上，单独运行 Python 打包单测并不等于完成原生打包。
 
 自动验证会检查产物集合、归档路径、应用与 helper 是否齐全、二进制架构、版本及包元数据。它不会证明 GUI 能实际启动，也不会覆盖真实安装/升级/卸载、快捷方式或 `zzclawterm:` URL handler 调用、签名/notarization 与 Gatekeeper/SmartScreen 信任、真实 RDP/VNC 会话，以及 GPU、IME、PTY、剪贴板和窗口生命周期。发布候选必须在对应目标操作系统上手工验收这些行为，并如实记录实际执行的平台与结果。
+
+## CI 按需执行
+
+Rust 工作流先运行轻量的 `orchestrate`，验证筛选规则并比较 PR 事件中的 base SHA 与实际测试的合并提交。它按全部变更路径的并集选择任务，并在 Actions 的 Job Summary 中列出原因。普通 Rust 改动仍执行现有 lint 和 Linux、macOS、Windows workspace 测试；应用翻译 JSON 也保留这些验证。
+
+四组 tmux 兼容性任务仅在 transport、terminal、core、插件 API、MCP 协议及共享构建/CI 配置变化时运行。插件 SDK 根据插件示例、脚本及相关 crate 变化运行；Python 和工作流检查也有各自的路径规则。纯文档站或根目录 Markdown 改动跳过 Rust 重型任务，`Docs` 工作流仍照常构建全部 locale。
+
+给 PR 添加 `run-tmux` 标签可以强制执行完整 tmux 矩阵；标签保留时，后续提交也会继续运行。标签事件同时重新执行该 PR 按路径应运行的其他检查，不会只报告 tmux 结果。Push 到 `main` 或 `migration/gpui`、Merge Queue 和手动运行 `Rust` 工作流都会执行完整任务集。
+
+筛选无法识别的路径、新 crate、Cargo 清单/锁文件及共享构建配置改动会启用全部任务；比较版本缺失或 Git diff 失败也回退到全量。筛选脚本异常或其回归测试失败则使 `Rust gate` 失败。新增 workspace crate 或调整相关 crate 的依赖时，需要同步更新 `scripts/ci/select_rust_jobs.py` 的登记与依赖集合，清单检查会防止漏测。
+
+`Rust gate` 和 `Docs gate` 保持为统一 Required Check，并支持 Merge Queue。Gate 始终汇总依赖结果：成功和按条件跳过可以通过，失败或取消不能通过。
 
 ## 文档站开发
 
@@ -192,9 +216,9 @@ pnpm --dir docs-site build
 
 ## 修改第三方依赖
 
-ZzClawTerm 打了补丁的第三方依赖**没有 vendor 到仓库里**。每个都是 [github.com/jackfahdin](https://github.com/jackfahdin) 名下 fork 的 `nyaterm` 分支上的一条补丁序列（fork 自 [github.com/nyakang](https://github.com/nyakang) 下的原始序列），并镜像到 [gitcode.com/JackfahdinImport](https://gitcode.com/JackfahdinImport) 以方便中国大陆访问；Cargo 从 gitcode 拉取，由根 `Cargo.toml` 固定 revision 消费：`alacritty`、`gpui-kit`、`IronRDP`、`russh`、`russh-sftp`、`sspi-rs`、`vnc-rs`、`zed`（`gpui`）和 `zmodem2`。
+ZzClawTerm 打了补丁的第三方依赖**没有 vendor 到仓库里**。每个都是 [github.com/jackfahdin](https://github.com/jackfahdin) 名下 fork 的 `zzclawterm` 分支上的一条补丁序列（fork 自 [github.com/nyakang](https://github.com/nyakang) 下的原始序列），并镜像到 [gitcode.com/JackfahdinImport](https://gitcode.com/JackfahdinImport) 以方便中国大陆访问；Cargo 从 gitcode 拉取，由根 `Cargo.toml` 固定 revision 消费：`alacritty`、`gpui-kit`、`IronRDP`、`russh`、`russh-sftp`、`sspi-rs`、`vnc-rs`、`zed`（`gpui`）和 `zmodem2`。
 
-改动流程是：提交到 fork 分支 → 推送 → 在根 `Cargo.toml` 里 bump revision。补丁按关注点拆分而不是压成一个提交，并在提交信息和该分支的 `NYATERM.md` 里记录原因与验证方式。已有序列优先 rebase 到更新的上游 revision，而不是不断累积快照。
+改动流程是：提交到 fork 分支 → 推送 → 在根 `Cargo.toml` 里 bump revision。补丁按关注点拆分而不是压成一个提交，并在提交信息和该分支的 `ZZCLAWTERM.md` 里记录原因与验证方式。已有序列优先 rebase 到更新的上游 revision，而不是不断累积快照。
 
 `temp/vendor/` 下是这些源码的只读本地副本，仅供阅读。**它不参与编译，改动那里既不会生效也不会报错。**
 

@@ -8,6 +8,8 @@ repository.workspace = true
 
 [dependencies]
 httpdate.workspace = true
+http.workspace = true
+opendal.workspace = true
 tempfile.workspace = true
 anyhow.workspace = true
 base64.workspace = true
@@ -15,6 +17,9 @@ bytemuck = "=1.25.2"
 dirs.workspace = true
 encoding_rs.workspace = true
 futures.workspace = true
+genai.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
 gpui.workspace = true
 hayro.workspace = true
 hex.workspace = true
@@ -29,9 +34,13 @@ zzclawterm-mcp-protocol.workspace = true
 zzclawterm-otp.workspace = true
 zzclawterm-remote-desktop.workspace = true
 zzclawterm-store.workspace = true
+zzclawterm-sync.workspace = true
 zzclawterm-terminal.workspace = true
 zzclawterm-terminal-gpui.workspace = true
 zzclawterm-transport.workspace = true
+zzclawterm-recording.workspace = true
+zzclawterm-remote-ops.workspace = true
+zzclawterm-files.workspace = true
 zzclawterm-ui.workspace = true
 zzclawterm-plugin-host.workspace = true
 regex.workspace = true
@@ -56,11 +65,15 @@ zip.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+tracing-subscriber.workspace = true
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"] }
 gpui = { workspace = true, features = ["test-support"] }
 zzclawterm-core = { workspace = true, features = ["test-support"] }
 redb.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
+zzclawterm-windows-rdp.workspace = true
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

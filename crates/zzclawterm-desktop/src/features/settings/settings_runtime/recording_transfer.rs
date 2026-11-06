@@ -1,10 +1,8 @@
+use super::general_interaction::SettingsSaveKind;
+use crate::features::{ZzClawTermApp, transfers::duplicate_policy_label};
 use gpui::Context;
 use zzclawterm_core::{ExistingFileBehavior, RecordingMode, RecordingRotationPolicy};
-use zzclawterm_transport::SftpDuplicatePolicy;
-
-use crate::features::{ZzClawTermApp, transfers::duplicate_policy_label};
-
-use super::general_interaction::SettingsSaveKind;
+use zzclawterm_files::sftp_transfer_types::SftpDuplicatePolicy;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn update_host_key_policy(

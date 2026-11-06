@@ -7,7 +7,8 @@ use zzclawterm_ui::ZzClawInputState;
 
 use crate::features::ZzClawTermApp;
 use crate::features::connections::{
-    ConnectionDragKind, ConnectionDropPosition, ConnectionDropTarget, ConnectionListRowsKey,
+    ConnectionDragKind, ConnectionDropPosition, ConnectionDropTarget, ConnectionImportReportView,
+    ConnectionListRowsKey,
 };
 use crate::models::{ConnectionGroupEditorMode, ConnectionGroupEditorState, ConnectionSortMode};
 use crate::theme::ThemePalette;
@@ -50,6 +51,7 @@ pub(in crate::features) struct ConnectionListKey {
     hovered_group: Option<String>,
     drop_target: Option<ConnectionDropTarget>,
     search_expanded: bool,
+    import_report: Option<ConnectionImportReportView>,
     chrome: ConnectionChrome,
 }
 
@@ -62,6 +64,7 @@ impl ConnectionListKey {
         hovered_group: Option<String>,
         drop_target: Option<ConnectionDropTarget>,
         search_expanded: bool,
+        import_report: Option<ConnectionImportReportView>,
         chrome: ConnectionChrome,
     ) -> Self {
         Self {
@@ -71,6 +74,7 @@ impl ConnectionListKey {
             hovered_group,
             drop_target,
             search_expanded,
+            import_report,
             chrome,
         }
     }
@@ -95,6 +99,7 @@ impl PartialEq for ConnectionListKey {
             && self.hovered_group == other.hovered_group
             && self.drop_target == other.drop_target
             && self.search_expanded == other.search_expanded
+            && self.import_report == other.import_report
             && self.chrome == other.chrome
     }
 }
@@ -129,6 +134,8 @@ pub(in crate::features) struct ConnectionListSnapshot {
     pub(in crate::features::pages::connections) search_expanded: bool,
     pub(in crate::features::pages::connections) sort_mode: ConnectionSortMode,
     pub(in crate::features::pages::connections) store_is_empty: bool,
+    /// Outcome of the last import, shown as an inline banner above the list.
+    pub(in crate::features::pages::connections) import_report: Option<ConnectionImportReportView>,
 }
 
 impl ConnectionListSnapshot {
@@ -310,7 +317,7 @@ mod tests {
 
     use gpui::{
         AppContext as _, Entity, IntoElement, Modifiers, ParentElement as _, Render, ScrollDelta,
-        ScrollWheelEvent, Styled as _, TestAppContext, VisualTestContext, div, point, px,
+        ScrollEvent, Styled as _, TestAppContext, VisualTestContext, div, point, px,
     };
     use zzclawterm_core::{AppRuntime, Group, RuntimeMode, SavedConnection};
     use zzclawterm_ui::ZzClawInputEvent;
@@ -1000,7 +1007,7 @@ mod tests {
             "the long name must overflow horizontally instead of being ellipsized"
         );
 
-        vcx.simulate_event(ScrollWheelEvent {
+        vcx.simulate_event(ScrollEvent {
             position: point(list.left() + px(12.), row.center().y),
             delta: ScrollDelta::Pixels(point(px(-180.), px(0.))),
             ..Default::default()

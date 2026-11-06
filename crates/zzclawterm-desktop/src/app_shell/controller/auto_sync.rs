@@ -1,8 +1,11 @@
 use super::DesktopController;
+use crate::app_shell::configuration_replacement::ConfigurationReplacementLease;
 use crate::features::AutoSyncResult;
 use crate::features::AutoSyncTrigger;
 use crate::features::run_auto_sync;
-use crate::features::sync::operation::{AutoSyncOperationControls, await_cloud_sync_job};
+use crate::features::sync::operation::{
+    AutoSyncOperationControls, CloudSyncOperationRegistration, await_cloud_sync_job,
+};
 use futures::StreamExt as _;
 use gpui::Context;
 use std::collections::HashMap;
@@ -81,17 +84,29 @@ impl DesktopController {
         let store = runtime_store.blocking_client();
         let runtime = self.runtime.clone();
         let scheduler = self.update_store.read(cx).blocking_jobs();
-        let (guard_request, guard_receiver) =
-            futures::channel::oneshot::channel::<std::sync::mpsc::SyncSender<bool>>();
+        let (guard_request, guard_receiver) = futures::channel::oneshot::channel::<
+            std::sync::mpsc::SyncSender<Option<ConfigurationReplacementLease>>,
+        >();
         let guard_request = Mutex::new(Some(guard_request));
+        let replacement = Arc::new(Mutex::new(None::<ConfigurationReplacementLease>));
+        let worker_replacement = replacement.clone();
         let expired = Arc::new(AtomicBool::new(false));
         let task_expired = expired.clone();
         let controls = AutoSyncOperationControls::default();
+        let Some(registration) = self.auto_sync.operations.register(
+            "cloud-sync-auto",
+            vec![controls.sync.clone(), controls.cleanup.clone()],
+            Some(expired.clone()),
+        ) else {
+            self.auto_sync.cancel_for_shutdown();
+            return;
+        };
         let worker_controls = controls.clone();
         let task = scheduler.submit_task("cloud-sync-auto", move |_| {
             let before_apply = || {
+                worker_controls.sync.checkpoint()?;
                 if task_expired.load(Ordering::Acquire) {
-                    return Err(zzclawterm_core::CloudSyncError::AutoPullDeferred);
+                    return Err(zzclawterm_core::CloudSyncError::Cancelled);
                 }
                 let (reply, receiver) = std::sync::mpsc::sync_channel(1);
                 guard_request
@@ -101,15 +116,16 @@ impl DesktopController {
                     .ok_or(zzclawterm_core::CloudSyncError::AutoPullDeferred)?
                     .send(reply)
                     .map_err(|_| zzclawterm_core::CloudSyncError::AutoPullDeferred)?;
-                if receiver
-                    .recv_timeout(Duration::from_secs(30))
-                    .unwrap_or(false)
-                    && !task_expired.load(Ordering::Acquire)
-                {
-                    Ok(())
-                } else {
-                    Err(zzclawterm_core::CloudSyncError::AutoPullDeferred)
-                }
+                let lease = receive_auto_sync_apply_permission(
+                    receiver,
+                    &task_expired,
+                    &worker_controls.sync,
+                )?;
+                lease.require_refresh();
+                *worker_replacement
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(lease);
+                Ok(())
             };
             run_auto_sync(
                 &store,
@@ -124,13 +140,22 @@ impl DesktopController {
         let guard_expired = expired.clone();
         cx.spawn(async move |this, cx| {
             if let Ok(reply) = guard_receiver.await {
-                let safe = !guard_expired.load(Ordering::Acquire)
-                    && this
-                        .update(cx, |controller, cx| {
-                            !controller.process_quitting && controller.auto_sync_pull_safe(cx)
-                        })
-                        .unwrap_or(false);
-                let _ = reply.send(safe);
+                let permission = if guard_expired.load(Ordering::Acquire) {
+                    None
+                } else {
+                    this.update(cx, |controller, cx| {
+                        if controller.process_quitting || !controller.auto_sync_pull_safe(cx) {
+                            return None;
+                        }
+                        controller
+                            .sync_operations()
+                            .replacement_gate()
+                            .try_acquire()
+                    })
+                    .ok()
+                    .flatten()
+                };
+                let _ = reply.send(permission);
             }
         })
         .detach();
@@ -157,20 +182,36 @@ impl DesktopController {
             )
             .await;
             let _ = this.update(cx, |controller, cx| {
-                controller.complete_auto_sync(trigger, result, cx);
+                if let Some(lease) = replacement
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    controller.refresh_after_configuration_replacement(lease, cx);
+                }
+                if registration.shutdown_cancelled(&result) {
+                    controller.auto_sync.cancel_for_shutdown();
+                    return;
+                }
+                controller.complete_auto_sync(trigger, result, registration, cx);
             });
         })
         .detach();
     }
 
     pub(super) fn auto_sync_pull_safe(&self, cx: &gpui::App) -> bool {
-        windows_allow_auto_sync_pull(&self.windows, cx)
+        self.sync_operations()
+            .replacement_gate()
+            .block_reason()
+            .is_none()
+            && windows_allow_auto_sync_pull(&self.windows, cx)
     }
 
     pub(super) fn complete_auto_sync(
         &mut self,
         trigger: AutoSyncTrigger,
         result: Result<AutoSyncResult, zzclawterm_core::CloudSyncError>,
+        registration: CloudSyncOperationRegistration,
         cx: &mut Context<Self>,
     ) {
         let generation = self
@@ -211,6 +252,7 @@ impl DesktopController {
                     controller.auto_sync.complete(trigger, &result, generation);
                     controller.notify_auto_sync_windows(&result, true, cx);
                 });
+                drop(registration);
             })
             .detach();
         } else {
@@ -288,4 +330,69 @@ fn windows_allow_auto_sync_pull(
             .and_then(|shell| shell.read(cx).app.clone())
             .is_some_and(|app| !app.read(cx).auto_cloud_sync_pull_blocked())
     })
+}
+
+// A denied UI lease can be ordinary deferral or exit cancellation. Keep the
+// distinction so V4 does not record a cancelled lease as a sync failure.
+fn receive_auto_sync_apply_permission(
+    receiver: std::sync::mpsc::Receiver<Option<ConfigurationReplacementLease>>,
+    expired: &AtomicBool,
+    control: &zzclawterm_core::cloud_sync::control::CloudSyncOperationControl,
+) -> Result<ConfigurationReplacementLease, zzclawterm_core::CloudSyncError> {
+    let permitted = receiver
+        .recv_timeout(Duration::from_secs(30))
+        .ok()
+        .flatten();
+    control.checkpoint()?;
+    if expired.load(Ordering::Acquire) {
+        return Err(zzclawterm_core::CloudSyncError::Cancelled);
+    }
+    permitted.ok_or(zzclawterm_core::CloudSyncError::AutoPullDeferred)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::receive_auto_sync_apply_permission;
+    use crate::features::sync::operation::CloudSyncOperationRegistry;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+    use zzclawterm_core::CloudSyncError;
+    use zzclawterm_core::cloud_sync::control::CloudSyncOperationControl;
+
+    #[test]
+    fn exit_invalidates_an_already_granted_apply_permission_as_cancellation() {
+        let operations = CloudSyncOperationRegistry::default();
+        let control = CloudSyncOperationControl::default();
+        let expired = Arc::new(AtomicBool::new(false));
+        let registration = operations
+            .register("auto", vec![control.clone()], Some(expired.clone()))
+            .unwrap();
+        let (reply, receiver) = mpsc::channel();
+        assert!(
+            reply
+                .send(operations.replacement_gate().try_acquire())
+                .is_ok()
+        );
+        operations.pause_and_cancel();
+        let result = receive_auto_sync_apply_permission(receiver, &expired, &control);
+        assert!(registration.shutdown_cancelled(&result));
+        assert!(matches!(
+            control.begin_commit(),
+            Err(CloudSyncError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn denied_permission_without_exit_remains_retryable_deferral() {
+        let (reply, receiver) = mpsc::channel();
+        assert!(reply.send(None).is_ok());
+        let control = CloudSyncOperationControl::default();
+        let expired = AtomicBool::new(false);
+        assert!(matches!(
+            receive_auto_sync_apply_permission(receiver, &expired, &control),
+            Err(CloudSyncError::AutoPullDeferred)
+        ));
+        control.begin_commit().unwrap();
+    }
 }

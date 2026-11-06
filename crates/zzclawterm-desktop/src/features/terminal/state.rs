@@ -16,6 +16,7 @@ use zzclawterm_ui::ZzClawDocumentEditorState;
 
 use super::assist_state::TerminalAssistState;
 use super::editing_state::TerminalEditingState;
+use super::ime_state::TerminalImeState;
 use super::terminal_surface::TerminalScrollbarDragState;
 use super::terminal_surface_entity::TerminalSurface;
 use crate::features::{FontResolutionStatus, terminal::ResolvedAppearanceFont};
@@ -85,7 +86,7 @@ pub(super) struct TerminalInputState {
     pub(super) focus: FocusHandle,
     pub(super) focus_active: bool,
     pub(super) focus_subscriptions: Vec<Subscription>,
-    pub(super) ime_marked_text: String,
+    pub(super) ime: TerminalImeState,
 }
 
 /// Dedicated multi-line paste editor state backed by gpui-kit's editor.
@@ -238,6 +239,7 @@ pub(super) struct TerminalMenuState {
     pub(super) actions_open: bool,
     pub(super) actions_focus: FocusHandle,
     pub(super) action_link_menu: Option<ActionLinkMenuState>,
+    pub(super) action_link_menu_generation: u64,
     pub(super) action_link_tooltip: Option<ActionLinkTooltipState>,
     pub(super) action_link_hover: TerminalActionLinkHoverState,
     /// Pending action-link hover, with the generation of the timer that owns it. The
@@ -330,7 +332,7 @@ impl TerminalFeatureState {
                 focus: focus.terminal,
                 focus_active: false,
                 focus_subscriptions: Vec::new(),
-                ime_marked_text: String::new(),
+                ime: TerminalImeState::default(),
             },
             paste: TerminalPasteReviewState::new(),
             assist: TerminalAssistState::new(),
@@ -371,6 +373,7 @@ impl TerminalFeatureState {
                 actions_open: false,
                 actions_focus: focus.actions,
                 action_link_menu: None,
+                action_link_menu_generation: 0,
                 action_link_tooltip: None,
                 action_link_hover: TerminalActionLinkHoverState::default(),
                 action_link_hover_pending: None,

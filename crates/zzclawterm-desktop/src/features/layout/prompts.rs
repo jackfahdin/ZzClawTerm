@@ -157,6 +157,7 @@ impl ZzClawTermApp {
         };
 
         div()
+            .debug_selector(|| "ssh-host-key-card".to_string())
             .w_full()
             .max_w(px(384.))
             .mx_auto()
@@ -261,7 +262,10 @@ impl ZzClawTermApp {
         &mut self,
         prompt: CredentialPromptState,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::AnyElement {
+        if prompt.authentication.is_some() {
+            return self.runtime_authentication_view(prompt, cx);
+        }
         let palette = self.theme_palette();
         let title = match prompt.prompt.kind {
             SshCredentialPromptKind::Password => t!("runtimePrompt.sshPassword"),
@@ -276,10 +280,16 @@ impl ZzClawTermApp {
             }
             SshCredentialPromptReason::DockerElevation => t!("sshAuth.dockerElevation"),
             SshCredentialPromptReason::MissingPassword => t!("sshAuth.missingPassword"),
+            SshCredentialPromptReason::PublickeyRequired => t!("sshAuth.publickeyRequired"),
+            SshCredentialPromptReason::PublickeyRejected => t!("sshAuth.publickeyRejected"),
+            SshCredentialPromptReason::AdditionalPasswordRequired => {
+                t!("sshAuth.additionalPasswordRequired")
+            }
             SshCredentialPromptReason::PasswordRejected => t!("sshAuth.passwordRejected"),
             SshCredentialPromptReason::KeyPassphraseRequired => {
                 t!("sshAuth.keyPassphraseRequired")
             }
+            SshCredentialPromptReason::KeyPassphraseRejected => t!("sshAuth.keyPassphraseRejected"),
             SshCredentialPromptReason::KeyboardInteractive => {
                 t!("runtimePrompt.keyboardInteractive")
             }
@@ -324,6 +334,7 @@ impl ZzClawTermApp {
         }
 
         div()
+            .debug_selector(|| "ssh-credential-card".to_string())
             .id(SharedString::from(format!(
                 "credential-dialog-{}",
                 prompt.id
@@ -369,6 +380,7 @@ impl ZzClawTermApp {
                         }),
                     )),
             )
+            .into_any_element()
     }
 
     pub(in crate::features) fn keyboard_interactive_prompt_banner(
@@ -580,6 +592,7 @@ impl ZzClawTermApp {
         }
 
         div()
+            .debug_selector(|| "ssh-keyboard-card".to_string())
             .id(SharedString::from(format!(
                 "keyboard-interactive-dialog-{}",
                 prompt.id

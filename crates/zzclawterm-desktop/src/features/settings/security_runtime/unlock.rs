@@ -105,6 +105,7 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn cancel_security_unlock_prompt(&mut self, cx: &mut Context<Self>) {
         self.security.cancel_unlock_prompt();
+        self.session.prompt_restore_credential_focus();
         self.forget_text_inputs("security.unlock.password");
         cx.notify();
     }
@@ -114,6 +115,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         self.security.close_master_required_prompt();
+        self.session.prompt_restore_credential_focus();
         cx.notify();
     }
 
@@ -167,14 +169,14 @@ impl ZzClawTermApp {
                     .map_err(|error| error.to_string())
             });
             let result = await_blocking_job(task).await.and_then(|result| result);
-            let _ = this.update_in(cx, |this, window, cx| {
+            let _ = ZzClawTermApp::update_in_main_window(&this, cx, |this, window, cx| {
                 this.finish_security_unlock(request_id, generation, origin, result, window, cx);
             });
         })
         .detach();
     }
 
-    fn finish_security_unlock(
+    pub(in crate::features) fn finish_security_unlock(
         &mut self,
         request_id: u64,
         generation: u64,
@@ -202,7 +204,7 @@ impl ZzClawTermApp {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(50))
                     .await;
-                let _ = this.update_in(cx, |app, window, cx| {
+                let _ = ZzClawTermApp::update_in_main_window(&this, cx, |app, window, cx| {
                     app.finish_security_unlock(request_id, generation, origin, result, window, cx);
                 });
             })
@@ -256,6 +258,12 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         match action {
+            SecurityUnlockAction::RevealConnectionPassword {
+                editor_generation,
+                revision,
+            } => {
+                self.reveal_connection_password_after_unlock((editor_generation, revision), cx);
+            }
             SecurityUnlockAction::SavePasswordEditor(token) => {
                 if self.security.account_editor_token() == Some(token) {
                     self.save_security_password_editor(window, cx);

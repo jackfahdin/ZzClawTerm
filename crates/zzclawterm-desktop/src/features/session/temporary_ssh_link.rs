@@ -112,9 +112,13 @@ impl ZzClawTermApp {
     pub(in crate::features) fn start_external_ssh_link(
         &mut self,
         parsed: TemporarySshLinkConfig,
+        password: Option<zzclawterm_core::secret::SecretString>,
+        runtime_mode: zzclawterm_core::models::ssh_runtime::SshRuntimeMode,
         cx: &mut Context<Self>,
     ) {
-        let config = self.temporary_ssh_session_config(parsed.clone());
+        let mut config = self.temporary_ssh_session_config(parsed.clone());
+        config.password = password;
+        config.runtime_mode = runtime_mode;
         self.begin_background_ssh_start(
             parsed.name,
             config,
@@ -237,6 +241,7 @@ impl ZzClawTermApp {
                 self.settings.summary().terminal_keep_alive_interval
             };
         SshSessionConfig {
+            runtime_mode: Default::default(),
             attempt: Default::default(),
             post_login: None,
             name: parsed.name,

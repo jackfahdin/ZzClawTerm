@@ -1,14 +1,20 @@
 use gpui::{Pixels, ScrollHandle, UniformListScrollHandle, px};
 use std::collections::{HashSet, VecDeque};
+
 use std::path::PathBuf;
+
 use std::sync::Arc;
+
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
 use zzclawterm_core::transfer_speed::TransferSpeed;
-use zzclawterm_transport::{
-    RemoteTextDocument, RemoteTextGeneration, RemoteTextWriteResult, SftpFileEntry,
-    SftpFileProperties, SftpRemoteTextFile, SftpTransferControl, SftpTransferProgress,
-    SftpTransferSummary,
+use zzclawterm_files::remote_file::{
+    RemoteTextDocument, RemoteTextGeneration, RemoteTextWriteResult,
 };
+use zzclawterm_files::sftp::{
+    SftpFileEntry, SftpFileProperties, SftpRemoteTextFile, SftpTransferControl,
+};
+use zzclawterm_files::sftp_transfer_types::{SftpTransferProgress, SftpTransferSummary};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransferCwdSyncReason {
@@ -27,7 +33,7 @@ pub(crate) enum TransferJobKind {
         remote_path: String,
     },
     ListTree {
-        path: zzclawterm_transport::RemoteFilePath,
+        path: zzclawterm_files::sftp::RemoteFilePath,
         generation: u64,
     },
     ResolveHome,
@@ -332,7 +338,6 @@ fn local_file_name(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod transfer_job_state_tests {
-
     use super::{TransferJobKind, TransferJobState, TransferJobStatus};
     use std::path::PathBuf;
 
@@ -356,8 +361,7 @@ mod transfer_job_state_tests {
     #[test]
     fn progress_updates_seed_speed_and_snapshot_projects_the_sampled_rate() {
         use std::time::{Duration, Instant};
-
-        use zzclawterm_transport::SftpTransferProgress;
+        use zzclawterm_files::sftp_transfer_types::SftpTransferProgress;
 
         for kind in [
             TransferJobKind::Download {
@@ -504,8 +508,8 @@ pub(crate) struct TransferJobResult {
 pub(crate) struct PromisedDownloadDestination {
     pub raw_path_token: Option<String>,
     pub local_path: PathBuf,
-    pub source: std::sync::Weak<zzclawterm_transport::RemoteFileService>,
-    pub options: zzclawterm_transport::SftpPathTransferOptions,
+    pub source: std::sync::Weak<zzclawterm_files::remote_file::RemoteFileService>,
+    pub options: zzclawterm_files::sftp_transfer_types::SftpPathTransferOptions,
 }
 
 #[derive(Debug)]

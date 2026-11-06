@@ -16,9 +16,14 @@ members = [
     "crates/zzclawterm-otp",
     "crates/zzclawterm-rdp-helper",
     "crates/zzclawterm-remote-desktop",
+    "crates/zzclawterm-windows-rdp",
     "crates/zzclawterm-store",
+    "crates/zzclawterm-sync",
     "crates/zzclawterm-terminal",
     "crates/zzclawterm-terminal-gpui",
+    "crates/zzclawterm-recording",
+    "crates/zzclawterm-remote-ops",
+    "crates/zzclawterm-files",
     "crates/zzclawterm-transport",
     "crates/zzclawterm-ui",
     "crates/zzclawterm-vnc-helper",
@@ -42,8 +47,16 @@ license = "Apache-2.0"
 repository = "https://github.com/jackfahdin/ZzClawTerm"
 
 [workspace.dependencies]
+nucleo-matcher = "0.3.1"
+automerge = "=0.12.0"
 httpdate = "1.0"
+http = "1"
+opendal = { version = "=0.59.5", default-features = false, features = ["executors-tokio", "services-webdav", "services-s3", "services-gdrive", "services-onedrive", "services-aliyun-drive", "layers-timeout", "layers-retry"] }
 aes-gcm = "0.11"
+aes = { version = "0.8", features = ["zeroize"] }
+cbc = "0.1"
+pbkdf2 = "0.12"
+sha3 = "0.10"
 argon2 = { version = "0.5.3", features = ["zeroize"] }
 alacritty_terminal = "0.26.1-dev"
 anyhow = "1"
@@ -55,13 +68,15 @@ digest = "0.11.0-rc.5"
 dirs = "6"
 encoding_rs = "0.8"
 futures = "0.3"
+genai = { version = "=0.7.3", default-features = false, features = ["rustls-tls", "system-proxy"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "stream", "socks", "system-proxy"] }
 same-file = "1"
 tempfile = "3"
 glob = "0.3.4"
-gpui = { version = "=0.2.2", git = "https://gitcode.com/JackfahdinImport/zed", rev = "c054331114f9abdc44e5d587cd23314db6ac5aff" }
-gpui-base = { git = "https://gitcode.com/JackfahdinImport/gpui-kit", rev = "66bf2501a53e223f9b6c0a220686586b9c04eb43" }
-gpui-kit = { git = "https://gitcode.com/JackfahdinImport/gpui-kit", rev = "66bf2501a53e223f9b6c0a220686586b9c04eb43" }
-gpui_platform = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "c054331114f9abdc44e5d587cd23314db6ac5aff" }
+gpui = { version = "=0.2.2", git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+gpui-base = { git = "https://gitcode.com/JackfahdinImport/gpui-kit", rev = "25631f56a0d0c7c1baf6606de64c30874816b676" }
+gpui-kit = { git = "https://gitcode.com/JackfahdinImport/gpui-kit", rev = "25631f56a0d0c7c1baf6606de64c30874816b676" }
+gpui_platform = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
 # Pure-Rust, `#![forbid(unsafe)]` PDF rasterizer (MIT OR Apache-2.0). Pinned
 # exactly: the crate is pre-1.0 and explicitly experimental, so a caret range
 # could pull in a breaking 0.8 without review. `embed-fonts` bundles the 14
@@ -70,7 +85,7 @@ gpui_platform = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "c0543
 hayro = { version = "=0.7.1", features = ["embed-fonts"] }
 hex = "0.4"
 hmac = "0.13"
-ironrdp-input = "0.8.0"
+ironrdp-input = "0.9.0"
 jsonc-parser = { version = "0.34", features = ["serde"] }
 keyring = { version = "3.6", features = [
     "apple-native",
@@ -85,9 +100,14 @@ zzclawterm-mcp-protocol = { path = "crates/zzclawterm-mcp-protocol" }
 zzclawterm-desktop = { path = "crates/zzclawterm-desktop" }
 zzclawterm-otp = { path = "crates/zzclawterm-otp" }
 zzclawterm-remote-desktop = { path = "crates/zzclawterm-remote-desktop" }
+zzclawterm-windows-rdp = { path = "crates/zzclawterm-windows-rdp" }
 zzclawterm-store = { path = "crates/zzclawterm-store" }
+zzclawterm-sync = { path = "crates/zzclawterm-sync" }
 zzclawterm-terminal = { path = "crates/zzclawterm-terminal" }
 zzclawterm-terminal-gpui = { path = "crates/zzclawterm-terminal-gpui" }
+zzclawterm-recording = { path = "crates/zzclawterm-recording" }
+zzclawterm-remote-ops = { path = "crates/zzclawterm-remote-ops" }
+zzclawterm-files = { path = "crates/zzclawterm-files" }
 zzclawterm-transport = { path = "crates/zzclawterm-transport" }
 zzclawterm-ui = { path = "crates/zzclawterm-ui" }
 zzclawterm-plugin-api = { path = "crates/zzclawterm-plugin-api" }
@@ -100,7 +120,7 @@ redb = "4.1.0"
 regex = "1.11.1"
 rmcp = "=3.1.4"
 rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs", "std"] }
-russh = { git = "https://gitcode.com/JackfahdinImport/russh", rev = "3092e06cc827fc0f8d4c991280478f6e53c121a3", features = ["des", "dsa"] }
+russh = { git = "https://gitcode.com/JackfahdinImport/russh", rev = "831c8ddd2898f472fb88e80a93cbf9beb40a0fe2", features = ["des", "dsa"] }
 russh-sftp = { git = "https://gitcode.com/JackfahdinImport/russh-sftp", rev = "b638b4896de6a0efd699e4c3833873221b3b3f01" }
 rusty-leveldb = "4.0"
 rust-embed = { version = "8.11", features = ["include-exclude", "debug-embed"] }
@@ -129,7 +149,7 @@ url = "=2.5.8"
 unicode-normalization = "0.1"
 unicode-segmentation = "1.12"
 uuid = { version = "1", features = ["v4", "serde"] }
-vnc = { package = "vnc-rs", git = "https://gitcode.com/JackfahdinImport/vnc-rs", rev = "ff1f60518247362dd763bfc84e60f8478d9cc18e" }
+vnc = { package = "vnc-rs", git = "https://gitcode.com/JackfahdinImport/vnc-rs", rev = "7f9f0e5b57eec212f0926c54cdc7ae579dfe322a" }
 vte = "0.14"
 zeroize = "1"
 zmodem2 = { git = "https://gitcode.com/JackfahdinImport/zmodem2", rev = "87a80216179f29d90e0b8c06ee5b4a6a0132c763" }
@@ -170,10 +190,10 @@ inherits = "dev"
 debug = "full"
 
 [patch.crates-io]
-alacritty_terminal = { git = "https://gitcode.com/JackfahdinImport/alacritty", rev = "3b60b2ed9544cad2cbba9e92fa0785e885cb4af1" }
-ironrdp-client = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
-ironrdp-connector = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
-sspi = { git = "https://gitcode.com/JackfahdinImport/sspi-rs", rev = "d2b04e63ca9a72f2a70b456186e2472b27f0d45d" }
+alacritty_terminal = { git = "https://gitcode.com/JackfahdinImport/alacritty", rev = "6056cb4d0dc49a43a6542f3eb8a951c6d9220368" }
+ironrdp-client = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "a15d5faa54192ad0eb2a1f9f4c9d8e1f06295970" }
+ironrdp-connector = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "a15d5faa54192ad0eb2a1f9f4c9d8e1f06295970" }
+sspi = { git = "https://gitcode.com/JackfahdinImport/sspi-rs", rev = "582bd37e355d710a0888faded5f4f6da4667c3c8" }
 # The published ironrdp-client and ironrdp-connector packages declare their
 # sibling crates as registry dependencies, but in the IronRDP repository those
 # are path dependencies, so patching the two above to git pulls the siblings
@@ -182,15 +202,39 @@ sspi = { git = "https://gitcode.com/JackfahdinImport/sspi-rs", rev = "d2b04e63ca
 # are identical on both sides. `ironrdp-tls` is here for the same reason:
 # `zzclawterm-rdp-helper` names its certificate-validation types directly, because
 # ironrdp-client does not re-export them.
-ironrdp-cliprdr = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
-ironrdp-core = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
-ironrdp-error = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
-ironrdp-input = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
-ironrdp-pdu = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
-ironrdp-svc = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
-ironrdp-tls = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "b10cd243bc9442a07fcd776568a5fdaf1c64492f" }
+ironrdp-cliprdr = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "a15d5faa54192ad0eb2a1f9f4c9d8e1f06295970" }
+ironrdp-core = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "a15d5faa54192ad0eb2a1f9f4c9d8e1f06295970" }
+ironrdp-error = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "a15d5faa54192ad0eb2a1f9f4c9d8e1f06295970" }
+ironrdp-input = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "a15d5faa54192ad0eb2a1f9f4c9d8e1f06295970" }
+ironrdp-pdu = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "a15d5faa54192ad0eb2a1f9f4c9d8e1f06295970" }
+ironrdp-svc = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "a15d5faa54192ad0eb2a1f9f4c9d8e1f06295970" }
+ironrdp-tls = { git = "https://gitcode.com/JackfahdinImport/IronRDP", rev = "a15d5faa54192ad0eb2a1f9f4c9d8e1f06295970" }
 
 # gpui-kit takes zed-reqwest from git while this workspace uses the
 # published crate; without this both end up in the graph.
 [patch."https://github.com/zed-industries/reqwest.git"]
 zed-reqwest = { version = "0.12.15-zed" }
+
+# Keep gpui-kit's upstream GitHub references on the same GitCode fork revision.
+[patch."https://github.com/nyakang/zed"]
+bench_metrics = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+collections = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+derive_refineable = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+gpui = { version = "=0.2.2", git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+gpui_apple = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+gpui_ios = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+gpui_linux = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+gpui_macos = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+gpui_macros = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+gpui_platform = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+gpui_shared_string = { version = "=0.1.0", git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+gpui_util = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+gpui_web = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+gpui_wgpu = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+gpui_windows = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+http_client = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+refineable = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+scheduler = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+sum_tree = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+ztracing = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }
+ztracing_macro = { git = "https://gitcode.com/JackfahdinImport/zed", rev = "6cda7bc3f0e0ab64be33627851f56f8d908fe844" }

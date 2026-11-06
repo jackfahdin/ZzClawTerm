@@ -1,16 +1,16 @@
 //! Event-driven terminal directory following. Session state owns the CWD; the
 //! transfer browser owns only navigation requests and a deferred editing intent.
 
-use gpui::Context;
-use rust_i18n::t;
-use zzclawterm_transport::{
-    FileBrowserBackendKind, LocalShellPathStyle, SftpCwdFollowMode, file_browser_path_eq,
-    local_shell_cwd_to_browser_path, local_shell_cwd_to_browser_path_with_distro,
-    wsl_distro_from_launcher,
-};
-
 use crate::features::ZzClawTermApp;
 use crate::models::{SessionLaunchConfig, TransferCwdSyncReason};
+use gpui::Context;
+use rust_i18n::t;
+use zzclawterm_files::file_browser::{
+    FileBrowserBackendKind, file_browser_path_eq, local_shell_cwd_to_browser_path,
+    local_shell_cwd_to_browser_path_with_distro,
+};
+use zzclawterm_transport::local_shell::LocalShellPathStyle;
+use zzclawterm_transport::{SftpCwdFollowMode, wsl_distro_from_launcher};
 
 pub(super) fn cwd_paths_equal(backend: FileBrowserBackendKind, left: &str, right: &str) -> bool {
     let normalize = |path: &str| {

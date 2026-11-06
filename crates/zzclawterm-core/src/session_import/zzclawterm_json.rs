@@ -10,15 +10,15 @@ use super::{
 };
 
 #[derive(Deserialize)]
-struct NyatermJsonImportFile {
+struct ZzClawTermJsonImportFile {
     #[serde(default = "default_import_version")]
     version: u32,
     #[serde(default)]
-    passwords: Vec<NyatermJsonPassword>,
+    passwords: Vec<ZzClawTermJsonPassword>,
     #[serde(default)]
-    ssh_keys: Vec<NyatermJsonSshKey>,
+    ssh_keys: Vec<ZzClawTermJsonSshKey>,
     #[serde(default)]
-    groups: Vec<NyatermJsonGroup>,
+    groups: Vec<ZzClawTermJsonGroup>,
     #[serde(default)]
     sessions: Vec<serde_json::Value>,
     #[serde(default)]
@@ -34,7 +34,7 @@ fn default_import_version() -> u32 {
 }
 
 #[derive(Deserialize)]
-struct NyatermJsonPassword {
+struct ZzClawTermJsonPassword {
     #[serde(rename = "ref")]
     ref_name: String,
     name: String,
@@ -46,7 +46,7 @@ struct NyatermJsonPassword {
 }
 
 #[derive(Deserialize)]
-struct NyatermJsonSshKey {
+struct ZzClawTermJsonSshKey {
     #[serde(rename = "ref")]
     ref_name: String,
     name: String,
@@ -60,12 +60,12 @@ struct NyatermJsonSshKey {
 }
 
 #[derive(Deserialize)]
-struct NyatermJsonGroup {
+struct ZzClawTermJsonGroup {
     path: Vec<String>,
 }
 
 #[derive(Deserialize)]
-struct NyatermJsonSshAuth {
+struct ZzClawTermJsonSshAuth {
     mode: String,
     #[serde(default)]
     account_ref: Option<String>,
@@ -81,7 +81,7 @@ struct NyatermJsonSshAuth {
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum NyatermJsonSession {
+enum ZzClawTermJsonSession {
     Ssh {
         name: String,
         #[serde(default)]
@@ -92,7 +92,7 @@ enum NyatermJsonSession {
         #[serde(default = "default_ssh_user")]
         username: String,
         #[serde(default)]
-        auth: Option<NyatermJsonSshAuth>,
+        auth: Option<ZzClawTermJsonSshAuth>,
         #[serde(default)]
         description: Option<String>,
         #[serde(default)]
@@ -127,7 +127,7 @@ enum NyatermJsonSession {
         #[serde(default)]
         username: String,
         #[serde(default)]
-        auth: Option<NyatermJsonSshAuth>,
+        auth: Option<ZzClawTermJsonSshAuth>,
         #[serde(default = "default_telnet_keep_alive_interval_secs")]
         keep_alive_interval_secs: u32,
         #[serde(default = "default_telnet_backspace_mode")]
@@ -204,12 +204,14 @@ fn default_serial_backspace_mode() -> String {
 // ZzClawTerm JSON (.json)
 
 pub(super) fn parse_zzclawterm_json_content(content: &str) -> AppResult<PreparedSessionImport> {
-    let file: NyatermJsonImportFile = serde_json::from_str(content)
+    let file: ZzClawTermJsonImportFile = serde_json::from_str(content)
         .map_err(|e| AppError::Config(format!("Invalid ZzClawTerm JSON: {e}")))?;
     prepare_zzclawterm_json_import(file)
 }
 
-fn prepare_zzclawterm_json_import(file: NyatermJsonImportFile) -> AppResult<PreparedSessionImport> {
+fn prepare_zzclawterm_json_import(
+    file: ZzClawTermJsonImportFile,
+) -> AppResult<PreparedSessionImport> {
     if file.version != 1 {
         return Err(AppError::Config(format!(
             "Unsupported ZzClawTerm JSON import version: {}",
@@ -285,7 +287,7 @@ fn prepare_zzclawterm_json_import(file: NyatermJsonImportFile) -> AppResult<Prep
 
     let mut connections = Vec::new();
     for mut raw in file.sessions {
-        let session: NyatermJsonSession = serde_json::from_value(raw.clone())
+        let session: ZzClawTermJsonSession = serde_json::from_value(raw.clone())
             .map_err(|error| AppError::Config(format!("Invalid session: {error}")))?;
         let mut prepared =
             prepare_zzclawterm_json_session(session, &password_ref_map, &key_ref_map)?;
@@ -305,6 +307,7 @@ fn prepare_zzclawterm_json_import(file: NyatermJsonImportFile) -> AppResult<Prep
     }
 
     Ok(PreparedSessionImport {
+        warnings: Vec::new(),
         custom_icons: file.custom_icons,
         groups,
         passwords,
@@ -314,12 +317,12 @@ fn prepare_zzclawterm_json_import(file: NyatermJsonImportFile) -> AppResult<Prep
 }
 
 fn prepare_zzclawterm_json_session(
-    session: NyatermJsonSession,
+    session: ZzClawTermJsonSession,
     password_ref_map: &HashMap<String, String>,
     key_ref_map: &HashMap<String, String>,
 ) -> AppResult<PreparedSessionConnection> {
     match session {
-        NyatermJsonSession::Ssh {
+        ZzClawTermJsonSession::Ssh {
             name,
             group_path,
             host,
@@ -360,7 +363,7 @@ fn prepare_zzclawterm_json_session(
                 )?),
             })
         }
-        NyatermJsonSession::LocalTerminal {
+        ZzClawTermJsonSession::LocalTerminal {
             name,
             group_path,
             shell_path,
@@ -389,7 +392,7 @@ fn prepare_zzclawterm_json_session(
                 auth: None,
             })
         }
-        NyatermJsonSession::Telnet {
+        ZzClawTermJsonSession::Telnet {
             name,
             group_path,
             host,
@@ -436,7 +439,7 @@ fn prepare_zzclawterm_json_session(
                     .transpose()?,
             })
         }
-        NyatermJsonSession::Serial {
+        ZzClawTermJsonSession::Serial {
             name,
             group_path,
             port_name,
@@ -477,7 +480,7 @@ fn prepare_zzclawterm_json_session(
 }
 
 fn prepare_json_ssh_auth(
-    auth: Option<NyatermJsonSshAuth>,
+    auth: Option<ZzClawTermJsonSshAuth>,
     password_ref_map: &HashMap<String, String>,
     key_ref_map: &HashMap<String, String>,
     context: &str,

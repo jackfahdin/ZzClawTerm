@@ -1,36 +1,50 @@
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 use std::ffi::OsString;
-#[cfg(windows)]
-use std::io::Read as _;
-#[cfg(windows)]
-use std::path::Component;
 #[cfg(any(windows, target_os = "macos", test))]
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+#[cfg(any(windows, test))]
+mod portable;
 #[cfg(windows)]
 mod progress;
+#[cfg(windows)]
+use portable::{PortableUpdateError, commit_portable_files_with, extract_windows_portable};
+#[cfg(windows)]
+use zzclawterm_core::packaging::portable::windows_portable_layout;
+#[cfg(windows)]
+use zzclawterm_core::updater::UpdateTarget;
 
 const PORTABLE_HELPER_FLAG: &str = "--zzclawterm-portable-update-helper";
 const INSTALLED_HELPER_FLAG: &str = "--zzclawterm-installed-update-helper";
 const UPDATE_CLEANUP_ENV: &str = "ZZCLAWTERM_UPDATE_CLEANUP";
+#[derive(Clone, Debug)]
+pub(crate) enum PreparedUpdate {
+    #[cfg(not(windows))]
+    Installed { artifact: PathBuf, target: PathBuf },
+    #[cfg(windows)]
+    WindowsInstalled {
+        helper: PathBuf,
+        installer: PathBuf,
+        target: PathBuf,
+        work_dir: PathBuf,
+    },
+    #[cfg(windows)]
+    WindowsPortable {
+        helper: PathBuf,
+        staged_dir: PathBuf,
+        target_dir: PathBuf,
+        work_dir: PathBuf,
+    },
+}
+
 #[cfg(windows)]
-const PORTABLE_ROOT: &str = "ZzClawTerm-portable";
-#[cfg(windows)]
-const PORTABLE_MARKER: &str = "zzclawterm-portable";
-#[cfg(windows)]
-const PORTABLE_FILES: [&str; 7] = [
-    "ZzClawTerm.exe",
-    "zzclawterm-rdp-helper.exe",
-    "zzclawterm-vnc-helper.exe",
-    "zzclawterm-mcp.exe",
-    PORTABLE_MARKER,
-    "LICENSE",
-    "VERSION",
-];
-#[cfg(windows)]
-const MAX_PORTABLE_ENTRIES: usize = 128;
+fn is_valid_installed_executable(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("ZzClawTerm.exe"))
+}
 
 /// True when `directory` holds an installed copy the updater is allowed to replace.
 ///
@@ -53,28 +67,6 @@ pub(in crate::features) fn is_installed_copy(directory: &Path) -> bool {
         })
     })
 }
-#[cfg(windows)]
-const MAX_PORTABLE_PAYLOAD_BYTES: u64 = 1024 * 1024 * 1024;
-
-#[derive(Clone, Debug)]
-pub(crate) enum PreparedUpdate {
-    #[cfg(not(windows))]
-    Installed { artifact: PathBuf, target: PathBuf },
-    #[cfg(windows)]
-    WindowsInstalled {
-        helper: PathBuf,
-        installer: PathBuf,
-        target: PathBuf,
-        work_dir: PathBuf,
-    },
-    #[cfg(windows)]
-    WindowsPortable {
-        helper: PathBuf,
-        staged_dir: PathBuf,
-        target_dir: PathBuf,
-        work_dir: PathBuf,
-    },
-}
 
 pub(super) fn prepare_artifact(
     artifact: PathBuf,
@@ -92,6 +84,13 @@ pub(super) fn prepare_artifact(
         let directory = executable
             .parent()
             .ok_or("installed executable has no parent directory")?;
+        if !is_valid_installed_executable(&executable) {
+            return Err(format!(
+                "unexpected installed executable name: {}",
+                executable.display()
+            ));
+        }
+
         if !is_installed_copy(directory) {
             return Err("this installation must be updated manually".into());
         }
@@ -187,7 +186,7 @@ fn prepare_windows_portable(
         .parent()
         .ok_or("portable executable has no parent directory")?
         .to_path_buf();
-    if !target_dir.join(PORTABLE_MARKER).is_file() {
+    if !target_dir.join(&windows_portable_layout().marker).is_file() {
         return Err("portable installation marker is missing".into());
     }
     let work_dir = artifact
@@ -196,93 +195,23 @@ fn prepare_windows_portable(
         .to_path_buf();
     let staged_dir = work_dir.join("portable-payload");
     std::fs::create_dir(&staged_dir).map_err(|error| error.to_string())?;
-    let result = extract_windows_portable(&artifact, &staged_dir);
+    let architecture = UpdateTarget::from_rust_target("windows", std::env::consts::ARCH)
+        .map_err(|error| error.to_string())?
+        .architecture;
+    let result = extract_windows_portable(&artifact, &staged_dir, architecture);
     if let Err(error) = result {
         let _ = std::fs::remove_dir_all(&staged_dir);
         return Err(error);
     }
     let helper = work_dir.join("ZzClawTerm-update-helper.exe");
-    std::fs::copy(&executable, &helper).map_err(|error| error.to_string())?;
+    std::fs::copy(&executable, &helper)
+        .map_err(|error| format!("failed to prepare portable update helper: {error}"))?;
     Ok(PreparedUpdate::WindowsPortable {
         helper,
         staged_dir,
         target_dir,
         work_dir,
     })
-}
-
-#[cfg(windows)]
-fn extract_windows_portable(archive_path: &Path, destination: &Path) -> Result<(), String> {
-    let file = std::fs::File::open(archive_path).map_err(|error| error.to_string())?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
-    if archive.len() > MAX_PORTABLE_ENTRIES {
-        return Err("portable update archive contains too many entries".into());
-    }
-    let mut found = std::collections::BTreeSet::new();
-    let mut total = 0_u64;
-    for index in 0..archive.len() {
-        let entry = archive.by_index(index).map_err(|error| error.to_string())?;
-        let enclosed = entry
-            .enclosed_name()
-            .ok_or("portable update archive contains an unsafe path")?;
-        let mut components = enclosed.components();
-        if components.next() != Some(Component::Normal(PORTABLE_ROOT.as_ref())) {
-            return Err("portable update archive has an unexpected root directory".into());
-        }
-        let mut relative = PathBuf::new();
-        for component in components {
-            let Component::Normal(name) = component else {
-                return Err("portable update archive contains an unsafe path".into());
-            };
-            relative.push(name);
-        }
-        if relative.as_os_str().is_empty() || entry.is_dir() {
-            continue;
-        }
-        if entry.is_symlink() {
-            return Err("portable update archive contains a symbolic link".into());
-        }
-        if relative.starts_with("data") {
-            continue;
-        }
-        let Some(name) = relative.to_str() else {
-            return Err("portable update archive contains a non-Unicode filename".into());
-        };
-        let expected = PORTABLE_FILES
-            .iter()
-            .find(|expected| expected.eq_ignore_ascii_case(name))
-            .ok_or_else(|| {
-                format!("portable update archive contains an unexpected file: {name}")
-            })?;
-        if !found.insert(expected.to_ascii_lowercase()) {
-            return Err(format!(
-                "portable update archive contains a duplicate file: {name}"
-            ));
-        }
-        if name != *expected {
-            return Err(format!(
-                "portable update archive contains an unexpected file: {name}"
-            ));
-        }
-        total = total.saturating_add(entry.size());
-        if total > MAX_PORTABLE_PAYLOAD_BYTES {
-            return Err("portable update archive is too large".into());
-        }
-        let output = destination.join(name);
-        let mut file = std::fs::File::create(output).map_err(|error| error.to_string())?;
-        let copied = std::io::copy(&mut entry.take(MAX_PORTABLE_PAYLOAD_BYTES + 1), &mut file)
-            .map_err(|error| error.to_string())?;
-        if copied > MAX_PORTABLE_PAYLOAD_BYTES {
-            return Err("portable update archive entry is too large".into());
-        }
-        file.sync_all().map_err(|error| error.to_string())?;
-    }
-    for name in PORTABLE_FILES {
-        if !found.contains(&name.to_ascii_lowercase()) {
-            return Err(format!("portable update archive is missing {name}"));
-        }
-    }
-    Ok(())
 }
 
 /// Start a detached installer only after the existing application close guards pass.
@@ -376,7 +305,7 @@ fn launch_windows_helper(
         .stderr(Stdio::null())
         .spawn()
         .map(|_| ())
-        .map_err(|error| error.to_string())
+        .map_err(|error| format!("failed to launch update helper: {error}"))
 }
 
 pub fn run_update_helper_if_requested() -> bool {
@@ -408,9 +337,17 @@ pub fn run_update_helper_if_requested() -> bool {
             .unwrap_or("en")
             .to_string();
         let launch_target = target.clone();
+        let recovery_required = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_recovery = recovery_required.clone();
         let result = progress::run(&language, move |report| {
             if portable {
-                run_windows_portable_helper(&args, report)?;
+                run_windows_portable_helper(&args, report).map_err(|error| {
+                    worker_recovery.store(
+                        error.recovery_required,
+                        std::sync::atomic::Ordering::Release,
+                    );
+                    error.message
+                })?;
             } else {
                 run_windows_installed_helper(&args, report)?;
             }
@@ -433,9 +370,16 @@ pub fn run_update_helper_if_requested() -> bool {
             if let Some(target_dir) = target.parent() {
                 write_update_error(target_dir, error);
             }
-            if target.is_file() {
+            if target.is_file()
+                && !recovery_required.load(std::sync::atomic::Ordering::Acquire)
+                && (!portable
+                    || !recovery_work_dir
+                        .as_deref()
+                        .is_some_and(portable::recovery_pending))
+            {
                 let mut command = Command::new(target);
-                if let Some(work_dir) = recovery_work_dir {
+                // Portable failures retain diagnostics; incomplete rollback must never clean backups.
+                if let Some(work_dir) = recovery_work_dir.filter(|_| !portable) {
                     command.env(UPDATE_CLEANUP_ENV, work_dir);
                 }
                 let _ = command.spawn();
@@ -452,6 +396,10 @@ pub(crate) fn take_update_cleanup_path() -> Option<PathBuf> {
 }
 
 pub(crate) fn cleanup_update_work_dir(path: PathBuf) {
+    #[cfg(any(windows, test))]
+    if portable::recovery_pending(&path) {
+        return;
+    }
     let _ = std::fs::remove_dir_all(path);
 }
 
@@ -459,7 +407,7 @@ pub(crate) fn cleanup_update_work_dir(path: PathBuf) {
 fn run_windows_portable_helper(
     args: &[OsString],
     report: &mut dyn FnMut(progress::Stage),
-) -> Result<(), String> {
+) -> Result<(), PortableUpdateError> {
     if args.len() != 7 {
         return Err("invalid portable update helper arguments".into());
     }
@@ -470,7 +418,7 @@ fn run_windows_portable_helper(
     let staged_dir = PathBuf::from(&args[3]);
     let target_dir = PathBuf::from(&args[4]);
     let work_dir = PathBuf::from(&args[5]);
-    if !target_dir.join(PORTABLE_MARKER).is_file()
+    if !target_dir.join(&windows_portable_layout().marker).is_file()
         || staged_dir.parent() != Some(work_dir.as_path())
     {
         return Err("portable update paths failed validation".into());
@@ -478,7 +426,16 @@ fn run_windows_portable_helper(
     report(progress::Stage::Waiting);
     wait_for_process_exit(parent)?;
     report(progress::Stage::Replacing);
-    commit_portable_files(&staged_dir, &target_dir, &work_dir)
+    let architecture = UpdateTarget::from_rust_target("windows", std::env::consts::ARCH)
+        .map_err(|error| error.to_string())?
+        .architecture;
+    commit_portable_files_with(
+        &staged_dir,
+        &target_dir,
+        &work_dir,
+        architecture,
+        rename_with_retry,
+    )
 }
 
 #[cfg(windows)]
@@ -486,8 +443,6 @@ fn run_windows_installed_helper(
     args: &[OsString],
     report: &mut dyn FnMut(progress::Stage),
 ) -> Result<(), String> {
-    use std::os::windows::process::CommandExt as _;
-
     if args.len() != 7 {
         return Err("invalid installed update helper arguments".into());
     }
@@ -501,9 +456,7 @@ fn run_windows_installed_helper(
     let target_dir = target
         .parent()
         .ok_or("installed application directory is unavailable")?;
-    if target.file_name().and_then(|name| name.to_str()) != Some("ZzClawTerm.exe")
-        || !is_installed_copy(target_dir)
-    {
+    if !is_valid_installed_executable(&target) || !is_installed_copy(target_dir) {
         return Err("installed update target failed validation".into());
     }
     report(progress::Stage::Waiting);
@@ -513,6 +466,8 @@ fn run_windows_installed_helper(
     let backup = target_dir.with_extension(format!("previous-{}", zzclawterm_core::uuid()));
     copy_directory(target_dir, &backup)?;
     report(progress::Stage::Installing);
+    use std::os::windows::process::CommandExt as _;
+
     let status = Command::new(&installer)
         .args(installed_setup_arguments(target_dir))
         .creation_flags(0x08000000)
@@ -606,7 +561,9 @@ fn rollback_installed_directory(target: &Path, backup: &Path) -> Result<(), Stri
 
 #[cfg(windows)]
 fn wait_for_process_exit(process_id: u32) -> Result<(), String> {
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
     use windows_sys::Win32::System::Threading::{
         OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
     };
@@ -619,66 +576,15 @@ fn wait_for_process_exit(process_id: u32) -> Result<(), String> {
         return Err(format!("failed to wait for ZzClawTerm to exit: {error}"));
     }
     let result = unsafe { WaitForSingleObject(process, 120_000) };
+    let wait_error = (result == WAIT_FAILED).then(std::io::Error::last_os_error);
     unsafe { CloseHandle(process) };
-    if result != WAIT_OBJECT_0 {
-        return Err("timed out waiting for ZzClawTerm to exit".into());
+    match result {
+        WAIT_OBJECT_0 => Ok(()),
+        WAIT_TIMEOUT => Err("timed out waiting for ZzClawTerm to exit".into()),
+        _ => Err(format!(
+            "failed to wait for ZzClawTerm to exit ({result}): {wait_error:?}"
+        )),
     }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn commit_portable_files(staged: &Path, target: &Path, work: &Path) -> Result<(), String> {
-    commit_portable_files_with(staged, target, work, rename_with_retry)
-}
-
-#[cfg(windows)]
-fn commit_portable_files_with(
-    staged: &Path,
-    target: &Path,
-    work: &Path,
-    mut rename: impl FnMut(&Path, &Path) -> Result<(), String>,
-) -> Result<(), String> {
-    let backup = work.join("portable-backup");
-    std::fs::create_dir(&backup).map_err(|error| error.to_string())?;
-    let mut backed_up = Vec::new();
-    let mut installed = Vec::new();
-    let result = (|| {
-        for name in PORTABLE_FILES {
-            if !staged.join(name).is_file() {
-                return Err(format!("staged portable update is missing {name}"));
-            }
-            let current = target.join(name);
-            if current.exists() {
-                rename(&current, &backup.join(name))?;
-                backed_up.push(name);
-            }
-        }
-        for name in PORTABLE_FILES {
-            rename(&staged.join(name), &target.join(name))?;
-            installed.push(name);
-        }
-        Ok(())
-    })();
-    if let Err(error) = result {
-        for name in installed.into_iter().rev() {
-            let _ = std::fs::remove_file(target.join(name));
-        }
-        let mut rollback_errors = Vec::new();
-        for name in backed_up.into_iter().rev() {
-            if let Err(rollback) = rename(&backup.join(name), &target.join(name)) {
-                rollback_errors.push(format!("{name}: {rollback}"));
-            }
-        }
-        if rollback_errors.is_empty() {
-            return Err(error);
-        }
-        return Err(format!(
-            "{error}; rollback failed: {}",
-            rollback_errors.join(", ")
-        ));
-    }
-    let _ = std::fs::remove_dir_all(backup);
-    Ok(())
 }
 
 #[cfg(windows)]
@@ -731,13 +637,68 @@ mod tests {
     use zzclawterm_core::app_identity::AppFlavor;
 
     #[cfg(windows)]
-    use super::{
-        PORTABLE_FILES, PORTABLE_ROOT, commit_portable_files_with, extract_windows_portable,
-    };
+    #[test]
+    fn windows_helper_launch_reports_spawn_failure_with_system_error() {
+        use super::launch_windows_helper;
+
+        let root =
+            zzclawterm_core::test_support::TestTempDir::new("zzclawterm-update-helper-spawn-error");
+        std::fs::create_dir_all(&root).unwrap();
+        let error = launch_windows_helper(&root.join("missing.exe"), "/C", []).unwrap_err();
+        assert!(error.contains("failed to launch update helper"));
+        assert!(error.contains("os error 2"));
+    }
+
     #[cfg(windows)]
-    use std::io::Write as _;
+    #[test]
+    fn windows_helper_launch_adapter_starts_process_without_console() {
+        use super::launch_windows_helper;
+        use std::ffi::OsString;
+
+        let cmd = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/cmd.exe");
+        launch_windows_helper(&cmd, "/C", [OsString::from("exit"), OsString::from("0")]).unwrap();
+    }
+
     #[cfg(windows)]
-    use std::path::Path;
+    #[test]
+    fn windows_updater_waits_for_parent_process_exit() {
+        use super::wait_for_process_exit;
+        use std::os::windows::process::CommandExt as _;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("cmd.exe")
+            .args(["/D", "/C", "exit", "0"])
+            .creation_flags(0x08000000)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        wait_for_process_exit(child.id()).unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
+    #[test]
+    fn staged_updates_require_the_current_flavor_bundle_and_all_helpers() {
+        let stage = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-update-test");
+        for flavor in [AppFlavor::Stable, AppFlavor::Preview] {
+            assert!(staged_macos_bundle(&stage, flavor).is_err());
+            let bundle = stage.join(flavor.macos_bundle_name());
+            let binaries = bundle.join("Contents/MacOS");
+            std::fs::create_dir_all(&binaries).unwrap();
+            for name in [
+                "ZzClawTerm",
+                "zzclawterm-rdp-helper",
+                "zzclawterm-vnc-helper",
+            ] {
+                std::fs::write(binaries.join(name), b"test").unwrap();
+            }
+            assert!(staged_macos_bundle(&stage, flavor).is_err());
+            std::fs::write(binaries.join("zzclawterm-mcp"), b"test").unwrap();
+            assert_eq!(staged_macos_bundle(&stage, flavor).unwrap(), bundle);
+        }
+    }
 
     #[test]
     fn installed_update_uses_silent_inno_setup_arguments() {
@@ -779,196 +740,27 @@ mod tests {
     }
 
     #[cfg(windows)]
-    fn write_portable_zip(path: &Path, entries: &[(&str, &[u8], Option<u32>)]) {
-        let file = std::fs::File::create(path).unwrap();
-        let mut archive = zip::ZipWriter::new(file);
-        for (name, contents, permissions) in entries {
-            let mut options = zip::write::SimpleFileOptions::default();
-            if let Some(permissions) = permissions {
-                options = options.unix_permissions(*permissions);
-            }
-            archive.start_file(*name, options).unwrap();
-            archive.write_all(contents).unwrap();
-        }
-        archive.finish().unwrap();
-    }
-
-    #[cfg(windows)]
-    fn portable_entries() -> Vec<(String, Vec<u8>, Option<u32>)> {
-        PORTABLE_FILES
-            .iter()
-            .map(|name| (format!("{PORTABLE_ROOT}/{name}"), b"new".to_vec(), None))
-            .collect()
-    }
-
-    #[cfg(windows)]
-    fn write_portable_files(directory: &Path, contents: &[u8]) {
-        std::fs::create_dir_all(directory).unwrap();
-        for name in PORTABLE_FILES {
-            std::fs::write(directory.join(name), contents).unwrap();
-        }
-    }
-
     #[test]
-    fn staged_updates_require_the_current_flavor_bundle_and_all_helpers() {
-        let stage = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-update-test");
-        for flavor in [AppFlavor::Stable, AppFlavor::Preview] {
-            assert!(staged_macos_bundle(&stage, flavor).is_err());
-            let bundle = stage.join(flavor.macos_bundle_name());
-            let binaries = bundle.join("Contents/MacOS");
-            std::fs::create_dir_all(&binaries).unwrap();
-            for name in [
-                "ZzClawTerm",
-                "zzclawterm-rdp-helper",
-                "zzclawterm-vnc-helper",
-            ] {
-                std::fs::write(binaries.join(name), b"test").unwrap();
-            }
-            assert!(staged_macos_bundle(&stage, flavor).is_err());
-            std::fs::write(binaries.join("zzclawterm-mcp"), b"test").unwrap();
-            assert_eq!(staged_macos_bundle(&stage, flavor).unwrap(), bundle);
-        }
-    }
+    fn installed_executable_name_is_case_insensitive() {
+        use super::is_valid_installed_executable;
+        use std::path::Path;
 
-    #[cfg(windows)]
-    #[test]
-    fn portable_archive_extracts_only_the_fixed_payload_and_ignores_data() {
-        let root =
-            zzclawterm_core::test_support::TestTempDir::new("zzclawterm-portable-update-extract");
-        let archive_path = root.join("portable.zip");
-        let destination = root.join("staged");
-        std::fs::create_dir_all(&destination).unwrap();
-        let mut entries = portable_entries();
-        entries.push((
-            format!("{PORTABLE_ROOT}/data/settings.json"),
-            b"must-not-extract".to_vec(),
-            None,
-        ));
-        let borrowed = entries
-            .iter()
-            .map(|(name, contents, permissions)| (name.as_str(), contents.as_slice(), *permissions))
-            .collect::<Vec<_>>();
-        write_portable_zip(&archive_path, &borrowed);
-
-        extract_windows_portable(&archive_path, &destination).unwrap();
-        for name in PORTABLE_FILES {
-            assert_eq!(std::fs::read(destination.join(name)).unwrap(), b"new");
-        }
-        assert!(!destination.join("data").exists());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn portable_archive_rejects_unsafe_duplicate_missing_and_symlink_entries() {
-        for (label, mutate) in [
-            ("unsafe", 0_u8),
-            ("duplicate", 1_u8),
-            ("missing", 2_u8),
-            ("symlink", 3_u8),
+        for name in [
+            "ZzClawTerm.exe",
+            "zzclawterm.exe",
+            "ZZCLAWTERM.EXE",
+            "ZzClawTerm.ExE",
         ] {
-            let root = zzclawterm_core::test_support::TestTempDir::new(&format!(
-                "zzclawterm-portable-update-{label}"
-            ));
-            let archive_path = root.join("portable.zip");
-            let destination = root.join("staged");
-            std::fs::create_dir_all(&destination).unwrap();
-            let mut entries = portable_entries();
-            match mutate {
-                0 => entries.push((format!("{PORTABLE_ROOT}/../outside"), b"bad".to_vec(), None)),
-                1 => entries.push((
-                    format!("{PORTABLE_ROOT}/ZZCLAWTERM.EXE"),
-                    b"duplicate".to_vec(),
-                    None,
-                )),
-                2 => {
-                    entries.retain(|(name, _, _)| !name.ends_with("VERSION"));
-                }
-                3 => entries.push((
-                    format!("{PORTABLE_ROOT}/link"),
-                    b"ZzClawTerm.exe".to_vec(),
-                    Some(0o120777),
-                )),
-                _ => unreachable!(),
-            }
-            let borrowed = entries
-                .iter()
-                .map(|(name, contents, permissions)| {
-                    (name.as_str(), contents.as_slice(), *permissions)
-                })
-                .collect::<Vec<_>>();
-            write_portable_zip(&archive_path, &borrowed);
-            assert!(
-                extract_windows_portable(&archive_path, &destination).is_err(),
-                "{label} archive must be rejected"
-            );
+            assert!(is_valid_installed_executable(Path::new(name)));
         }
-    }
 
-    #[cfg(windows)]
-    #[test]
-    fn portable_commit_rolls_back_every_backup_and_install_failure() {
-        for fail_at in 0..(PORTABLE_FILES.len() * 2) {
-            let root = zzclawterm_core::test_support::TestTempDir::new(&format!(
-                "zzclawterm-portable-update-rollback-{fail_at}"
-            ));
-            let staged = root.join("staged");
-            let target = root.join("target");
-            let work = root.join("work");
-            write_portable_files(&staged, b"new");
-            write_portable_files(&target, b"old");
-            std::fs::create_dir_all(target.join("data")).unwrap();
-            std::fs::write(target.join("data/user.db"), b"user-data").unwrap();
-            std::fs::create_dir(&work).unwrap();
-            let mut call = 0_usize;
-            let result = commit_portable_files_with(&staged, &target, &work, |from, to| {
-                let current = call;
-                call += 1;
-                if current == fail_at {
-                    return Err(format!("injected failure at {fail_at}"));
-                }
-                std::fs::rename(from, to).map_err(|error| error.to_string())
-            });
-            assert!(result.is_err(), "failure {fail_at} must be reported");
-            for name in PORTABLE_FILES {
-                assert_eq!(
-                    std::fs::read(target.join(name)).unwrap(),
-                    b"old",
-                    "failure {fail_at} did not restore {name}"
-                );
-            }
-            assert_eq!(
-                std::fs::read(target.join("data/user.db")).unwrap(),
-                b"user-data"
-            );
+        for name in [
+            "ZzClawTerm-old.exe",
+            "ZzClawTerm.exe.bak",
+            "Uninstall.exe",
+            "other.exe",
+        ] {
+            assert!(!is_valid_installed_executable(Path::new(name)));
         }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn portable_commit_replaces_all_program_files_and_preserves_data() {
-        let root =
-            zzclawterm_core::test_support::TestTempDir::new("zzclawterm-portable-update-commit");
-        let staged = root.join("staged");
-        let target = root.join("target");
-        let work = root.join("work");
-        write_portable_files(&staged, b"new");
-        write_portable_files(&target, b"old");
-        std::fs::create_dir_all(target.join("data")).unwrap();
-        std::fs::write(target.join("data/user.db"), b"user-data").unwrap();
-        std::fs::create_dir(&work).unwrap();
-
-        commit_portable_files_with(&staged, &target, &work, |from, to| {
-            std::fs::rename(from, to).map_err(|error| error.to_string())
-        })
-        .unwrap();
-
-        for name in PORTABLE_FILES {
-            assert_eq!(std::fs::read(target.join(name)).unwrap(), b"new");
-        }
-        assert_eq!(
-            std::fs::read(target.join("data/user.db")).unwrap(),
-            b"user-data"
-        );
-        assert!(!work.join("portable-backup").exists());
     }
 }

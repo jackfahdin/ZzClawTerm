@@ -5,9 +5,8 @@ use futures::channel::mpsc::UnboundedReceiver;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
-use zzclawterm_transport::{
-    RemoteGpuOverview, RemoteGpuProcess, RemoteNpuOverview, RemoteNpuProcess,
-};
+use zzclawterm_remote_ops::ascend_npu::{RemoteNpuOverview, RemoteNpuProcess};
+use zzclawterm_remote_ops::gpu::{RemoteGpuOverview, RemoteGpuProcess};
 
 /// How a GPU/NPU overview exposes its process list for filtering and sorting.
 ///

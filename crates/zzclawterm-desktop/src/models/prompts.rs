@@ -521,7 +521,7 @@ pub(crate) enum KeywordHighlightPathPromptResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnectionImportSource {
-    NyatermBackup,
+    ZzClawTermBackup,
     Xshell,
     MobaXterm,
     WindTerm,
@@ -530,12 +530,12 @@ pub(crate) enum ConnectionImportSource {
     Termius,
     SshConfig,
     Electerm,
-    NyatermJson,
+    ZzClawTermJson,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QuickCommandImportPathPromptKind {
-    NyatermJson,
+    ZzClawTermJson,
     WindTermQuickbar,
     XshellXts,
 }

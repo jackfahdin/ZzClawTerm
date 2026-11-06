@@ -1,16 +1,5 @@
-use std::sync::Arc;
-
-use rust_i18n::t;
-
-use gpui::{
-    Context, FontWeight, IntoElement, MouseButton, SharedString, UniformListScrollHandle, div,
-    prelude::*, px, rgb, rgba, uniform_list,
-};
-use zzclawterm_core::truncate_preview;
-use zzclawterm_transport::DockerContainer;
-use zzclawterm_ui::ZzClawScrollable;
-
 use super::super::panels::RemoteMonitorPanel;
+use super::{DockerRenderContext, docker_menu_layer};
 use crate::features::{
     formatting::compact_id, formatting::docker_state_color, formatting::docker_state_rank,
     shell::gpui_code_font_family,
@@ -18,8 +7,15 @@ use crate::features::{
 use crate::models::{DockerConfirmAction, DockerConfirmState};
 use crate::theme::ThemePalette;
 use crate::widgets::{empty_panel, status_pill, svg_icon_button};
-
-use super::{DockerRenderContext, docker_menu_layer};
+use gpui::{
+    Context, FontWeight, IntoElement, MouseButton, SharedString, UniformListScrollHandle, div,
+    prelude::*, px, rgb, rgba, uniform_list,
+};
+use rust_i18n::t;
+use std::sync::Arc;
+use zzclawterm_core::truncate_preview;
+use zzclawterm_remote_ops::docker::DockerContainer;
+use zzclawterm_ui::ZzClawScrollable;
 
 pub(in crate::features::pages::remote) struct DockerContainersPanelState {
     pub has_snapshot: bool,
@@ -231,10 +227,10 @@ fn docker_container_row(
                         .child(div().flex_none().child(short.clone())),
                 ),
         )
-        .on_click(cx.listener(move |panel, _, _window, cx| {
+        .on_click(cx.listener(move |panel, _, window, cx| {
             panel.with_app(cx, |this, cx| {
                 this.remote_ops.close_docker_container_menu();
-                this.load_docker_details(details_id.clone(), cx);
+                this.open_docker_details(details_id.clone(), window, cx);
             });
         }))
         .child(

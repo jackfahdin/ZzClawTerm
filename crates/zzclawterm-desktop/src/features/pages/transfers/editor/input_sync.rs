@@ -1,11 +1,8 @@
-use std::path::PathBuf;
-
-use gpui::Context;
-
+use super::helpers::{external_editor_watch_key, upload_external_editor_file};
 use crate::features::ZzClawTermApp;
 use crate::models::TransferExternalSyncPromptState;
-
-use super::helpers::{external_editor_watch_key, upload_external_editor_file};
+use gpui::Context;
+use std::path::PathBuf;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn upload_external_editor_sync(
@@ -70,7 +67,7 @@ impl ZzClawTermApp {
                 upload_external_editor_file(
                     service,
                     &job_id,
-                    zzclawterm_transport::RemoteFilePath {
+                    zzclawterm_files::sftp::RemoteFilePath {
                         display_path: remote_path,
                         raw_path_token,
                     },

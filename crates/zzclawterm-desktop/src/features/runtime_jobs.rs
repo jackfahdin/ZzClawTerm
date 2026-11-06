@@ -1,18 +1,18 @@
-use std::sync::Arc;
-use std::time::Instant;
-
-use futures::channel::mpsc::UnboundedSender;
-
-use zzclawterm_core::{AiCommandCard, AiMode, AiModelDiscovery, CommandHistoryEntry};
-use zzclawterm_transport::{
-    DockerComposeProject, DockerComposeService, DockerContainerDetails, RemoteDockerOverview,
-    RemoteGpuOverview, RemoteNpuOverview, RemoteProcess, RemoteStats, SessionInfo, SessionKind,
-    SessionManager, SshTunnelInfo,
-};
-
 use crate::app_shell::session_hub::ssh_connections::SshConnectionLease;
 use crate::blocking_jobs::{BlockingJobScheduler, JobRejected, JobTask};
 use crate::models::SessionLaunchConfig;
+use futures::channel::mpsc::UnboundedSender;
+use std::sync::Arc;
+use std::time::Instant;
+use zzclawterm_core::{AiCommandCard, AiMode, AiModelDiscovery, CommandHistoryEntry};
+use zzclawterm_remote_ops::ascend_npu::RemoteNpuOverview;
+use zzclawterm_remote_ops::docker::{
+    DockerComposeProject, DockerComposeService, DockerContainerDetails, RemoteDockerOverview,
+};
+use zzclawterm_remote_ops::gpu::RemoteGpuOverview;
+use zzclawterm_remote_ops::remote_process::RemoteProcess;
+use zzclawterm_remote_ops::stats::RemoteStats;
+use zzclawterm_transport::{SessionInfo, SessionKind, SessionManager, SshTunnelInfo};
 
 pub(in crate::features) async fn await_blocking_job<T>(
     task: Result<JobTask<T>, JobRejected>,
@@ -153,6 +153,7 @@ pub(in crate::features) struct ProcessJobResult {
 
 #[derive(Debug)]
 pub(in crate::features) struct StatsJobResult {
+    pub(in crate::features) users_revision: u64,
     pub(in crate::features) job_id: u64,
     pub(in crate::features) session_id: String,
     pub(in crate::features) result: Result<RemoteStats, String>,
@@ -225,6 +226,10 @@ pub(in crate::features) enum AiChatWorkerEvent {
         job_id: u64,
         session_id: String,
     },
+    AgentProtocolRepair {
+        job_id: u64,
+        session_id: String,
+    },
     Finished(Box<AiChatJobResult>),
 }
 
@@ -233,7 +238,8 @@ impl AiChatWorkerEvent {
         match self {
             Self::Delta { session_id, .. }
             | Self::AgentToolCallDelta { session_id, .. }
-            | Self::AgentProtocolFallback { session_id, .. } => session_id,
+            | Self::AgentProtocolFallback { session_id, .. }
+            | Self::AgentProtocolRepair { session_id, .. } => session_id,
             Self::Finished(result) => &result.session_id,
         }
     }
@@ -241,6 +247,7 @@ impl AiChatWorkerEvent {
 
 #[derive(Debug)]
 pub(in crate::features) struct AiChatJobOutput {
+    pub metadata: Option<zzclawterm_core::ai::completion::AiResponseMetadata>,
     pub(in crate::features) native_call: Option<zzclawterm_core::ai::harness::AgentToolCall>,
     pub(in crate::features) mode: AiMode,
     pub(in crate::features) text: String,
@@ -338,9 +345,9 @@ pub(in crate::features) enum DockerJobOutput {
 
 #[derive(Debug)]
 pub(in crate::features) enum DockerResource {
-    Images(Vec<zzclawterm_transport::DockerImage>),
-    Volumes(Vec<zzclawterm_transport::DockerVolume>),
-    Networks(Vec<zzclawterm_transport::DockerNetwork>),
+    Images(Vec<zzclawterm_remote_ops::docker::DockerImage>),
+    Volumes(Vec<zzclawterm_remote_ops::docker::DockerVolume>),
+    Networks(Vec<zzclawterm_remote_ops::docker::DockerNetwork>),
     Compose(Vec<DockerComposeProject>),
 }
 
@@ -352,17 +359,15 @@ pub(in crate::features) enum ActivitySide {
 
 #[cfg(test)]
 mod session_start_tests {
+    use super::{SessionStartResult, SessionStartSuccess};
+    use crate::app_shell::session_hub::ssh_connections::SshConnectionPool;
+    use futures::channel::mpsc::unbounded;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
     use std::time::Instant;
-
-    use futures::channel::mpsc::unbounded;
     use zzclawterm_transport::{LocalSessionConfig, SessionInfo, SessionKind, SessionManager};
-
-    use super::{SessionStartResult, SessionStartSuccess};
-    use crate::app_shell::session_hub::ssh_connections::SshConnectionPool;
 
     fn live_channel(manager: &SessionManager) -> SessionInfo {
         manager

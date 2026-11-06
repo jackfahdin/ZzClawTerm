@@ -1,13 +1,10 @@
-use rust_i18n::t;
-
-use gpui::Context;
-use zzclawterm_transport::SftpFileEntry;
-use zzclawterm_ui::ZzClawMenuItem;
-
+use super::TransferPathPart;
 use crate::features::ZzClawTermApp;
 use crate::models::{TransferBrowserContextTarget, TransferPathPromptKind};
-
-use super::TransferPathPart;
+use gpui::Context;
+use rust_i18n::t;
+use zzclawterm_files::sftp::SftpFileEntry;
+use zzclawterm_ui::ZzClawMenuItem;
 
 impl ZzClawTermApp {
     fn transfer_context_action_bar(
@@ -110,16 +107,16 @@ impl ZzClawTermApp {
         );
         let target_directory = self.transfer_browser_operation_target_directory();
         let local_backend = self.session.active_file_browser_backend()
-            == Some(zzclawterm_transport::FileBrowserBackendKind::Local);
+            == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Local);
         let mut items = Vec::with_capacity(policy.len() + 2);
         if !local_backend {
             items.push(self.transfer_context_action_bar(false, cx));
             items.push(ZzClawMenuItem::separator());
         }
         let backend = if local_backend {
-            zzclawterm_transport::FileBrowserBackendKind::Local
+            zzclawterm_files::file_browser::FileBrowserBackendKind::Local
         } else {
-            zzclawterm_transport::FileBrowserBackendKind::Remote
+            zzclawterm_files::file_browser::FileBrowserBackendKind::Remote
         };
         for node in transfer_visible_context_menu_nodes(policy, backend) {
             let item = match node {
@@ -252,7 +249,7 @@ impl ZzClawTermApp {
 
         let policy = transfer_parent_directory_context_menu_policy();
         let remote_backend = self.session.active_file_browser_backend()
-            == Some(zzclawterm_transport::FileBrowserBackendKind::Remote);
+            == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Remote);
         let mut items = Vec::with_capacity(policy.len() + 2);
         if remote_backend {
             items.push(self.transfer_context_action_bar(false, cx));
@@ -309,16 +306,16 @@ impl ZzClawTermApp {
             terminal_available,
         });
         let local_backend = self.session.active_file_browser_backend()
-            == Some(zzclawterm_transport::FileBrowserBackendKind::Local);
+            == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Local);
         let entry_backend = if local_backend {
-            zzclawterm_transport::FileBrowserBackendKind::Local
+            zzclawterm_files::file_browser::FileBrowserBackendKind::Local
         } else {
-            zzclawterm_transport::FileBrowserBackendKind::Remote
+            zzclawterm_files::file_browser::FileBrowserBackendKind::Remote
         };
         let target_directory = if entry.is_directory() {
             entry.path.clone()
         } else {
-            zzclawterm_transport::file_browser_parent(entry_backend, &entry.path)
+            zzclawterm_files::file_browser::file_browser_parent(entry_backend, &entry.path)
         };
         let mut items = Vec::with_capacity(policy.len() + 2);
         if !local_backend {
@@ -327,9 +324,9 @@ impl ZzClawTermApp {
         }
 
         let backend = if local_backend {
-            zzclawterm_transport::FileBrowserBackendKind::Local
+            zzclawterm_files::file_browser::FileBrowserBackendKind::Local
         } else {
-            zzclawterm_transport::FileBrowserBackendKind::Remote
+            zzclawterm_files::file_browser::FileBrowserBackendKind::Remote
         };
         for node in transfer_visible_context_menu_nodes(policy, backend) {
             let item = match node {

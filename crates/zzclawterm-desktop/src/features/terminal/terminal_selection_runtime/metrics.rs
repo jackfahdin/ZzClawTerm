@@ -24,7 +24,9 @@ use crate::features::terminal::{
 };
 use crate::features::{FontResolutionSource, FontResolutionStatus, normalize_font_family};
 
-fn terminal_font_with_features(
+/// Terminal font carrying the font features the grid disables, so text shaped
+/// against it advances on the grid's cells instead of using ligatures.
+pub(in crate::features) fn terminal_font_with_features(
     descriptor: &ResolvedAppearanceFont,
     weight: FontWeight,
 ) -> gpui::Font {
@@ -403,6 +405,14 @@ impl ZzClawTermApp {
         .total_width()
     }
 
+    pub(in crate::features) fn terminal_wrap_marker_width_px(&self) -> f32 {
+        if self.settings.summary().terminal_show_wrap_markers {
+            self.terminal_cell_size().0
+        } else {
+            0.0
+        }
+    }
+
     pub(in crate::features) fn active_terminal_grid_size(&self) -> (usize, usize) {
         self.terminal_grid_size_for_session(self.session.active_id())
     }
@@ -472,22 +482,6 @@ impl ZzClawTermApp {
         self.terminal.view.screen.scrollback_len()
     }
 
-    pub(in crate::features) fn terminal_snapshot_row_for_session_viewport_row(
-        &self,
-        session_id: Option<&str>,
-        snapshot: &zzclawterm_terminal::TerminalSnapshot,
-        display_offset: usize,
-        viewport_row: usize,
-    ) -> Option<usize> {
-        terminal_snapshot_row_for_viewport_row(
-            snapshot,
-            display_offset,
-            self.terminal_viewport_rows_for_session(session_id),
-            self.terminal_scrollback_len_for_session(session_id),
-            viewport_row,
-        )
-    }
-
     pub(in crate::features) fn point_to_terminal_cell(
         &self,
         position: Point<Pixels>,
@@ -542,6 +536,9 @@ impl ZzClawTermApp {
                 snapshot_rows: painted.snapshot_rows,
                 viewport_rows: painted.viewport_rows,
                 visual_y_offset: painted.visual_y_offset,
+                unwrapped: session_id
+                    .and_then(|id| self.terminal.view.surfaces.get(id))
+                    .and_then(|surface| surface.read(cx).painted_unwrapped_layout()),
             });
         }
         let target_display_offset = self.terminal_display_offset_for_session(session_id);
@@ -591,6 +588,7 @@ impl ZzClawTermApp {
             snapshot_rows: snapshot.row_count(),
             viewport_rows,
             visual_y_offset,
+            unwrapped: None,
         })
     }
 
@@ -661,6 +659,8 @@ pub(in crate::features) struct TerminalHitTestGeometry {
     pub(in crate::features) snapshot_rows: usize,
     pub(in crate::features) viewport_rows: usize,
     pub(in crate::features) visual_y_offset: f32,
+    pub(in crate::features) unwrapped:
+        Option<Arc<zzclawterm_terminal_gpui::unwrapped::TerminalUnwrappedLayout>>,
 }
 
 fn terminal_hit_test_visual_y_offset_px(geometry: TerminalVisualScrollGeometry) -> f32 {
@@ -680,6 +680,14 @@ pub(in crate::features) fn terminal_cell_for_visual_geometry(
     let snapshot_row = ((local_y - geometry.visual_y_offset) / cell_h)
         .floor()
         .max(0.0) as usize;
+    if let Some(layout) = geometry.unwrapped.as_ref() {
+        let (source_row, source_col) =
+            layout.source_position(snapshot_row, local_x.max(0.0) / cell_w);
+        return TerminalCellPos::new(
+            source_row.saturating_sub(geometry.viewport_anchor_row),
+            source_col,
+        );
+    }
     let row = snapshot_row.saturating_sub(geometry.viewport_anchor_row);
     let col = (local_x / cell_w).floor().max(0.0) as usize;
     TerminalCellPos::new(
@@ -697,10 +705,17 @@ pub(super) fn terminal_cell_side_for_visual_geometry(
     let cell_w = geometry.cell_w.max(1.0);
     let local_x =
         f32::from(position.x - geometry.bounds.origin.x) - geometry.padding_left - geometry.gutter;
+    let local_x = local_x
+        + geometry
+            .unwrapped
+            .as_ref()
+            .map_or(0.0, |layout| layout.horizontal_offset * cell_w);
     if local_x <= 0.0 || geometry.cols == 0 {
         return TerminalCellSide::Left;
     }
-    if local_x >= geometry.cols as f32 * cell_w || local_x % cell_w >= cell_w * 0.5 {
+    if (geometry.unwrapped.is_none() && local_x >= geometry.cols as f32 * cell_w)
+        || local_x % cell_w >= cell_w * 0.5
+    {
         TerminalCellSide::Right
     } else {
         TerminalCellSide::Left
@@ -713,9 +728,19 @@ pub(in crate::features) fn terminal_snapshot_row_for_visual_geometry(
 ) -> usize {
     let cell_h = geometry.cell_h.max(1.0);
     let local_y = f32::from(position.y - geometry.bounds.origin.y) - geometry.padding_top;
-    ((local_y - geometry.visual_y_offset) / cell_h)
+    let row = ((local_y - geometry.visual_y_offset) / cell_h)
         .floor()
-        .max(0.0) as usize
+        .max(0.0) as usize;
+    if let Some(layout) = geometry.unwrapped.as_ref() {
+        let x = (f32::from(position.x - geometry.bounds.origin.x)
+            - geometry.padding_left
+            - geometry.gutter)
+            .max(0.0)
+            / geometry.cell_w.max(1.0);
+        layout.source_position(row, x).0
+    } else {
+        row
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -790,17 +815,26 @@ impl ZzClawTermApp {
 pub(in crate::features) fn terminal_line_number_digits(
     snapshot: &zzclawterm_terminal::TerminalSnapshot,
 ) -> usize {
-    let visible_end = snapshot
+    // `total_rows - display_offset` is the standard upper bound assuming
+    // consecutive numbering from the top. However line numbers can exceed
+    // that when `LineNumbers` retains its origin across reflows, local
+    // clears, and scrollback prunes — e.g. a 2-row viewport with scrollback
+    // limited to 2 can still carry row numbers well above 4 when older
+    // wrapped lines were discarded from scrollback. Use whichever bound is
+    // larger to keep the gutter wide enough.
+    let from_rows = snapshot
         .total_rows
         .saturating_sub(snapshot.display_offset)
         .max(1);
-    terminal_line_number_digits_for_end(visible_end)
+    let from_display_line_number = snapshot.max_display_line_number().unwrap_or(1);
+    terminal_line_number_digits_for_end(from_rows.max(from_display_line_number))
 }
 
 fn terminal_line_number_digits_for_end(visible_end: usize) -> usize {
     visible_end.max(1).to_string().len()
 }
 
+#[cfg(test)]
 pub(in crate::features) fn terminal_snapshot_row_for_viewport_row(
     snapshot: &zzclawterm_terminal::TerminalSnapshot,
     display_offset: usize,
@@ -828,7 +862,6 @@ mod tests {
 
     use gpui::{Point, Size, px};
     use zzclawterm_terminal::TerminalScreen;
-    use zzclawterm_terminal::selection::TerminalCellSide;
 
     use crate::features::terminal::terminal_surface::terminal_absolute_line_for_snapshot_row;
     use crate::features::terminal::{ResolvedAppearanceFont, TerminalFontMeasurement};
@@ -844,9 +877,11 @@ mod tests {
 
     #[test]
     fn half_cell_hit_testing_uses_painted_origin_and_clamps_grid_edges() {
+        use zzclawterm_terminal::selection::TerminalCellSide;
         let snapshot = Arc::new(TerminalScreen::new(4, 3).snapshot());
         for scale in [1.0, 1.25, 1.5] {
             let geometry = TerminalHitTestGeometry {
+                unwrapped: None,
                 bounds: gpui::bounds(
                     Point {
                         x: px(17.0),
@@ -1017,12 +1052,131 @@ mod tests {
     }
 
     #[test]
+    fn gutter_line_number_digits_match_actual_max_display_line_number() {
+        let mut screen = zzclawterm_terminal::TerminalScreen::new(80, 24);
+        screen.set_scrollback_limit(500_000);
+        for _ in 0..20_000 {
+            screen.advance(b"x\r\n");
+        }
+        // Live viewport snapshot at offset 0
+        let snapshot = screen.snapshot();
+        let max_ln = snapshot
+            .rows()
+            .iter()
+            .filter_map(|r| r.display_line_number)
+            .max()
+            .unwrap_or(1);
+        let digits = super::terminal_line_number_digits(&snapshot);
+        let actual_digits = max_ln.to_string().len();
+        eprintln!(
+            "offset=0: max_ln={}, total_rows={}, digits={}, actual_digits={}",
+            max_ln, snapshot.total_rows, digits, actual_digits
+        );
+        assert!(
+            digits >= actual_digits,
+            "offset=0: computed digits {} should be >= actual {}",
+            digits,
+            actual_digits
+        );
+
+        // Now test a snapshot scrolled back into history.
+        let offset = 2_000;
+        let scrolled = screen.viewport_snapshot_with_window(offset, 32, 32);
+        let scrolled_max = scrolled
+            .rows()
+            .iter()
+            .filter_map(|r| r.display_line_number)
+            .max()
+            .unwrap_or(1);
+        let scrolled_min = scrolled
+            .rows()
+            .iter()
+            .filter_map(|r| r.display_line_number)
+            .min()
+            .unwrap_or(1);
+        let scrolled_digits = super::terminal_line_number_digits(&scrolled);
+        let scrolled_actual_digits = scrolled_max.to_string().len();
+        eprintln!(
+            "offset={}: display_range=[{}, {}], total_rows={}, display_offset_in_snap={}, digits={}, actual_digits={}",
+            offset,
+            scrolled_min,
+            scrolled_max,
+            scrolled.total_rows,
+            scrolled.display_offset,
+            scrolled_digits,
+            scrolled_actual_digits
+        );
+        assert!(
+            scrolled_digits >= scrolled_actual_digits,
+            "offset={}: computed digits {} should be >= actual {}",
+            offset,
+            scrolled_digits,
+            scrolled_actual_digits
+        );
+
+        // Test after clear_except_input - line numbers should keep their origin
+        screen.clear_except_input();
+        for _ in 0..10 {
+            screen.advance(b"x\r\n");
+        }
+        let after_clear = screen.snapshot();
+        let clear_max = after_clear
+            .rows()
+            .iter()
+            .filter_map(|r| r.display_line_number)
+            .max()
+            .unwrap_or(1);
+        let clear_min = after_clear
+            .rows()
+            .iter()
+            .filter_map(|r| r.display_line_number)
+            .min()
+            .unwrap_or(1);
+        let clear_digits = super::terminal_line_number_digits(&after_clear);
+        let clear_actual_digits = clear_max.to_string().len();
+        eprintln!(
+            "after clear: display_range=[{}, {}], total_rows={}, digits={}, actual_digits={}",
+            clear_min, clear_max, after_clear.total_rows, clear_digits, clear_actual_digits
+        );
+        assert!(
+            clear_digits >= clear_actual_digits,
+            "after clear: computed digits {} should be >= actual {}",
+            clear_digits,
+            clear_actual_digits
+        );
+
+        // Reproduce the scenario from logical_line_numbers_keep_local_clear_origin_when_wrapped_history_is_pruned:
+        // display_line_number can exceed total_rows after wrap + scrollback prune + clear
+        let mut small = zzclawterm_terminal::TerminalScreen::new(4, 2);
+        small.set_scrollback_limit(2);
+        small.clear_except_input();
+        for _ in 0..10 {
+            small.advance(b"abcdefghijkl\r\n");
+        }
+        let snap = small.snapshot();
+        let ln = snap.row(1).and_then(|r| r.display_line_number).unwrap_or(0);
+        let snap_digits = super::terminal_line_number_digits(&snap);
+        let snap_actual = ln.to_string().len();
+        eprintln!(
+            "wrap+prune: row[1].display_line_number={}, total_rows={}, digits={}, actual_digits={}",
+            ln, snap.total_rows, snap_digits, snap_actual
+        );
+        assert!(
+            snap_digits >= snap_actual,
+            "wrap+prune: computed digits {} should be >= actual {}",
+            snap_digits,
+            snap_actual
+        );
+    }
+
+    #[test]
     fn clear_all_hit_testing_maps_the_top_prompt_to_its_host_row() {
         let mut terminal = TerminalScreen::new(40, 12);
         terminal.advance(b"\x1b[12;1Hroot# draft");
         terminal.clear_except_input();
         let snapshot = std::sync::Arc::new(terminal.snapshot());
         let geometry = TerminalHitTestGeometry {
+            unwrapped: None,
             bounds: gpui::bounds(
                 Point {
                     x: px(0.0),
@@ -1064,6 +1218,7 @@ mod tests {
     #[test]
     fn terminal_visual_hit_test_maps_through_snapshot_anchor() {
         let geometry = TerminalHitTestGeometry {
+            unwrapped: None,
             bounds: gpui::bounds(
                 Point {
                     x: px(10.0),
@@ -1103,6 +1258,7 @@ mod tests {
     #[test]
     fn terminal_visual_hit_test_maps_address_from_the_painted_grid_origin() {
         let geometry = TerminalHitTestGeometry {
+            unwrapped: None,
             bounds: gpui::bounds(
                 Point {
                     x: px(103.0),
@@ -1150,6 +1306,7 @@ mod tests {
     #[test]
     fn terminal_visual_hit_test_follows_fractional_visual_offset() {
         let geometry = TerminalHitTestGeometry {
+            unwrapped: None,
             bounds: gpui::bounds(
                 Point {
                     x: px(0.0),
@@ -1192,6 +1349,7 @@ mod tests {
         screen.advance_decoded_text(&terminal_output_lines(180));
         let snapshot = Arc::new(screen.viewport_snapshot(100));
         let geometry = TerminalHitTestGeometry {
+            unwrapped: None,
             bounds: gpui::bounds(
                 Point {
                     x: px(0.0),
@@ -1238,6 +1396,7 @@ mod tests {
     #[test]
     fn terminal_hit_test_uses_painted_geometry_when_model_offset_advances() {
         let mut geometry = TerminalHitTestGeometry {
+            unwrapped: None,
             bounds: gpui::bounds(
                 Point {
                     x: px(0.0),
@@ -1291,6 +1450,7 @@ mod tests {
             cell_height: cell_h,
         });
         let geometry = TerminalHitTestGeometry {
+            unwrapped: None,
             bounds: gpui::bounds(
                 Point {
                     x: px(0.0),
@@ -1338,6 +1498,7 @@ mod tests {
             let snapshot_row = viewport_anchor_row + viewport_row;
             let visual_y_offset = -3.25 * cell_h;
             let geometry = TerminalHitTestGeometry {
+                unwrapped: None,
                 bounds: gpui::bounds(
                     Point {
                         x: px(10.0),

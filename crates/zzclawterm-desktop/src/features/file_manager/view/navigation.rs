@@ -1,12 +1,12 @@
-use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, rgb};
-use rust_i18n::t;
-use zzclawterm_transport::{RemoteFilePath, file_browser_name, file_browser_parent};
-use zzclawterm_ui::{ZzClawDropdownMenu, ZzClawInput, ZzClawMenuItem, ZzClawTooltip};
-
 use super::small_button;
 use crate::features::file_manager::pane::{PaneEndpoint, PaneId};
 use crate::features::file_manager::workspace::FileManagerWorkspace;
 use crate::theme::ThemePalette;
+use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px, rgb};
+use rust_i18n::t;
+use zzclawterm_files::file_browser::{file_browser_name, file_browser_parent};
+use zzclawterm_files::sftp::RemoteFilePath;
+use zzclawterm_ui::{ZzClawDropdownMenu, ZzClawInput, ZzClawMenuItem, ZzClawTooltip};
 
 impl FileManagerWorkspace {
     pub(super) fn navigation_view(
@@ -100,7 +100,8 @@ impl FileManagerWorkspace {
                 if parent == current.display_path {
                     break;
                 }
-                current = if endpoint.kind() == zzclawterm_transport::FileBrowserBackendKind::Remote
+                current = if endpoint.kind()
+                    == zzclawterm_files::file_browser::FileBrowserBackendKind::Remote
                 {
                     match current.parent() {
                         Ok(parent) => parent,

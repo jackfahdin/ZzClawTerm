@@ -1,24 +1,20 @@
-use rust_i18n::t;
-
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
-use std::time::Duration;
-
-use gpui::{Context, Window};
-use zzclawterm_transport::{
-    RemoteFilePath, SftpDuplicatePolicy, SftpDuplicateResolver, SftpPathTransferOptions,
-    SftpTransferControl,
+use super::helpers::{
+    TransferProgressEventSender, log_sftp_upload_job_failure, transfer_job_remote_parent_path,
 };
-
 use crate::features::ZzClawTermApp;
 use crate::features::transfers::SftpJobSession;
 use crate::models::{
     NavItem, TransferJobEvent, TransferJobKind, TransferJobOutput, TransferJobResult,
     TransferJobState, TransferJobStatus,
 };
-
-use super::helpers::{
-    TransferProgressEventSender, log_sftp_upload_job_failure, transfer_job_remote_parent_path,
+use gpui::{Context, Window};
+use rust_i18n::t;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::time::Duration;
+use zzclawterm_files::sftp::{RemoteFilePath, SftpTransferControl};
+use zzclawterm_files::sftp_transfer_types::{
+    SftpDuplicatePolicy, SftpDuplicateResolver, SftpPathTransferOptions,
 };
 
 impl ZzClawTermApp {
@@ -49,7 +45,7 @@ impl ZzClawTermApp {
             return false;
         }
         if self.session.active_file_browser_backend()
-            != Some(zzclawterm_transport::FileBrowserBackendKind::Remote)
+            != Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Remote)
         {
             self.shell
                 .set_status("source session is unavailable".to_string());
@@ -326,6 +322,10 @@ impl ZzClawTermApp {
             return;
         };
 
+        if matches!(job.kind, TransferJobKind::Delete { .. }) {
+            return;
+        }
+
         if !matches!(
             job.status,
             TransferJobStatus::Queued | TransferJobStatus::Running
@@ -499,7 +499,7 @@ impl ZzClawTermApp {
                     finished_tx.clone(),
                     move || {
                         let _lifetime = if let Some(source) = promised_source {
-                            match zzclawterm_transport::drag_export::DragSourceLifetime::new(
+                            match zzclawterm_files::drag_export::DragSourceLifetime::new(
                                 source,
                                 vec![control.clone()],
                             ) {
@@ -728,12 +728,10 @@ fn lock_upload_target<'a>(
 
 #[cfg(test)]
 mod upload_target_tests {
+    use super::lock_upload_target;
     use std::sync::Mutex;
     use std::time::Duration;
-
-    use zzclawterm_transport::SftpTransferControl;
-
-    use super::lock_upload_target;
+    use zzclawterm_files::sftp::SftpTransferControl;
 
     #[test]
     fn queued_same_target_upload_can_be_cancelled_before_it_starts() {

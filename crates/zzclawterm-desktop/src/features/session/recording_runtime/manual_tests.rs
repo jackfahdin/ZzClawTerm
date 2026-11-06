@@ -1,15 +1,13 @@
+use crate::features::ZzClawTermApp;
+use crate::features::test_support::app_with_visible_local_session;
+use gpui::{AppContext as _, Entity, TestAppContext};
 use std::fs;
 use std::time::{Duration, Instant};
-
-use gpui::{AppContext as _, Entity, TestAppContext};
 use zzclawterm_core::test_support::TestTempDir;
 use zzclawterm_core::{
     ConnectionRecordingSettings, RecordingMode as CoreRecordingMode, SavedConnection,
 };
-use zzclawterm_transport::RecordingMode;
-
-use crate::features::ZzClawTermApp;
-use crate::features::test_support::app_with_visible_local_session;
+use zzclawterm_recording::recording::RecordingMode;
 
 fn fixture(cx: &mut TestAppContext, root: &TestTempDir) -> Entity<ZzClawTermApp> {
     cx.executor().allow_parking();

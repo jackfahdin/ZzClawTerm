@@ -42,12 +42,23 @@ impl ZzClawTermApp {
         .detach();
     }
 
-    pub(in crate::features) fn close_active_session(&mut self, cx: &mut Context<Self>) {
-        if let Some(key) = self.active_workspace_tab()
-            && !crate::models::WorkspaceTabId::from_layout_key(&key).is_session()
-        {
-            self.request_workspace_tabs_close(vec![key], None, cx);
-            return;
+    pub(in crate::features) fn close_active_session(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(key) = self.active_workspace_tab() {
+            match crate::models::WorkspaceTabId::from_layout_key(&key) {
+                crate::models::WorkspaceTabId::Settings => {
+                    self.request_settings_tab_close(window, cx);
+                    return;
+                }
+                id if !id.is_session() => {
+                    self.request_workspace_tabs_close(vec![key], None, cx);
+                    return;
+                }
+                _ => {}
+            }
         }
         let Some(session_id) = self.session.active_id_owned() else {
             self.shell.set_status("no active session".to_string());
@@ -86,7 +97,7 @@ impl ZzClawTermApp {
         });
         // Tauri: closing a strip tab closes the whole tab tree; closing a secondary leaf
         // only removes that pane. Strip close uses the tab-root id.
-        let close_ids = if !self.is_secondary_pane_session(&session_id) {
+        let mut close_ids = if !self.is_secondary_pane_session(&session_id) {
             if let Some(root) = self.shell.workspace_pane_root(&session_id) {
                 root.session_ids()
             } else {
@@ -95,6 +106,11 @@ impl ZzClawTermApp {
         } else {
             vec![session_id.clone()]
         };
+        // A tmux tab projects pane leaves, but the host SSH worker still owns
+        // the control client. Closing the tab releases that host as well.
+        if self.tmux.has_host(&session_id) && !close_ids.contains(&session_id) {
+            close_ids.insert(0, session_id.clone());
+        }
         let was_active = self
             .session
             .active_id()
@@ -186,6 +202,15 @@ impl ZzClawTermApp {
             return;
         }
         let pane_id = self.active_pane_for_tab_root(tab_root_id);
+        if self.tmux.pane_for_session(&pane_id).is_some() {
+            // Pane-close is destructive; tab-close, detach and teardown are not.
+            // Let the confirmed remote layout remove the local terminal state.
+            if let Err(error) = self.session.manager().tmux_close_pane(&pane_id) {
+                self.shell.set_status(format!("close failed: {error}"));
+            }
+            cx.notify();
+            return;
+        }
         if self.tab_tree_session_ids(tab_root_id).len() <= 1 {
             self.close_session(tab_root_id.to_string(), cx);
             return;
@@ -269,6 +294,14 @@ impl ZzClawTermApp {
     pub(in crate::features) fn handle_window_minimize(
         &mut self,
         window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        window.minimize_window();
+    }
+
+    pub(crate) fn handle_window_close_request(
+        &mut self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.settings.summary().minimize_to_tray {
@@ -281,15 +314,13 @@ impl ZzClawTermApp {
                 rust_i18n::t!("tray.unavailable").to_string(),
                 cx,
             );
+            // Keep the window recoverable from the taskbar when the tray cannot
+            // hide it. Explicit Quit still uses the normal shutdown path.
+            // GPUI's test window does not implement native minimization.
+            #[cfg(not(test))]
+            window.minimize_window();
+            return;
         }
-        window.minimize_window();
-    }
-
-    pub(crate) fn handle_window_close_request(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
         self.handle_window_close_request_with_count(
             self.session.ordered_sessions().len(),
             window,
@@ -308,11 +339,15 @@ impl ZzClawTermApp {
             return;
         }
         if self.settings.theme_designer().dirty() {
-            self.activate_settings_window(cx);
+            self.begin_settings_draft(cx);
+            self.open_settings_workspace_tab(cx);
             self.theme_designer_action(
                 crate::features::settings::theme_designer::ThemeIntent::Quit(open_sessions),
                 cx,
             );
+            return;
+        }
+        if self.request_settings_quit_confirmation(open_sessions, window, cx) {
             return;
         }
         if self.settings.summary().confirm_on_close && open_sessions > 0 {
@@ -493,5 +528,100 @@ impl ZzClawTermApp {
     pub(in crate::features) fn append_terminal_log(&mut self, text: impl AsRef<str>) {
         let session_id = self.session.active_id_owned();
         self.append_terminal_log_for_session(session_id.as_deref(), text.as_ref(), false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use gpui::{AppContext as _, EmptyView, TestAppContext};
+    use zzclawterm_core::test_support::TestTempDir;
+
+    use crate::features::AppLifecycleEvent;
+    use crate::features::test_support::app_with_visible_local_session;
+
+    #[derive(Clone, Copy)]
+    enum CloseRequest {
+        Window,
+        ExplicitQuit,
+    }
+
+    fn close_request_outcome(
+        minimize_to_tray: bool,
+        confirm_on_close: bool,
+        request: CloseRequest,
+    ) -> (usize, bool) {
+        let root = TestTempDir::new("zzclawterm-close-to-tray");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), "session");
+        app.update(&mut cx, |app, cx| {
+            let mut summary = app.settings.summary().clone();
+            summary.minimize_to_tray = minimize_to_tray;
+            summary.confirm_on_close = confirm_on_close;
+            summary.startup_restore = false;
+            app.settings.replace_summary(summary);
+            app.sync_component_theme(cx);
+        });
+
+        let shutdown_requests = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&shutdown_requests);
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&app, move |_, event, _| {
+                if matches!(event, AppLifecycleEvent::ShutdownRequested) {
+                    observed.set(observed.get() + 1);
+                }
+            })
+        });
+
+        let (_, window_cx) = cx.add_window_view(|window, cx| {
+            let content = cx.new(|_| EmptyView);
+            zzclawterm_ui::zzclaw_root(content, window, cx)
+        });
+        window_cx.update(|window, cx| {
+            app.update(cx, |app, cx| match request {
+                CloseRequest::Window => app.handle_window_close_request(window, cx),
+                CloseRequest::ExplicitQuit => {
+                    app.handle_window_close_request_with_count(0, window, cx)
+                }
+            });
+        });
+        cx.run_until_parked();
+        let confirming = cx.read(|cx| app.read(cx).session.dialog_should_quit_after_close_all());
+        (shutdown_requests.get(), confirming)
+    }
+
+    #[test]
+    fn close_request_keeps_running_when_minimize_to_tray_is_enabled() {
+        assert_eq!(
+            close_request_outcome(true, true, CloseRequest::Window),
+            (0, false)
+        );
+    }
+
+    #[test]
+    fn close_request_shuts_down_when_minimize_to_tray_is_disabled() {
+        assert_eq!(
+            close_request_outcome(false, false, CloseRequest::Window),
+            (1, false)
+        );
+    }
+
+    #[test]
+    fn close_request_preserves_session_confirmation_when_minimize_to_tray_is_disabled() {
+        assert_eq!(
+            close_request_outcome(false, true, CloseRequest::Window),
+            (0, true)
+        );
+    }
+
+    #[test]
+    fn explicit_quit_bypasses_minimize_to_tray() {
+        assert_eq!(
+            close_request_outcome(true, true, CloseRequest::ExplicitQuit),
+            (1, false)
+        );
     }
 }

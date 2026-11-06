@@ -1,5 +1,6 @@
 //! Shared capability authorization, execution, bounded output and audit adapters.
 
+pub(in crate::features) mod approvals;
 pub(in crate::features) mod terminal_execution;
 
 use super::ZzClawTermApp;
@@ -19,6 +20,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
+use zzclawterm_files::sftp::SftpFileEntry as TransportFileEntry;
 use zzclawterm_mcp_protocol::{
     ConnectionListResult, ConnectionSummary, EnvironmentResult, MAX_INLINE_OUTPUT_BYTES,
     MutationResult, OutputReadArgs, PathArgs, RpcError, SessionArgs, SessionGetResult,
@@ -29,7 +31,7 @@ use zzclawterm_mcp_protocol::{
     validate_tool_result,
 };
 use zzclawterm_store::StoreDomain;
-use zzclawterm_transport::{SessionKind, SftpFileEntry as TransportFileEntry};
+use zzclawterm_transport::SessionKind;
 
 struct McpAuditContext {
     source: String,
@@ -187,6 +189,7 @@ impl CapabilityRuntimeState {
             .retain(|_, pending| !pending.cancellation.is_cancelled());
     }
 
+    #[cfg(test)]
     pub(in crate::features) fn pending_approval_requests(
         &mut self,
     ) -> Vec<CapabilityApprovalRequest> {
@@ -397,7 +400,7 @@ impl ZzClawTermApp {
         success: bool,
         cx: &mut Context<Self>,
     ) {
-        let permission_mode = if self.ai.settings_config().agent_command_execution_mode
+        let permission_mode = if self.ai.run_settings().agent_command_execution_mode
             == zzclawterm_core::AgentCommandExecutionMode::ConfirmEach
         {
             zzclawterm_core::AiPermissionMode::Confirm
@@ -469,6 +472,7 @@ impl ZzClawTermApp {
                 .send(Err(rpc_failure("cancelled", "Capability caller ended.")));
         }
         self.poll_terminal_executions(cx);
+        self.defer_ai_panel_snapshot_flush(cx);
         cx.notify();
     }
 
@@ -578,7 +582,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         if matches!(request.caller, CapabilityCaller::Native { .. }) {
-            request.permission_mode = if self.ai.settings_config().agent_command_execution_mode
+            request.permission_mode = if self.ai.run_settings().agent_command_execution_mode
                 == zzclawterm_core::AgentCommandExecutionMode::ConfirmEach
             {
                 zzclawterm_core::AiPermissionMode::Confirm
@@ -672,7 +676,7 @@ impl ZzClawTermApp {
                 if let (Some(risk), Some(model)) = (assessment.as_mut(), model_risk) {
                     risk.level = risk.level.clone().max(model.clone());
                 }
-                let settings = self.ai.settings_config();
+                let settings = self.ai.run_settings();
                 decide_native_policy(
                     &settings.agent_command_execution_mode,
                     &settings.agent_smart_auto_execute_max_risk,
@@ -684,7 +688,7 @@ impl ZzClawTermApp {
         let single_approval = requires_single_approval(definition.access, assessment.as_ref());
         let confirm_each = matches!(request.caller, CapabilityCaller::Native { .. })
             && request.tool == tool::TERMINAL_EXECUTE
-            && self.ai.settings_config().agent_command_execution_mode
+            && self.ai.run_settings().agent_command_execution_mode
                 == zzclawterm_core::AgentCommandExecutionMode::ConfirmEach;
         self.mcp.capabilities.owners.insert(
             request.connection_id.clone(),
@@ -758,6 +762,7 @@ impl ZzClawTermApp {
                             approval,
                             grant_key,
                         });
+                    self.defer_ai_panel_snapshot_flush(cx);
                     cx.notify();
                     return;
                 }
@@ -1136,7 +1141,8 @@ impl ZzClawTermApp {
                     to_value_string(SftpStatResult {
                         name: value.name,
                         is_dir,
-                        is_symlink: value.file_type == zzclawterm_transport::SftpFileType::Symlink,
+                        is_symlink: value.file_type
+                            == zzclawterm_files::sftp::SftpFileType::Symlink,
                         symlink_target: None,
                         size: value.size.unwrap_or(0),
                         permissions: permissions(value.permissions),
@@ -1322,18 +1328,18 @@ impl ZzClawTermApp {
                                         .is_none_or(|mtime| mtime == current.modified_at);
                             if !actual_hash.eq_ignore_ascii_case(expected_hash) || !metadata_matches
                             {
-                                zzclawterm_transport::RemoteTextWriteResult::Conflict
+                                zzclawterm_files::remote_file::RemoteTextWriteResult::Conflict
                             } else {
-                                let revision = zzclawterm_transport::RemoteTextRevision::from_bytes(
+                                let revision = zzclawterm_files::remote_file::RemoteTextRevision::from_bytes(
                                     current.content.as_bytes(),
-                                    zzclawterm_transport::RemoteTextMetadata {
+                                    zzclawterm_files::remote_file::RemoteTextMetadata {
                                         size: current.size,
                                         modified_at: Some(current.modified_at),
                                     },
                                 );
                                 service
                                     .write_text_document_path(
-                                        &zzclawterm_transport::RemoteFilePath::new(&args.path),
+                                        &zzclawterm_files::sftp::RemoteFilePath::new(&args.path),
                                         &args.content,
                                         Some(&revision),
                                         force,
@@ -1351,25 +1357,25 @@ impl ZzClawTermApp {
                                 )
                                 .map_err(|error| error.to_string())?
                             {
-                                zzclawterm_transport::SftpWriteTextResult::Saved {
+                                zzclawterm_files::sftp::SftpWriteTextResult::Saved {
                                     modified_at,
                                     size,
-                                } => zzclawterm_transport::RemoteTextWriteResult::Saved {
-                                    revision: zzclawterm_transport::RemoteTextRevision::from_bytes(
+                                } => zzclawterm_files::remote_file::RemoteTextWriteResult::Saved {
+                                    revision: zzclawterm_files::remote_file::RemoteTextRevision::from_bytes(
                                         args.content.as_bytes(),
-                                        zzclawterm_transport::RemoteTextMetadata {
+                                        zzclawterm_files::remote_file::RemoteTextMetadata {
                                             size,
                                             modified_at: Some(modified_at),
                                         },
                                     ),
                                 },
-                                zzclawterm_transport::SftpWriteTextResult::Conflict { .. } => {
-                                    zzclawterm_transport::RemoteTextWriteResult::Conflict
+                                zzclawterm_files::sftp::SftpWriteTextResult::Conflict { .. } => {
+                                    zzclawterm_files::remote_file::RemoteTextWriteResult::Conflict
                                 }
                             }
                         };
                         match result {
-                            zzclawterm_transport::RemoteTextWriteResult::Saved { revision } => {
+                            zzclawterm_files::remote_file::RemoteTextWriteResult::Saved { revision } => {
                                 to_value_string(SftpWriteTextResult {
                                     status: "saved".to_string(),
                                     mtime: revision.metadata.modified_at,
@@ -1379,7 +1385,7 @@ impl ZzClawTermApp {
                                     backup_path: None,
                                 })
                             }
-                            zzclawterm_transport::RemoteTextWriteResult::SavedWithBackup {
+                            zzclawterm_files::remote_file::RemoteTextWriteResult::SavedWithBackup {
                                 revision,
                                 backup_path,
                             } => to_value_string(SftpWriteTextResult {
@@ -1390,7 +1396,7 @@ impl ZzClawTermApp {
                                 content_hash: Some(hex::encode(revision.content_sha256)),
                                 backup_path: Some(backup_path),
                             }),
-                            zzclawterm_transport::RemoteTextWriteResult::Conflict => {
+                            zzclawterm_files::remote_file::RemoteTextWriteResult::Conflict => {
                                 to_value_string(SftpWriteTextResult {
                                     status: "conflict".to_string(),
                                     mtime: None,
@@ -1447,7 +1453,7 @@ impl ZzClawTermApp {
                         service
                             .update_path_attributes(
                                 &args.path,
-                                zzclawterm_transport::SftpAttributeUpdate {
+                                zzclawterm_files::sftp::SftpAttributeUpdate {
                                     symlink_target: None,
                                     mode: Some(
                                         parse_remote_mode(Some(&args.mode))?

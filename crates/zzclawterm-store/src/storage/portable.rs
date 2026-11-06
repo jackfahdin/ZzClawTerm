@@ -227,9 +227,56 @@ impl ConnectionStore {
         let database_path = self.db_path().to_path_buf();
         let mut snapshot =
             self.build_raw_portable_snapshot(PortableSnapshotKind::Backup, device_id, app_version)?;
+        self.wrap_vault_key_for_backup(&mut snapshot, master_password)?;
         snapshot.recalculate_hash()?;
         let encoded = encode_encrypted_raw_portable_snapshot(&snapshot, master_password)?;
         write_portable_snapshot_file(database_path, output_path, &encoded)
+    }
+    /// An encrypted `.zz` is opened with the file password alone, so the vault key
+    /// inside must be wrapped by that password. Left as stored it is wrapped by the
+    /// master password or the device key, and the import can only unwrap it when the
+    /// file password happens to equal the master password.
+    fn wrap_vault_key_for_backup(
+        &self,
+        snapshot: &mut RawPortableSnapshot,
+        password: &str,
+    ) -> Result<(), StorageError> {
+        let Some(token) = read_snapshot_entity::<Option<String>>(snapshot, "master_key_token")?
+            .filter(|token| !token.trim().is_empty())
+        else {
+            return Ok(());
+        };
+        let target = CredentialCrypto::new(
+            self.portable_key_path.clone(),
+            Some(password.to_owned().into()),
+        );
+        let token = self
+            .credential_crypto()?
+            .rewrap_master_key_token_for(&token, &target)?;
+        snapshot.entities.insert(
+            "master_key_token".to_string(),
+            serde_json::to_string(&Some(token))?,
+        );
+        Ok(())
+    }
+    /// Independent .zz backup for V4 confirmation. Unlike the ordinary legacy
+    /// reader, this does not migrate icons or credentials while taking it.
+    pub fn export_v4_safety_backup(
+        &self,
+        output_path: impl AsRef<Path>,
+        master_password: &str,
+    ) -> Result<ConfigBackupInfo, StorageError> {
+        let sessions = self.v4_backup_sessions()?;
+        let mut snapshot = self.build_raw_portable_snapshot_with_sessions(
+            PortableSnapshotKind::Backup,
+            "v4-migration",
+            env!("CARGO_PKG_VERSION"),
+            Some(sessions),
+        )?;
+        self.wrap_vault_key_for_backup(&mut snapshot, master_password)?;
+        snapshot.recalculate_hash()?;
+        let encoded = encode_encrypted_raw_portable_snapshot(&snapshot, master_password)?;
+        write_portable_snapshot_file(self.db_path().to_path_buf(), output_path, &encoded)
     }
     pub fn import_portable_snapshot(
         config_dir: impl AsRef<Path>,
@@ -310,13 +357,14 @@ impl ConnectionStore {
             "portable-import-safety-backup",
             env!("CARGO_PKG_VERSION"),
         )?;
+        self.wrap_vault_key_for_backup(&mut current, master_password)?;
         current.recalculate_hash()?;
         let safety_bytes = encode_encrypted_raw_portable_snapshot(&current, master_password)?;
         let config_dir = self.db_path().parent().ok_or_else(|| {
             StorageError::InvalidData("configuration database has no parent directory".to_string())
         })?;
         let safety_backup_path = config_dir.join(format!(
-            "zzclawterm.portable-import-backup-{}.nya",
+            "zzclawterm.portable-import-backup-{}.zz",
             current_time_ms()
         ));
         ensure_parent_dir(&safety_backup_path)?;
@@ -346,6 +394,16 @@ impl ConnectionStore {
         device_id: impl Into<String>,
         app_version: impl Into<String>,
     ) -> Result<RawPortableSnapshot, StorageError> {
+        self.build_raw_portable_snapshot_with_sessions(snapshot_kind, device_id, app_version, None)
+    }
+
+    fn build_raw_portable_snapshot_with_sessions(
+        &self,
+        snapshot_kind: PortableSnapshotKind,
+        device_id: impl Into<String>,
+        app_version: impl Into<String>,
+        sessions_override: Option<serde_json::Value>,
+    ) -> Result<RawPortableSnapshot, StorageError> {
         let mut snapshot = match snapshot_kind {
             PortableSnapshotKind::Sync => RawPortableSnapshot::sync(device_id, app_version),
             PortableSnapshotKind::Backup => RawPortableSnapshot::backup(device_id, app_version),
@@ -369,10 +427,15 @@ impl ConnectionStore {
         snapshot
             .entities
             .insert("settings".to_string(), serde_json::to_string(&settings)?);
-        let mut sessions = self.load_sessions()?;
-        if snapshot_kind == PortableSnapshotKind::Sync {
-            strip_device_local_ssh_agent_settings(&mut sessions);
-        }
+        let sessions = if let Some(sessions) = sessions_override {
+            sessions
+        } else {
+            let mut sessions = self.load_sessions()?;
+            if snapshot_kind == PortableSnapshotKind::Sync {
+                strip_device_local_ssh_agent_settings(&mut sessions);
+            }
+            serde_json::to_value(sessions)?
+        };
         snapshot
             .entities
             .insert("sessions".to_string(), serde_json::to_string(&sessions)?);
@@ -406,9 +469,7 @@ impl ConnectionStore {
         );
         snapshot.entities.insert(
             "proxies".to_string(),
-            serde_json::to_string(
-                &self.list_raw_json_values_by_prefix(PROXIES_TABLE, PROXY_PREFIX)?,
-            )?,
+            serde_json::to_string(&self.portable_proxy_records()?)?,
         );
         snapshot.entities.insert(
             "proxy_groups".to_string(),
@@ -461,6 +522,28 @@ impl ConnectionStore {
             serde_json::to_string(&self.load_notes_snapshot()?)?,
         );
         Ok(snapshot)
+    }
+
+    fn portable_proxy_records(&self) -> Result<Vec<serde_json::Value>, StorageError> {
+        let mut records = self.list_raw_json_values_by_prefix(PROXIES_TABLE, PROXY_PREFIX)?;
+        let crypto = self.credential_crypto()?;
+        let token = self.load_master_key_token()?;
+        for record in &mut records {
+            if let Some(ciphertext) = record
+                .get("password")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| value.strip_prefix(super::PROXY_SECRET_PREFIX))
+            {
+                record["password"] = serde_json::Value::String(crypto.decrypt_secret(
+                    token.as_deref().ok_or(StorageError::MissingMasterKey)?,
+                    ciphertext,
+                )?);
+            }
+        }
+        // Released .zz readers expect this field in plaintext inside the
+        // independently encrypted backup envelope. Retain that contract and
+        // every unknown proxy property, regardless of the local storage codec.
+        Ok(records)
     }
 
     fn load_opaque_portable_entities(&self) -> Result<BTreeMap<String, String>, StorageError> {
@@ -775,6 +858,9 @@ impl ConnectionStore {
             }
         }
         txn.commit()?;
+        if snapshot.meta.snapshot_kind == PortableSnapshotKind::Backup {
+            self.invalidate_completion();
+        }
         bump_ssh_key_revision();
         Ok(())
     }

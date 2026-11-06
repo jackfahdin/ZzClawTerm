@@ -1,11 +1,12 @@
-use zzclawterm_transport::{RemoteDockerOverview, SshMultiplexHandle, SshSessionConfig};
-
 use crate::features::ZzClawTermApp;
+use zzclawterm_remote_ops::docker::RemoteDockerOverview;
+use zzclawterm_transport::{SshMultiplexHandle, SshSessionConfig};
 
 pub(in crate::features) struct ActiveSshRuntimeContext {
     pub(in crate::features) session_id: String,
     pub(in crate::features) config: SshSessionConfig,
     pub(in crate::features) multiplex: SshMultiplexHandle,
+    pub(in crate::features) docker_state: zzclawterm_remote_ops::docker::DockerConnectionState,
 }
 
 impl ZzClawTermApp {
@@ -21,16 +22,24 @@ impl ZzClawTermApp {
             .session
             .active_ssh_config_owned()
             .ok_or_else(|| format!("start an SSH session before {action}"))?;
+        // `session_id` may be a tmux pane leaf — the SSH connection and its
+        // multiplex handle live on the host session, so look the connection
+        // up through the host while keeping the pane id for job bookkeeping.
+        let connection_session_id = self.ssh_scoped_session_id(&session_id);
         let has_multiplex_key = self
             .session
-            .metadata(&session_id)
+            .metadata(&connection_session_id)
             .and_then(|metadata| metadata.ssh_multiplex_key.as_ref())
             .is_some();
-        if let Some(multiplex) = self.session.ssh_multiplex_handle_for_session(&session_id) {
+        if let Some(connection) = self
+            .session
+            .ssh_connection_for_session(&connection_session_id)
+        {
             return Ok(ActiveSshRuntimeContext {
                 session_id,
                 config,
-                multiplex,
+                multiplex: connection.handle(),
+                docker_state: connection.docker_state(),
             });
         }
         if has_multiplex_key {

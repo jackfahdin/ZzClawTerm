@@ -15,6 +15,7 @@ mod input;
 mod input_focus;
 mod markdown;
 mod menu;
+mod native_overlay;
 pub mod notification;
 mod number_input;
 pub mod plot;
@@ -26,6 +27,7 @@ mod settings;
 mod sizing;
 pub mod tab_close;
 mod tabs;
+pub mod text;
 mod theme;
 mod theme_bridge;
 mod tooltip;
@@ -35,7 +37,10 @@ pub mod window_chrome;
 pub use app_menu_bar::{ZzClawAppMenu, ZzClawAppMenuBar};
 pub use button::{ZzClawButton, ZzClawButtonVariant, ZzClawIconButton};
 pub use child_window::{ChildWindowSlot, activate_child_window};
-pub use command::{ZzClawCommand, ZzClawCommandIndex, ZzClawCommandItem, ZzClawCommandState};
+pub use command::{
+    ZzClawCommand, ZzClawCommandIndex, ZzClawCommandItem, ZzClawCommandState,
+    command_row_highlight_index, command_row_selection_wash,
+};
 pub use dialog::{
     ZzClawConfirmDialog, ZzClawDialog, ZzClawDialogFooter, ZzClawDialogHandle,
     ZzClawDialogWindowExt,
@@ -65,13 +70,21 @@ pub use input::{
     ZzClawInputState, ZzClawSearchInput, ZzClawTextArea, set_nya_input_label_provider,
 };
 pub use markdown::ZzClawMarkdown;
-pub use menu::{ZzClawContextMenu, ZzClawDropdownMenu, ZzClawMenuAnchor, ZzClawMenuItem};
+pub use menu::{
+    ZzClawContextMenu, ZzClawDropdownMenu, ZzClawMenuAnchor, ZzClawMenuItem, nya_popup_is_active,
+    nya_popup_menu_is_active,
+};
+pub use native_overlay::{
+    enable_native_child_overlays, nya_modal_overlay, nya_passive_overlay, nya_region_overlay,
+};
 pub use number_input::{
     ZzClawNumberInput, ZzClawNumberInputEvent, ZzClawNumberInputOptions, ZzClawNumberInputState,
     ZzClawNumberStep,
 };
 pub use popover::{ZzClawPopover, ZzClawPopoverAlign, ZzClawPopoverPlacement};
-pub use root::{ZzClawRoot, ZzClawWindowHandle, set_nya_root_transparent, zzclaw_root};
+pub use root::{
+    ZzClawRoot, ZzClawWindowHandle, init_components, set_zzclaw_root_transparent, zzclaw_root,
+};
 pub use selectable_text::ZzClawSelectableText;
 pub use selection::{
     ZzClawCheckbox, ZzClawRadioGroup, ZzClawSelect, ZzClawSelectEvent, ZzClawSelectOption,

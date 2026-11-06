@@ -26,9 +26,19 @@ must include explicit conversion logic and tests.
   independent of UI frameworks.
 * `crates/zzclawterm-terminal-gpui`: GPUI-specific terminal layout, input,
   highlighting, images, and painting.
-* `crates/zzclawterm-transport`: local PTY, SSH, Telnet, Serial, SFTP, tunnels,
-  remote operations, and transfer-protocol runtime. It must remain independent
-  of GPUI and desktop presentation types.
+* `crates/zzclawterm-transport`: local PTY, SSH authentication and channels, Telnet,
+  Serial, tunnels, session lifecycle, tmux, and transfer-protocol runtime. It
+  exposes file-session probe injection and must not depend on the file,
+  recording, or remote-operations crates.
+* `crates/zzclawterm-files`: local and remote file services, SFTP and shell file
+  backends, file revisions, path safety, and file-transfer policies.
+* `crates/zzclawterm-remote-ops`: system metrics, process management, Docker, and
+  GPU/NPU operations over transport execution APIs. Docker state is shared by
+  the desktop SSH connection lease, not owned by transport.
+* `crates/zzclawterm-recording`: recording, transcripts, rotation, and terminal
+  history search over the core and terminal contracts.
+* These four crates remain independent of GPUI and desktop presentation types;
+  the three business crates must not depend on each other.
 * `crates/zzclawterm-ui`: shared GPUI theme tokens, the `gpui-kit`
   integration boundary, and reusable ZzClawTerm presentation and interaction
   widgets.
@@ -46,6 +56,10 @@ must include explicit conversion logic and tests.
   protocol. It owns the forked `vnc-rs` decoders, the VNC reconnect ladder, and
   the server-facing policy gates (`view_only`, `shared`, clipboard enablement).
   Those gates must stay enforced here, not only in the application.
+* `crates/zzclawterm-windows-rdp`: explicitly selected Windows Native RDP system
+  component exception. Thread-bound ActiveX/ATL host and staged controller;
+  COM runs on the creating UI/STA thread outside all GPUI borrows. No GPUI
+  production dependency, no protocol decoder or exposed COM interfaces.
 * `crates/zzclawterm-otp`: bundled HOTP/TOTP implementation.
 * `crates/zzclawterm-app/assets`: bundled icons and images. Assets under
   `icons/**` are normally tintable and rendered through `svg()` or
@@ -53,14 +67,14 @@ must include explicit conversion logic and tests.
   rendering distinction when adding assets.
 * Third-party dependencies that ZzClawTerm patches are not vendored. Each is a
   patch series on a fork under <https://github.com/jackfahdin> on branch
-  `nyaterm` (forked from the original series under
+  `zzclawterm` (forked from the original series under
   <https://github.com/nyakang>), mirrored to
   <https://gitcode.com/JackfahdinImport> for faster access in mainland China
   and consumed from there at a revision pinned in the root `Cargo.toml`:
   `alacritty` (`alacritty_terminal`), `gpui-kit`, `IronRDP`
   (`ironrdp-client`, `ironrdp-connector`), `russh`, `russh-sftp`, `sspi-rs`,
   `vnc-rs`, `zed` (`gpui`, `gpui_platform`), and `zmodem2`. Each branch carries
-  a `NYATERM.md` recording its base revision, its patches, and how they were
+  a `ZZCLAWTERM.md` recording its base revision, its patches, and how they were
   validated.
 * `temp/vendor/`: untracked, read-only copies of those sources, kept only so
   they can be read locally. Nothing under `temp/` is compiled. **Editing
@@ -104,12 +118,15 @@ For new or substantially changed features:
   `zzclawterm-terminal`.
 * Keep terminal layout, GPUI input adapters, highlighting, image presentation,
   and painting in `zzclawterm-terminal-gpui`.
-* Keep transport code independent of GPUI and desktop presentation types.
+* Keep transport, files, remote operations, and recording code independent of
+  GPUI and desktop presentation types.
 * Keep remote-desktop protocol and session logic in
   `zzclawterm-remote-desktop`; keep GPUI presentation in `zzclawterm-desktop`.
 * Keep protocol decoders that parse server-controlled bytes in the helper
   crates, never in a crate the application links. Both helpers must translate a
-  decoder panic into a fatal IPC error rather than dying silently.
+  decoder panic into a fatal IPC error rather than dying silently. Windows Native,
+  selected explicitly by the user, hosts the installed Windows system component
+  in process; the IronRDP/VNC decoder isolation requirement continues to apply.
 * Keep persistence logic out of GPUI views.
 
 Use normal Rust module trees with `mod.rs` files or sibling module
@@ -218,7 +235,7 @@ buffers where practical.
 Patching a third-party dependency means committing to its fork branch, pushing,
 and bumping the pinned revision in the root `Cargo.toml`. Do not edit `temp/`.
 Record the reason for the change and the validation performed on the patch
-commit and in that branch's `NYATERM.md`, and keep the patch series split by
+commit and in that branch's `ZZCLAWTERM.md`, and keep the patch series split by
 concern rather than squashed. Prefer rebasing the series onto a newer upstream
 revision over accumulating snapshots.
 
@@ -230,10 +247,12 @@ Use package-specific checks while iterating:
 * `cargo test -p <crate-name>`
 * `cargo run -p zzclawterm-app --bin zzclawterm`
 
-RDP and VNC each run in a helper process that the application resolves beside its
-own executable. `cargo run -p zzclawterm-app --bin zzclawterm` builds only the
-application, so build the helpers into the same target directory first or both
-protocols fail with `HelperMissing`:
+Builtin/IronRDP and VNC run in helper processes that the application resolves
+beside its own executable. Windows Native RDP is the explicitly selected
+in-process system-component exception and requires MSVC with ATL when building.
+`cargo run -p zzclawterm-app --bin zzclawterm` builds only the application, so build the
+helpers into the same target directory first or the helper backends fail with
+`HelperMissing`:
 
 * `cargo build -p zzclawterm-rdp-helper -p zzclawterm-vnc-helper`
 
@@ -283,8 +302,9 @@ Add tests beside the behavior being changed.
 
 * Terminal parsing, snapshots, graphics, selection, input, and rendering tests
   belong in `zzclawterm-terminal` or `zzclawterm-terminal-gpui`.
-* SSH, SFTP, Telnet, Serial, tunnel, transfer, and terminal-session lifecycle
-  tests belong in `zzclawterm-transport`.
+* SSH, Telnet, Serial, tunnel, protocol transfer, and terminal-session lifecycle
+  tests belong in `zzclawterm-transport`. File and SFTP tests belong in
+  `zzclawterm-files`; operation and recording tests belong in their owning crates.
 * RDP/VNC protocol, framebuffer, input mapping, IPC, certificate, clipboard,
   and reconnect tests belong in `zzclawterm-remote-desktop`, `zzclawterm-rdp-helper`,
   or `zzclawterm-vnc-helper`. Helper crates carry a `tests/lifecycle.rs` covering

@@ -11,12 +11,14 @@ In **Settings → Appearance**, you can configure these separately:
 
 If you just want a quick theme switch, you can also use **View → Theme** from the top menu.
 
-The built-in **WindTerm Dark** (`windterm-dark`) and **WindTerm Light** (`windterm-light`) themes are based on [WindTerm](https://github.com/kingToolbox/WindTerm)'s `dige-black` and `dige-white` palettes. They retain the 16 ANSI colors and adapt UI state colors for NyaTerm. Select either independently for the UI or terminal, or let the terminal follow the UI. To see the original terminal colors, turn off minimum contrast enhancement below; some ANSI colors in the light theme have low contrast on white.
+The built-in **WindTerm Dark** (`windterm-dark`) and **WindTerm Light** (`windterm-light`) themes are based on [WindTerm](https://github.com/kingToolbox/WindTerm)'s `dige-black` and `dige-white` palettes. They retain the 16 ANSI colors and adapt UI state colors for ZzClawTerm. Select either independently for the UI or terminal, or let the terminal follow the UI. To see the original terminal colors, turn off minimum contrast enhancement below; some ANSI colors in the light theme have low contrast on white.
+
+The built-in **Dracula** (`dracula`) and **Dracula Light** (`dracula-light`) are based on the [official Dracula specification](https://draculatheme.com/spec): the dark theme uses Dracula Classic and the light theme uses Alucard Classic (cream background). The specification also defines Alucard's 16 ANSI colors, but its ANSI black (`#fffbeb`) is nearly invisible on a light terminal background. ZzClawTerm intentionally adapts ANSI black to `#1f1f1f` and ANSI white to `#6c664b` for readability; these two values therefore differ from the official ANSI mapping. The dark theme's bright black (`#6272a4`) is fairly dim; turn on minimum contrast if you need it more legible.
 
 The theme list includes two high-contrast themes, suited for accessibility, bright environments, or screen sharing:
 
-- **Nya HC** — high contrast on a dark base
-- **Nya HC White** — high contrast on a light base
+- **ZzClaw HC** — high contrast on a dark base
+- **ZzClaw HC White** — high contrast on a light base
 
 Select them like any other UI theme from **Settings → Appearance** or the **View → Theme** top menu.
 

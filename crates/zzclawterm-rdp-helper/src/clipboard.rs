@@ -181,7 +181,7 @@ impl ClipboardBridge {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .expire(timeout);
         if timed_out {
-            let _ = self.output_tx.send(Outbound::Control(RdpControlMessage::Error {
+            let _ = self.output_tx.send(Outbound::control(RdpControlMessage::Error {
                 session_id: self.session_id.clone(),
                 error: zzclawterm_remote_desktop::RdpError::new(
                     zzclawterm_remote_desktop::RdpErrorKind::Clipboard,
@@ -206,7 +206,7 @@ impl ClipboardBridge {
         };
         let _ = self
             .output_tx
-            .send(Outbound::Control(RdpControlMessage::Clipboard {
+            .send(Outbound::control(RdpControlMessage::Clipboard {
                 session_id: self.session_id.clone(),
                 text,
                 generation,
@@ -246,7 +246,7 @@ impl ClipboardBridge {
     fn send_transfer_progress(&self, progress: RdpClipboardTransferProgress) {
         let _ = self
             .output_tx
-            .send(Outbound::Control(RdpControlMessage::ClipboardTransfer {
+            .send(Outbound::control(RdpControlMessage::ClipboardTransfer {
                 session_id: self.session_id.clone(),
                 progress,
             }));
@@ -627,7 +627,7 @@ impl CliprdrBackend for TextClipboardBackend {
                 let _ = self
                     .bridge
                     .output_tx
-                    .send(Outbound::Control(RdpControlMessage::Error {
+                    .send(Outbound::control(RdpControlMessage::Error {
                         session_id: self.bridge.session_id.clone(),
                         error: zzclawterm_remote_desktop::RdpError::new(
                             zzclawterm_remote_desktop::RdpErrorKind::Clipboard,
@@ -674,6 +674,36 @@ mod tests {
 
     use super::{ClipboardBridge, TextClipboardBackend};
     use zzclawterm_remote_desktop::MAX_CLIPBOARD_TEXT_BYTES;
+
+    #[test]
+    fn helper_factory_enables_file_capability_for_every_legacy_clipboard_mode() {
+        use crate::{CertificateGate, build_config};
+        use std::sync::Arc;
+        use zzclawterm_remote_desktop::RdpClipboardMode;
+
+        for mode in [
+            RdpClipboardMode::Disabled,
+            RdpClipboardMode::TextOnly,
+            RdpClipboardMode::TextAndFiles,
+        ] {
+            let mut source = crate::tests::helper_config();
+            source.clipboard.mode = mode;
+            let (output_tx, _output_rx) = mpsc::sync_channel(1);
+            let (_config, bridge) = build_config(
+                "fixture",
+                &source,
+                output_tx,
+                Arc::new(CertificateGate::default()),
+            )
+            .unwrap();
+            let backend = TextClipboardBackend { bridge };
+            assert!(
+                backend
+                    .client_capabilities()
+                    .contains(ClipboardGeneralCapabilityFlags::STREAM_FILECLIP_ENABLED)
+            );
+        }
+    }
 
     #[test]
     fn headless_clipboard_accepts_text_and_rejects_oversize_payloads() {

@@ -1,651 +1,468 @@
-use gpui::{Context, FontWeight, IntoElement, SharedString, div, prelude::*, px, rgb};
-use zzclawterm_core::truncate_preview;
-use zzclawterm_transport::{DockerContainer, DockerContainerDetails};
-use zzclawterm_ui::ZzClawScrollable;
-
+use super::{DockerLabels, docker_labels};
 use crate::features::{
-    ZzClawTermApp, formatting::compact_id, formatting::docker_state_color,
-    shell::gpui_code_font_family, view_widgets::modal_dialog_shell,
+    ZzClawTermApp, formatting::docker_state_color, shell::gpui_code_font_family,
 };
 use crate::theme::ThemePalette;
-use crate::widgets::{empty_panel, small_button, status_pill};
+use crate::widgets::{small_button, status_pill};
+use gpui::{
+    Context, Entity, FontWeight, IntoElement, Render, SharedString, Subscription, Window, div,
+    prelude::*, px, rgb,
+};
+use zzclawterm_remote_ops::docker::{DockerContainer, DockerContainerDetails};
+use zzclawterm_ui::{ZzClawButton, ZzClawDialogHandle, ZzClawDialogWindowExt};
 
-use super::{DockerLabels, docker_labels};
+/// Owns only the dialog lifetime. RemoteOps remains authoritative for its data.
+struct DockerDetailsView {
+    app: Entity<ZzClawTermApp>,
+    container_id: String,
+    session_id: Option<String>,
+    handle: Option<ZzClawDialogHandle>,
+    _subscription: Subscription,
+}
 
-impl ZzClawTermApp {
-    pub(in crate::features) fn docker_details_overlay(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let state = self.remote_ops.docker_presentation();
-        let Some(container_id) = state.details_container_id.clone() else {
+impl Render for DockerDetailsView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let app = self.app.read(cx);
+        let state = app.remote_ops.docker_presentation();
+        let active = state.details_container_id.as_ref() == Some(&self.container_id)
+            && app.session.active_id() == self.session_id.as_deref();
+        if !active {
+            if let Some(handle) = self.handle.clone() {
+                window.defer(cx, move |window, cx| {
+                    if handle.is_top(window, cx) {
+                        window.close_nya_dialog(cx);
+                    }
+                });
+            }
             return div().into_any_element();
-        };
-        let container = state.overview.as_ref().and_then(|overview| {
-            overview
-                .containers
-                .iter()
-                .find(|container| container.id == container_id)
-                .cloned()
-        });
-        let palette = self.theme_palette();
-        docker_details_panel(
-            palette,
-            self.shell_surface_color(palette.bg),
-            Some(container_id),
-            state.details,
-            container,
-            docker_labels(),
-            cx,
-        )
+        }
+        // ZzClawDialog has 16px body padding on each side and a 1px border.
+        let width = docker_dialog_width(f32::from(window.viewport_size().width)) - 34.;
+        self.app.update(cx, |app, cx| {
+            let palette = app.theme_palette();
+            let container = state
+                .overview
+                .as_ref()
+                .and_then(|overview| {
+                    overview
+                        .containers
+                        .iter()
+                        .find(|c| c.id == self.container_id)
+                })
+                .cloned();
+            docker_details_panel(
+                palette,
+                width,
+                &self.container_id,
+                state.details.as_ref(),
+                container.as_ref(),
+                &docker_labels(),
+                state.pending,
+                cx,
+            )
+        })
     }
 }
 
+fn docker_dialog_width(viewport_width: f32) -> f32 {
+    (viewport_width - 24.).clamp(1., 620.)
+}
+
+impl ZzClawTermApp {
+    pub(in crate::features) fn open_docker_details(
+        &mut self,
+        container_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_docker_details(container_id.clone(), cx);
+        if self
+            .remote_ops
+            .docker_presentation()
+            .details_container_id
+            .as_ref()
+            != Some(&container_id)
+        {
+            return;
+        }
+        self.show_docker_details(container_id, window, cx);
+    }
+
+    fn show_docker_details(
+        &mut self,
+        container_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let app = cx.entity();
+        let session_id = self.session.active_id().map(str::to_owned);
+        let view = cx.new(|cx| DockerDetailsView {
+            _subscription: cx.observe(&app, |_, _, cx| cx.notify()),
+            app: app.clone(),
+            container_id: container_id.clone(),
+            session_id: session_id.clone(),
+            handle: None,
+        });
+        let content = view.clone();
+        let handle = window.open_tracked_nya_dialog(cx, move |dialog, window, _| {
+            let app = app.clone();
+            let container_id = container_id.clone();
+            let session_id = session_id.clone();
+            dialog
+                .title(docker_labels().container_details.to_string())
+                .width(docker_dialog_width(f32::from(window.viewport_size().width)))
+                .overlay_closable(false)
+                .content(content.clone())
+                .on_close(move |_, _, cx| {
+                    app.update(cx, |app, cx| {
+                        if app.session.active_id() == session_id.as_deref()
+                            && app
+                                .remote_ops
+                                .docker_presentation()
+                                .details_container_id
+                                .as_ref()
+                                == Some(&container_id)
+                        {
+                            app.close_docker_details(cx);
+                            app.defer_remote_panel_snapshot_flush(cx);
+                        }
+                    });
+                })
+        });
+        view.update(cx, |view, _| view.handle = Some(handle));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn docker_details_panel(
     palette: ThemePalette,
-    dialog_bg: gpui::Rgba,
-    container_id: Option<String>,
-    details: Option<DockerContainerDetails>,
-    container: Option<DockerContainer>,
-    labels: DockerLabels,
+    width: f32,
+    container_id: &str,
+    details: Option<&DockerContainerDetails>,
+    container: Option<&DockerContainer>,
+    labels: &DockerLabels,
+    pending: bool,
     cx: &mut Context<ZzClawTermApp>,
 ) -> gpui::AnyElement {
-    let Some(details) = details else {
-        let details_id = container_id
-            .as_deref()
-            .map(compact_id)
-            .unwrap_or_else(|| "unknown".to_string());
-        let card = div()
-            .p_4()
-            .flex()
-            .flex_col()
-            .gap_3()
+    let refresh_id = container_id.to_owned();
+    let mut body = div().w_full().min_w_0().flex().flex_col().gap_3();
+    let mut heading = div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_2();
+    if let Some(container) = container {
+        heading = heading
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .text_sm()
-                            .font_weight(FontWeight(700.))
-                            .text_color(rgb(palette.text))
-                            .child(labels.container_details.clone()),
-                    )
-                    .when_some(container_id.clone(), |this, _| {
-                        this.child(small_button(
-                            palette,
-                            "docker-details-loading-close",
-                            labels.close.clone(),
-                            cx.listener(|this, _, _, cx| {
-                                this.close_docker_details(cx);
-                                this.defer_remote_panel_snapshot_flush(cx);
-                            }),
-                        ))
-                    }),
+                    .w_full()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .text_sm()
+                    .font_weight(FontWeight(600.))
+                    .child(container.name.clone()),
             )
-            .child(
-                div()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(rgb(palette.border))
-                    .bg(rgb(palette.section_header))
-                    .p_3()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(palette.text_dimmed))
-                            .child(labels.loading.clone()),
-                    )
-                    .child(
-                        div()
-                            .rounded_sm()
-                            .px_2()
-                            .py_1()
-                            .text_xs()
-                            .text_color(rgb(0x93c5fd))
-                            .bg(rgb(0x17233a))
-                            .child(details_id),
-                    ),
-            );
-
-        return modal_dialog_shell(palette, dialog_bg, "docker-details-modal", 620., card)
-            .into_any_element();
-    };
-
-    let mut mounts = div().flex().flex_col().gap_1();
-    if details.mounts.is_empty() {
-        mounts = mounts.child(empty_panel(labels.no_matches.clone(), palette));
-    } else {
-        for mount in &details.mounts {
-            mounts = mounts.child(
-                div()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(rgb(palette.border))
-                    .bg(rgb(palette.section_header))
-                    .px_2()
-                    .py_1()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .font_family(gpui_code_font_family())
-                            .text_size(px(11.))
-                            .text_color(rgb(palette.text))
-                            .overflow_hidden()
-                            .child(format!(
-                                "{} -> {}",
-                                truncate_preview(&mount.source, 52),
-                                truncate_preview(&mount.destination, 52)
-                            )),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(palette.text_dimmed))
-                            .child(format!(
-                                "{} · {} · {}",
-                                mount.kind,
-                                mount.mode,
-                                if mount.rw { "rw" } else { "ro" }
-                            )),
-                    ),
-            );
-        }
-    }
-
-    let mut networks = div().flex().flex_col().gap_1();
-    if details.networks.is_empty() {
-        networks = networks.child(empty_panel(labels.no_matches.clone(), palette));
-    } else {
-        for network in &details.networks {
-            let ip_address = if network.ip_address.trim().is_empty() {
-                "no ip".to_string()
-            } else {
-                network.ip_address.clone()
-            };
-            networks = networks.child(
-                div()
-                    .h(px(24.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .text_size(px(11.))
-                            .text_color(rgb(palette.text))
-                            .overflow_hidden()
-                            .child(truncate_preview(&network.name, 36)),
-                    )
-                    .child(
-                        div()
-                            .font_family(gpui_code_font_family())
-                            .text_size(px(10.))
-                            .text_color(rgb(palette.text_dimmed))
-                            .child(ip_address),
-                    ),
-            );
-        }
-    }
-
-    let details_title = container
-        .as_ref()
-        .map(|container| truncate_preview(&container.name, 40))
-        .unwrap_or_else(|| labels.container_details.to_string());
-    let details_state = container.as_ref().map(|container| container.state.clone());
-    let networks_value = docker_networks_value(&details);
-    let mounts_value = docker_mounts_value(&details);
-    let mut actions = div().flex().items_center().gap_2();
-    if let Some(container_id) = container_id.clone() {
-        actions = actions
-            .child(small_button(
-                palette,
-                format!("docker-details-refresh-{}", compact_id(&container_id)),
-                labels.refresh.clone(),
-                cx.listener(move |this, _, _window, cx| {
-                    this.load_docker_details(container_id.clone(), cx);
-                    this.defer_remote_panel_snapshot_flush(cx);
-                }),
-            ))
-            .child(small_button(
-                palette,
-                "docker-details-close",
-                labels.close.clone(),
-                cx.listener(|this, _, _, cx| {
-                    this.close_docker_details(cx);
-                    this.defer_remote_panel_snapshot_flush(cx);
-                }),
+            .child(status_pill(
+                labels.state_label(&container.state),
+                docker_state_color(palette, &container.state),
+                rgb(palette.surface),
             ));
     }
-    let card = div()
-        .id("docker-details-scroll")
-        .max_h(px(600.))
-        .overflow_scrollbar()
-        .p_4()
+    body = body.child(
+        heading.child(
+            ZzClawButton::new("docker-details-refresh", labels.refresh.clone())
+                .disabled(pending)
+                .on_click(cx.listener(move |app, _, _, cx| {
+                    app.load_docker_details(refresh_id.clone(), cx);
+                })),
+        ),
+    );
+    let Some(details) = details else {
+        return body
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(palette.text_muted))
+                    .child(if pending {
+                        labels.loading.clone()
+                    } else {
+                        labels.error.clone()
+                    }),
+            )
+            .into_any_element();
+    };
+    body = body.child(
+        div()
+            .w_full()
+            .min_w_0()
+            .grid()
+            .grid_cols(if width < 360. { 1 } else { 3 })
+            .gap_2()
+            .child(docker_metric(
+                palette,
+                labels.cpu.clone(),
+                details
+                    .stats
+                    .as_ref()
+                    .map(|s| format!("{:.1}%", s.cpu_percent))
+                    .unwrap_or_else(|| "-".into()),
+            ))
+            .child(docker_metric(
+                palette,
+                labels.memory.clone(),
+                details
+                    .stats
+                    .as_ref()
+                    .map(|s| format!("{:.1}%", s.memory_percent))
+                    .unwrap_or_else(|| "-".into()),
+            ))
+            .child(docker_metric(
+                palette,
+                labels.pids.clone(),
+                details
+                    .stats
+                    .as_ref()
+                    .map(|s| s.pids.clone())
+                    .unwrap_or_else(|| "-".into()),
+            )),
+    );
+    if let Some(container) = container {
+        let mut identity =
+            docker_section(palette).child(section_title(palette, labels.identity.clone()));
+        for (label, value, copyable) in [
+            (labels.container_name.clone(), container.name.clone(), true),
+            (labels.container_id.clone(), container.id.clone(), true),
+            (labels.image.clone(), container.image.clone(), true),
+            (labels.status.clone(), container.status.clone(), false),
+            (
+                labels.created_at.clone(),
+                container.created_at.clone(),
+                false,
+            ),
+            (labels.size.clone(), container.size.clone(), false),
+        ] {
+            identity = identity.child(docker_detail_line(
+                palette,
+                label,
+                value,
+                copyable,
+                labels.copy.clone(),
+                cx,
+            ));
+        }
+        body = body.child(identity);
+    }
+    let mut lifecycle = docker_section(palette);
+    for (label, value, copyable) in [
+        (labels.started_at.clone(), details.started_at.clone(), false),
+        (
+            labels.finished_at.clone(),
+            details.finished_at.clone(),
+            false,
+        ),
+        (
+            labels.restart_count.clone(),
+            details.restart_count.to_string(),
+            false,
+        ),
+        (labels.entrypoint.clone(), details.entrypoint.clone(), true),
+        (labels.command.clone(), details.command.clone(), true),
+    ] {
+        lifecycle = lifecycle.child(docker_detail_line(
+            palette,
+            label,
+            value,
+            copyable,
+            labels.copy.clone(),
+            cx,
+        ));
+    }
+    let mut network =
+        docker_section(palette).child(section_title(palette, labels.networking.clone()));
+    if let Some(container) = container {
+        network = network.child(docker_detail_line(
+            palette,
+            labels.ports.clone(),
+            docker_ports_value(&container.ports),
+            true,
+            labels.copy.clone(),
+            cx,
+        ));
+    }
+    network = network.child(docker_detail_line(
+        palette,
+        labels.networks.clone(),
+        docker_networks_value(details),
+        true,
+        labels.copy.clone(),
+        cx,
+    ));
+    body = body.child(
+        div()
+            .w_full()
+            .min_w_0()
+            .grid()
+            .grid_cols(if width < 520. { 1 } else { 2 })
+            .gap_3()
+            .child(lifecycle)
+            .child(network),
+    );
+    body.child(
+        docker_section(palette)
+            .child(section_title(palette, labels.io.clone()))
+            .child(docker_detail_line(
+                palette,
+                labels.net_io.clone(),
+                details
+                    .stats
+                    .as_ref()
+                    .map(|s| s.net_io.clone())
+                    .unwrap_or_default(),
+                false,
+                labels.copy.clone(),
+                cx,
+            ))
+            .child(docker_detail_line(
+                palette,
+                labels.block_io.clone(),
+                details
+                    .stats
+                    .as_ref()
+                    .map(|s| s.block_io.clone())
+                    .unwrap_or_default(),
+                false,
+                labels.copy.clone(),
+                cx,
+            )),
+    )
+    .child(docker_section(palette).child(docker_detail_line(
+        palette,
+        labels.mounts.clone(),
+        docker_mounts_value(details),
+        true,
+        labels.copy.clone(),
+        cx,
+    )))
+    .into_any_element()
+}
+
+fn docker_section(palette: ThemePalette) -> gpui::Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .flex_none()
         .flex()
         .flex_col()
-        .gap_3()
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .min_w_0()
-                                .text_sm()
-                                .font_weight(FontWeight(700.))
-                                .text_color(rgb(palette.text))
-                                .child(details_title),
-                        )
-                        .when_some(details_state, |this, state| {
-                            this.child(status_pill(
-                                labels.state_label(&state),
-                                docker_state_color(palette, &state),
-                                rgb(0x17233a),
-                            ))
-                        }),
-                )
-                .child(actions),
-        )
-        .child(
-            div()
-                .grid()
-                .grid_cols(3)
-                .gap_2()
-                .child(docker_metric(
-                    palette,
-                    labels.cpu.clone(),
-                    details
-                        .stats
-                        .as_ref()
-                        .map(|stats| format!("{:.1}%", stats.cpu_percent))
-                        .unwrap_or_else(|| "n/a".to_string()),
-                ))
-                .child(docker_metric(
-                    palette,
-                    labels.memory.clone(),
-                    details
-                        .stats
-                        .as_ref()
-                        .map(|stats| format!("{:.1}%", stats.memory_percent))
-                        .unwrap_or_else(|| "n/a".to_string()),
-                ))
-                .child(docker_metric(
-                    palette,
-                    labels.pids.clone(),
-                    details
-                        .stats
-                        .as_ref()
-                        .map(|stats| stats.pids.clone())
-                        .unwrap_or_else(|| "n/a".to_string()),
-                )),
-        )
-        .when_some(container.clone(), |this, container| {
-            this.child(
-                div()
-                    .rounded_sm()
-                    .border_1()
-                    .border_color(rgb(palette.border))
-                    .bg(rgb(palette.section_header))
-                    .p_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight(700.))
-                            .text_color(rgb(palette.text))
-                            .child(labels.identity.clone()),
-                    )
-                    .child(docker_detail_line(
-                        palette,
-                        labels.container_name.clone(),
-                        container.name.clone(),
-                        truncate_preview(&container.name, 72),
-                        true,
-                        labels.copy.clone(),
-                        cx,
-                    ))
-                    .child(docker_detail_line(
-                        palette,
-                        labels.container_id.clone(),
-                        container.id.clone(),
-                        truncate_preview(&container.id, 72),
-                        true,
-                        labels.copy.clone(),
-                        cx,
-                    ))
-                    .child(docker_detail_line(
-                        palette,
-                        labels.image.clone(),
-                        container.image.clone(),
-                        truncate_preview(&container.image, 72),
-                        true,
-                        labels.copy.clone(),
-                        cx,
-                    ))
-                    .child(docker_detail_line(
-                        palette,
-                        labels.status.clone(),
-                        if container.status.trim().is_empty() {
-                            container.state.clone()
-                        } else {
-                            container.status.clone()
-                        },
-                        truncate_preview(
-                            if container.status.trim().is_empty() {
-                                &container.state
-                            } else {
-                                &container.status
-                            },
-                            72,
-                        ),
-                        false,
-                        labels.copy.clone(),
-                        cx,
-                    ))
-                    .child(docker_detail_line(
-                        palette,
-                        labels.created_at.clone(),
-                        container.created_at.clone(),
-                        truncate_preview(&container.created_at, 72),
-                        false,
-                        labels.copy.clone(),
-                        cx,
-                    ))
-                    .child(docker_detail_line(
-                        palette,
-                        labels.size.clone(),
-                        if container.size.trim().is_empty() {
-                            "-".to_string()
-                        } else {
-                            container.size.clone()
-                        },
-                        if container.size.trim().is_empty() {
-                            "-".to_string()
-                        } else {
-                            container.size.clone()
-                        },
-                        false,
-                        labels.copy.clone(),
-                        cx,
-                    )),
-            )
-        })
-        .child(
-            div()
-                .grid()
-                .grid_cols(1)
-                .gap_3()
-                .child(
-                    div()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(rgb(palette.border))
-                        .bg(rgb(palette.section_header))
-                        .p_2()
-                        .child(docker_detail_line(
-                            palette,
-                            labels.started_at.clone(),
-                            details.started_at.clone(),
-                            truncate_preview(&details.started_at, 52),
-                            false,
-                            labels.copy.clone(),
-                            cx,
-                        ))
-                        .child(docker_detail_line(
-                            palette,
-                            labels.finished_at.clone(),
-                            details.finished_at.clone(),
-                            truncate_preview(&details.finished_at, 52),
-                            false,
-                            labels.copy.clone(),
-                            cx,
-                        ))
-                        .child(docker_detail_line(
-                            palette,
-                            labels.restart_count.clone(),
-                            details.restart_count.to_string(),
-                            details.restart_count.to_string(),
-                            false,
-                            labels.copy.clone(),
-                            cx,
-                        ))
-                        .child(docker_detail_line(
-                            palette,
-                            labels.entrypoint.clone(),
-                            details.entrypoint.clone(),
-                            truncate_preview(&details.entrypoint, 72),
-                            true,
-                            labels.copy.clone(),
-                            cx,
-                        ))
-                        .child(docker_detail_line(
-                            palette,
-                            labels.command.clone(),
-                            details.command.clone(),
-                            truncate_preview(&details.command, 72),
-                            true,
-                            labels.copy.clone(),
-                            cx,
-                        )),
-                )
-                .child(
-                    div()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(rgb(palette.border))
-                        .bg(rgb(palette.section_header))
-                        .p_2()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight(700.))
-                                .text_color(rgb(palette.text))
-                                .child(labels.networking.clone()),
-                        )
-                        .when_some(container.as_ref(), |this, container| {
-                            this.child(docker_detail_line(
-                                palette,
-                                labels.ports.clone(),
-                                if container.ports.trim().is_empty() {
-                                    "-".to_string()
-                                } else {
-                                    docker_ports_value(&container.ports)
-                                },
-                                if container.ports.trim().is_empty() {
-                                    "-".to_string()
-                                } else {
-                                    truncate_preview(&docker_ports_value(&container.ports), 96)
-                                },
-                                true,
-                                labels.copy.clone(),
-                                cx,
-                            ))
-                        })
-                        .child(docker_detail_line(
-                            palette,
-                            labels.networks.clone(),
-                            networks_value.clone(),
-                            truncate_preview(&networks_value, 96),
-                            true,
-                            labels.copy.clone(),
-                            cx,
-                        ))
-                        .child(networks),
-                ),
-        )
-        .child(
-            div()
-                .rounded_sm()
-                .border_1()
-                .border_color(rgb(palette.border))
-                .bg(rgb(palette.section_header))
-                .p_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight(700.))
-                        .text_color(rgb(palette.text))
-                        .child(labels.io.clone()),
-                )
-                .child(docker_detail_line(
-                    palette,
-                    labels.net_io.clone(),
-                    details
-                        .stats
-                        .as_ref()
-                        .map(|stats| stats.net_io.clone())
-                        .unwrap_or_else(|| "-".to_string()),
-                    details
-                        .stats
-                        .as_ref()
-                        .map(|stats| truncate_preview(&stats.net_io, 96))
-                        .unwrap_or_else(|| "-".to_string()),
-                    false,
-                    labels.copy.clone(),
-                    cx,
-                ))
-                .child(docker_detail_line(
-                    palette,
-                    labels.block_io.clone(),
-                    details
-                        .stats
-                        .as_ref()
-                        .map(|stats| stats.block_io.clone())
-                        .unwrap_or_else(|| "-".to_string()),
-                    details
-                        .stats
-                        .as_ref()
-                        .map(|stats| truncate_preview(&stats.block_io, 96))
-                        .unwrap_or_else(|| "-".to_string()),
-                    false,
-                    labels.copy.clone(),
-                    cx,
-                )),
-        )
-        .child(
-            div()
-                .rounded_sm()
-                .border_1()
-                .border_color(rgb(palette.border))
-                .bg(rgb(palette.section_header))
-                .p_2()
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(FontWeight(700.))
-                        .text_color(rgb(palette.text_muted))
-                        .child(labels.mounts.clone()),
-                )
-                .child(docker_detail_line(
-                    palette,
-                    labels.mounts.clone(),
-                    mounts_value.clone(),
-                    truncate_preview(&mounts_value, 120),
-                    true,
-                    labels.copy.clone(),
-                    cx,
-                ))
-                .child(mounts),
-        );
+        .gap_2()
+        .p_3()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(palette.border))
+}
 
-    modal_dialog_shell(palette, dialog_bg, "docker-details-modal", 620., card).into_any_element()
+fn section_title(palette: ThemePalette, label: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .min_w_0()
+        .whitespace_normal()
+        .text_sm()
+        .font_weight(FontWeight(600.))
+        .text_color(rgb(palette.text))
+        .child(label.into())
 }
 
 fn docker_metric(
-    palette: crate::theme::ThemePalette,
+    palette: ThemePalette,
     label: impl Into<SharedString>,
-    value: impl Into<gpui::SharedString>,
-) -> impl IntoElement {
-    let label: SharedString = label.into();
+    value: String,
+) -> gpui::Div {
     div()
-        .rounded_sm()
-        .bg(rgb(palette.surface))
+        .min_w_0()
         .px_3()
         .py_2()
+        .rounded_md()
+        .bg(rgb(palette.surface))
         .child(
             div()
-                .text_size(px(10.))
+                .whitespace_normal()
+                .text_xs()
                 .text_color(rgb(palette.text_muted))
-                .child(label),
+                .child(label.into()),
         )
         .child(
             div()
-                .mt_1()
+                .min_w_0()
+                .whitespace_normal()
                 .font_family(gpui_code_font_family())
-                .text_size(px(11.))
+                .text_sm()
                 .text_color(rgb(palette.text))
-                .child(value.into()),
+                .child(value),
         )
 }
 
 fn docker_detail_line(
-    palette: crate::theme::ThemePalette,
+    palette: ThemePalette,
     label: impl Into<SharedString>,
     value: String,
-    display_value: String,
     copyable: bool,
     copy_label: impl Into<SharedString>,
     cx: &mut Context<ZzClawTermApp>,
 ) -> gpui::Div {
     let label: SharedString = label.into();
-    let copy_label: SharedString = copy_label.into();
+    let value_selector = format!("docker-detail-value-{label}");
     let copy_value = value.clone();
+    let copyable = copyable && !value.trim().is_empty() && value.trim() != "-";
     div()
-        .mt_1()
+        .w_full()
+        .min_w_0()
+        .flex_none()
         .flex()
-        .items_start()
-        .justify_between()
-        .gap_2()
-        .child(
-            div()
-                .w(px(72.))
-                .flex_none()
-                .text_size(px(10.))
-                .text_color(rgb(palette.text_dimmed))
-                .child(label.clone()),
-        )
+        .flex_col()
+        .gap_1()
         .child(
             div()
                 .min_w_0()
-                .flex_1()
-                .font_family(gpui_code_font_family())
-                .text_size(px(11.))
-                .line_height(px(15.))
-                .text_color(rgb(palette.text))
-                .child(display_value),
-        )
-        .when(copyable && value.trim() != "-", |this| {
-            this.child(small_button(
-                palette,
-                format!("docker-details-copy-{label}"),
-                copy_label,
-                cx.listener({
-                    let label = label.clone();
-                    move |this, _, _, cx| {
-                        this.copy_docker_text(copy_value.clone(), &label, cx);
-                    }
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    div()
+                        .min_w_0()
+                        .whitespace_normal()
+                        .text_xs()
+                        .text_color(rgb(palette.text_muted))
+                        .child(label.clone()),
+                )
+                .when(copyable, |this| {
+                    this.child(small_button(
+                        palette,
+                        format!("docker-copy-{label}"),
+                        copy_label,
+                        cx.listener(move |app, _, _, cx| {
+                            app.copy_docker_text(copy_value.clone(), &label, cx)
+                        }),
+                    ))
                 }),
-            ))
-        })
+        )
+        .child(
+            div()
+                .debug_selector(move || value_selector.clone())
+                .w_full()
+                .min_w_0()
+                .whitespace_normal()
+                .font_family(gpui_code_font_family())
+                .text_size(px(12.))
+                .line_height(px(18.))
+                .text_color(rgb(palette.text))
+                .child(if value.trim().is_empty() {
+                    "-".to_string()
+                } else {
+                    value
+                }),
+        )
 }
 
 fn docker_ports_value(ports: &str) -> String {
@@ -719,5 +536,154 @@ fn docker_mounts_value(details: &DockerContainerDetails) -> String {
         "-".to_string()
     } else {
         value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::docker_detail_line;
+    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
+    use crate::features::ZzClawTermApp;
+    use crate::test_support::{TestAppCleanup, TestConfigDir};
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext,
+        Window, div, prelude::*, px, size,
+    };
+    use zzclawterm_core::{AppRuntime, RuntimeMode};
+    use zzclawterm_remote_ops::docker::DockerContainerDetails;
+    use zzclawterm_ui::ZzClawDialogWindowExt;
+
+    struct Host {
+        app: Entity<ZzClawTermApp>,
+    }
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.app.update(cx, |app, cx| {
+                div().size_full().p_3().child(docker_detail_line(
+                    app.theme_palette(),
+                    "fixture",
+                    "registry.example/long-path-without-spaces".repeat(30),
+                    true,
+                    "Copy",
+                    cx,
+                ))
+            })
+        }
+    }
+
+    fn app(cx: &mut TestAppContext, dir: &TestConfigDir) -> Entity<ZzClawTermApp> {
+        let root = dir.path();
+        let runtime = AppRuntime::from_parts_for_test(
+            RuntimeMode::Portable,
+            root.to_path_buf(),
+            root.join("config"),
+            root.join("logs"),
+            root.join("cache"),
+            None,
+        );
+        let stores = UiStoreHandles {
+            startup_restore: cx.new(|_| StartupRestoreStore::default()),
+            overlays: cx.new(|_| OverlayStore::default()),
+        };
+        let app = cx.new(|cx| ZzClawTermApp::new(runtime, stores, cx));
+        app.update(cx, |app, cx| app.sync_component_theme(cx));
+        app
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        cx.run_until_parked();
+    }
+
+    #[test]
+    fn long_detail_values_wrap_inside_the_available_width_at_all_scales() {
+        let dir = TestConfigDir::new("zzclawterm-docker-wrap");
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let app = app(&mut cx, &dir);
+        let (_, vcx) = cx.add_window_view(move |window, cx| {
+            let host = cx.new(|_| Host { app });
+            zzclawterm_ui::zzclaw_root(host, window, cx)
+        });
+        for scale in [1., 1.5, 2.] {
+            vcx.simulate_scale_factor_change(scale);
+            for width in [200., 280., 320., 430., 540., 600., 720.] {
+                vcx.simulate_resize(size(px(width), px(900.)));
+                draw(vcx);
+                let bounds = vcx
+                    .debug_bounds("docker-detail-value-fixture")
+                    .expect("value painted");
+                assert!(
+                    bounds.right() <= px(width),
+                    "value overflows at {width}/{scale}: {bounds:?}"
+                );
+                assert!(bounds.size.height > px(18.), "long unbroken text must wrap");
+            }
+        }
+    }
+
+    #[test]
+    fn docker_dialog_escape_restores_focus_and_invalidated_details_close() {
+        let dir = TestConfigDir::new("zzclawterm-docker-dialog");
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let app = app(&mut cx, &dir);
+        let host_app = app.clone();
+        let (_, vcx) = cx.add_window_view(move |window, cx| {
+            let host = cx.new(|_| Host { app: host_app });
+            zzclawterm_ui::zzclaw_root(host, window, cx)
+        });
+        draw(vcx);
+        let focus = vcx.update(|window, cx| {
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
+            focus
+        });
+        for reason in ["escape", "session", "removed"] {
+            vcx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    app.remote_ops
+                        .start_docker_details("fixture".into(), "loading".into());
+                    app.remote_ops
+                        .apply_docker_details("fixture".into(), DockerContainerDetails::default());
+                    app.show_docker_details("fixture".into(), window, cx);
+                })
+            });
+            draw(vcx);
+            assert!(vcx.update(|window, cx| window.has_active_nya_dialog(cx)));
+            if reason == "escape" {
+                vcx.simulate_keystrokes("escape");
+            } else {
+                vcx.update(|_, cx| {
+                    app.update(cx, |app, cx| {
+                        if reason == "session" {
+                            app.remote_ops.reset_for_session_switch();
+                        } else {
+                            app.remote_ops.apply_docker_overview(Default::default());
+                        }
+                        cx.notify();
+                    })
+                });
+            }
+            draw(vcx);
+            assert!(
+                !vcx.update(|window, cx| window.has_active_nya_dialog(cx)),
+                "{reason}"
+            );
+            assert!(
+                vcx.update(|window, _| focus.is_focused(window)),
+                "focus after {reason}"
+            );
+            assert!(vcx.update(|_, cx| {
+                app.read(cx)
+                    .remote_ops
+                    .docker_presentation()
+                    .details_container_id
+                    .is_none()
+            }));
+        }
     }
 }

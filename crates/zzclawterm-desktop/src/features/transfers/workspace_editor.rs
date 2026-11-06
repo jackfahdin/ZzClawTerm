@@ -1,13 +1,12 @@
+use super::remote_text_editor::RemoteTextEditor;
+use crate::features::ZzClawTermApp;
+use crate::models::WorkspaceTabId;
 use gpui::{
     AppContext as _, Context, Entity, IntoElement, Render, Subscription, Window, div, prelude::*,
     px, rgb,
 };
 use rust_i18n::t;
 use zzclawterm_ui::{ZzClawButton, ZzClawButtonVariant};
-
-use super::remote_text_editor::RemoteTextEditor;
-use crate::features::ZzClawTermApp;
-use crate::models::WorkspaceTabId;
 
 /// Retained per document, including while another tab hides its surface.
 pub(in crate::features) struct WorkspaceEditorView {
@@ -437,16 +436,15 @@ impl ZzClawTermApp {
 
 #[cfg(test)]
 mod tests {
+    use crate::features::ZzClawTermApp;
+    use crate::features::test_support::{app_with_visible_local_session, editor_document};
+    use crate::models::{TabDockEdge, TabDockZone, WorkspaceTabId};
     use futures::StreamExt as _;
     use gpui::{
         AppContext as _, Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext,
         Window, div, prelude::*,
     };
     use zzclawterm_core::{InternalEditorDisplay, test_support::TestTempDir};
-
-    use crate::features::ZzClawTermApp;
-    use crate::features::test_support::{app_with_visible_local_session, editor_document};
-    use crate::models::{TabDockEdge, TabDockZone, WorkspaceTabId};
 
     struct WorkspaceHost {
         app: Entity<ZzClawTermApp>,
@@ -484,7 +482,7 @@ mod tests {
 
     #[test]
     fn editor_font_controls_restore_focus_preserve_undo_and_ignore_modified_wheels() {
-        use gpui::{Modifiers, ScrollDelta, ScrollWheelEvent, point, px};
+        use gpui::{Modifiers, ScrollDelta, ScrollEvent, point, px};
 
         for display in [
             InternalEditorDisplay::Workspace,
@@ -566,7 +564,7 @@ mod tests {
                 },
             ] {
                 for delta in [100_000., -100., -100., -100_000., -100., 100_000.] {
-                    cx.simulate_event(ScrollWheelEvent {
+                    cx.simulate_event(ScrollEvent {
                         position: point(px(120.), px(120.)),
                         delta: ScrollDelta::Pixels(point(px(0.), px(delta))),
                         modifiers,
@@ -717,10 +715,10 @@ mod tests {
         cx.update(|window, cx| {
             app.update(cx, |app, cx| {
                 app.open_transfer_editor(
-                    zzclawterm_transport::SftpFileEntry {
+                    zzclawterm_files::sftp::SftpFileEntry {
                         name: "a.custom-extension".into(),
                         path: "/a.custom-extension".into(),
-                        file_type: zzclawterm_transport::SftpFileType::File,
+                        file_type: zzclawterm_files::sftp::SftpFileType::File,
                         size: Some(8),
                         permissions: None,
                         owner: String::new(),
@@ -780,9 +778,9 @@ mod tests {
         let path = root.path().join("document.txt");
         std::fs::create_dir_all(root.path()).unwrap();
         std::fs::write(&path, "original").unwrap();
-        let baseline = zzclawterm_transport::FileBrowserService::local()
+        let baseline = zzclawterm_files::file_browser::FileBrowserService::local()
             .read_text_document_path(
-                &zzclawterm_transport::RemoteFilePath::new(path.to_str().unwrap()),
+                &zzclawterm_files::sftp::RemoteFilePath::new(path.to_str().unwrap()),
                 1024,
             )
             .unwrap();

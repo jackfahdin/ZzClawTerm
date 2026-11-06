@@ -5,16 +5,15 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use gpui::{Context, IntoElement, Render, Subscription, Window, div, prelude::*, px, rgb};
-use rust_i18n::t;
-use zzclawterm_transport::SftpDuplicateDecision;
-use zzclawterm_ui::ZzClawDialogWindowExt as _;
-
 use crate::features::ZzClawTermApp;
 use crate::features::formatting::download_file_name_from_remote_path;
-use crate::features::session::SftpDuplicatePromptState;
+use crate::features::session::{DuplicatePromptAction, SftpDuplicatePromptState};
 use crate::features::view_widgets::bounded_dialog_width;
 use crate::theme::ThemePalette;
+use gpui::{Context, IntoElement, Render, Subscription, Window, div, prelude::*, px, rgb};
+use rust_i18n::t;
+use zzclawterm_files::sftp_transfer_types::SftpDuplicateDecision;
+use zzclawterm_ui::{ZzClawDialogWindowExt as _, ZzClawDropdownMenu, ZzClawMenuItem};
 
 struct DuplicatePromptDialogContent {
     app: gpui::WeakEntity<ZzClawTermApp>,
@@ -73,11 +72,18 @@ impl Render for DuplicatePromptDialogContent {
             t!("fileTransfer.duplicateKindFile")
         };
         let target_name = download_file_name_from_remote_path(&self.prompt.request.target_path);
-        let description = t!(
-            "fileTransfer.duplicateDescription",
-            kind = kind,
-            name = target_name
-        );
+        let description = if self.prompt.request.is_directory {
+            t!(
+                "fileTransfer.duplicateDirectoryDescription",
+                name = target_name
+            )
+        } else {
+            t!(
+                "fileTransfer.duplicateDescription",
+                kind = kind,
+                name = target_name
+            )
+        };
         let mut actions = div().flex().flex_wrap().justify_end().gap_2();
         for (id, label, decision) in [
             (
@@ -118,6 +124,47 @@ impl Render for DuplicatePromptDialogContent {
                     },
                 ),
             ));
+            if decision == SftpDuplicateDecision::Overwrite && self.prompt.upload_batch.is_some() {
+                let app = self.app.clone();
+                let answered = self.answered.clone();
+                let request_id = self.prompt.id.clone();
+                actions = actions.child(
+                    div()
+                        .debug_selector(|| "duplicate-overwrite-menu".to_string())
+                        .child(
+                            ZzClawDropdownMenu::new("duplicate-overwrite-menu")
+                                .label("▾")
+                                .tooltip(
+                                    t!("fileTransfer.duplicateOverwriteAllForTask").to_string(),
+                                )
+                                .min_width(px(260.))
+                                .items([
+                                    ZzClawMenuItem::action(
+                                        t!("fileTransfer.duplicateOverwriteAllForTask").to_string(),
+                                    )
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            if answered.swap(true, Ordering::AcqRel) {
+                                                return;
+                                            }
+                                            let _ = app.update(cx, |app, cx| {
+                                                app.resolve_duplicate_prompt_action(
+                                                    request_id.clone(),
+                                                    DuplicatePromptAction::OverwriteUploadBatch,
+                                                    cx,
+                                                );
+                                            });
+                                            window.close_nya_dialog(cx);
+                                        },
+                                    ),
+                                    ZzClawMenuItem::label(
+                                        t!("fileTransfer.duplicateOverwriteAllForTaskDesc")
+                                            .to_string(),
+                                    ),
+                                ]),
+                        ),
+                );
+            }
         }
         div()
             .id("duplicate-prompt-dialog")

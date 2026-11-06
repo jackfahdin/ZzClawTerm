@@ -1,23 +1,5 @@
-use rust_i18n::t;
-
-use crate::models::{
-    ActivityBarLayoutState, BottomPanelMode, NavItem, PanelSide, SessionEventBridge,
-    TerminalFramePipeline,
-};
-use crate::terminal::initial_terminal_screen;
-use gpui::{AppContext as _, Context};
-use std::collections::HashMap;
-use std::sync::Arc;
-use zzclawterm_core::{AppRuntime, WorkspaceUiState, uuid};
-use zzclawterm_store::BootstrapSnapshot;
-#[cfg(test)]
-use zzclawterm_store::{LoadBootstrap, StoreConfig, StoreRuntime};
-use zzclawterm_terminal::TerminalOutputDecoder;
-use zzclawterm_transport::SftpDuplicatePolicy;
-
-use crate::app_shell::session_hub::SessionHub;
-
 use super::{ZzClawTermApp, ZzClawTermProcessEntities, ZzClawTermStoreClients};
+use crate::app_shell::session_hub::SessionHub;
 use crate::features::ai::{
     AiFeatureFocus, AiFeatureInit, AiFeatureState, AiPanel, ai_active_profile_drafts,
 };
@@ -52,7 +34,22 @@ use crate::features::transfers::{TransferFeatureFocus, TransferFeatureState};
 use crate::features::translation::TranslationFeatureState;
 use crate::features::tunnels::{TunnelCatalogState, TunnelFeatureState};
 use crate::models::panel_collapsed_from_persistence;
+use crate::models::{
+    ActivityBarLayoutState, BottomPanelMode, NavItem, PanelSide, SessionEventBridge,
+    TerminalFramePipeline,
+};
 use crate::terminal::INITIAL_TERMINAL_BANNER;
+use crate::terminal::initial_terminal_screen;
+use gpui::{AppContext as _, Context};
+use rust_i18n::t;
+use std::collections::HashMap;
+use std::sync::Arc;
+use zzclawterm_core::{AppRuntime, WorkspaceUiState, uuid};
+use zzclawterm_files::sftp_transfer_types::SftpDuplicatePolicy;
+use zzclawterm_store::BootstrapSnapshot;
+#[cfg(test)]
+use zzclawterm_store::{LoadBootstrap, StoreConfig, StoreRuntime};
+use zzclawterm_terminal::TerminalOutputDecoder;
 impl ZzClawTermApp {
     pub(crate) fn from_bootstrap(
         runtime: AppRuntime,
@@ -67,6 +64,7 @@ impl ZzClawTermApp {
             process_state,
             update,
             plugins,
+            sync_operations,
         } = process_entities;
         let session_manager = session_hub.manager();
         let ssh_connections = session_hub.ssh_connections();
@@ -289,7 +287,6 @@ impl ZzClawTermApp {
             start_workspace,
             connection_panel,
             settings_panel,
-            native_settings_panel: None,
             transfer_panel,
             notes: NotesFeatureState::new(),
             notes_panel,
@@ -375,11 +372,13 @@ impl ZzClawTermApp {
             remote_desktop: RemoteDesktopFeatureState::new(cx.focus_handle()),
             translation: TranslationFeatureState::new(translation_settings),
             update,
-            cloud_sync: CloudSyncFeatureState::new(
-                cloud_sync_settings,
-                cloud_sync_state,
-                Vec::new(),
-            ),
+            cloud_sync: {
+                let mut state =
+                    CloudSyncFeatureState::new(cloud_sync_settings, cloud_sync_state, Vec::new());
+                state.operations = sync_operations;
+                state
+            },
+            activation: Default::default(),
             session: SessionFeatureState::new(
                 session_manager,
                 ssh_connections,
@@ -437,6 +436,7 @@ impl ZzClawTermApp {
                 },
             ),
             recording,
+            tmux: crate::features::tmux::TmuxFeatureState::default(),
             tunnel_state: TunnelFeatureState::new(TunnelCatalogState::new(
                 tunnels,
                 tunnel_groups,
@@ -501,6 +501,7 @@ impl ZzClawTermApp {
                 process_state,
                 update,
                 cx.new(|_| crate::features::plugins::PluginProcess::empty()),
+                Default::default(),
             ),
             workspace_init,
             ZzClawTermStoreClients::new(store_ui, store_blocking),

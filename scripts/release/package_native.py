@@ -15,6 +15,9 @@ import tarfile
 import textwrap
 import tomllib
 import zipfile
+
+import prepare_conpty
+import windows_portable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,7 +65,34 @@ VCXSRV_NOTICE = textwrap.dedent(
 MACOS_IDENTIFIER = "com.jackfahdin.zzclawterm"
 LINUX_PACKAGE = "zzclawterm"
 URL_SCHEME = "zzclawterm"
-PORTABLE_MARKER = "zzclawterm-portable"
+PORTABLE_MARKER = windows_portable.LAYOUT["marker"]
+CONPTY_LICENSE = Path(__file__).with_name("conpty-license.txt")
+
+
+def conpty_files(target: str) -> tuple[Path, ...]:
+    if target not in windows_portable.LAYOUT["conpty_files"]:
+        raise ValueError(f"ConPTY is only packaged for Windows targets: {target}")
+    return tuple(
+        Path(name).relative_to("conpty")
+        for name in windows_portable.LAYOUT["conpty_files"][target]
+    )
+
+
+def copy_conpty(destination: Path, target: str) -> list[Path]:
+    source_root = prepare_conpty.STAGING / "resources" / "windows" / "conpty"
+    copied = []
+    for relative in conpty_files(target):
+        source = source_root / relative
+        if not source.is_file():
+            raise FileNotFoundError(f"prepared ConPTY file not found: {source}")
+        output = destination / "conpty" / relative
+        output.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, output)
+        copied.append(output)
+    license_output = destination / "conpty" / "LICENSE.txt"
+    shutil.copy2(CONPTY_LICENSE, license_output)
+    copied.append(license_output)
+    return copied
 
 
 @dataclass(frozen=True)
@@ -71,6 +101,14 @@ class PackageIdentity:
     macos_identifier: str
     windows_registry_name: str
     desktop_id: str
+
+    @property
+    def url_schemes(self) -> tuple[str, ...]:
+        return (
+            (self.desktop_id, "ssh", "telnet")
+            if self.desktop_id == URL_SCHEME
+            else (self.desktop_id,)
+        )
 
     @property
     def macos_bundle_name(self) -> str:
@@ -185,11 +223,7 @@ def release_identity(version: str) -> PackageIdentity:
 
 def validate_version(raw: str, expected: str | None = None) -> str:
     version = normalize_version(raw)
-    if not re.fullmatch(
-        r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?",
-        version,
-    ):
-        raise ValueError(f"invalid release version: {raw}")
+    parse_version(version)
     if expected is not None and version != expected:
         raise ValueError(
             f"release version {version} does not match Cargo workspace version {expected}"
@@ -515,6 +549,7 @@ def create_windows_packages(
     portable_root.mkdir()
     shutil.copy2(binary, portable_root / "ZzClawTerm.exe")
     copy_helpers(portable_root, info.target)
+    copy_conpty(portable_root, info.target)
     stage_vcxsrv(portable_root)
     (portable_root / PORTABLE_MARKER).touch()
     (portable_root / "data").mkdir()
@@ -529,6 +564,7 @@ def create_windows_packages(
     installer_root.mkdir()
     shutil.copy2(binary, installer_root / "ZzClawTerm.exe")
     copy_helpers(installer_root, info.target)
+    copy_conpty(installer_root, info.target)
     stage_vcxsrv(installer_root)
     copy_release_documents(installer_root, version)
     shutil.copy2(ICON_DIR / "icon.ico", installer_root / "icon.ico")
@@ -578,8 +614,8 @@ def create_macos_packages(
         "CFBundleURLTypes": [
             {
                 "CFBundleTypeRole": "Viewer",
-                "CFBundleURLName": MACOS_IDENTIFIER,
-                "CFBundleURLSchemes": [URL_SCHEME],
+                "CFBundleURLName": identity.macos_identifier,
+                "CFBundleURLSchemes": list(identity.url_schemes),
             }
         ],
         "CFBundleVersion": version,
@@ -651,20 +687,22 @@ def linux_rpm_version(version: str) -> tuple[str, str]:
     return upstream, f"0.{normalized or 'preview'}"
 
 
-def write_desktop_file(path: Path, executable: str) -> None:
+def write_desktop_file(
+    path: Path, executable: str, identity: PackageIdentity = STABLE_IDENTITY
+) -> None:
     path.write_text(
         textwrap.dedent(
             f"""
             [Desktop Entry]
             Type=Application
-            Name=ZzClawTerm
+            Name={identity.display_name}
             Comment=Native GPUI terminal and SSH client
             Exec={executable} %U
-            Icon=zzclawterm
-            StartupWMClass=zzclawterm
+            Icon={identity.desktop_id}
+            StartupWMClass={identity.desktop_id}
             Terminal=false
             Categories=Development;TerminalEmulator;Network;
-            MimeType=x-scheme-handler/{URL_SCHEME};
+            MimeType={"".join(f"x-scheme-handler/{scheme};" for scheme in identity.url_schemes)}
             StartupNotify=true
             """
         ).lstrip(),
@@ -672,7 +710,7 @@ def write_desktop_file(path: Path, executable: str) -> None:
     )
 
 
-def copy_linux_icons(root: Path) -> None:
+def copy_linux_icons(root: Path, identity: PackageIdentity = STABLE_IDENTITY) -> None:
     icons = {
         "32x32": "32x32.png",
         "64x64": "64x64.png",
@@ -682,7 +720,7 @@ def copy_linux_icons(root: Path) -> None:
     for size, source in icons.items():
         destination = root / "usr" / "share" / "icons" / "hicolor" / size / "apps"
         destination.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ICON_DIR / source, destination / "zzclawterm.png")
+        shutil.copy2(ICON_DIR / source, destination / f"{identity.desktop_id}.png")
 
 
 def parse_dpkg_dependencies(output: str) -> str:
@@ -712,6 +750,7 @@ def linux_deb_dependencies(binaries: list[Path]) -> str:
 def create_linux_appimage(
     binary: Path, info: TargetInfo, version: str, artifact_version: str
 ) -> None:
+    identity = release_identity(version)
     appdir = WORK_DIR / "ZzClawTerm.AppDir"
     usr_bin = appdir / "usr" / "bin"
     usr_bin.mkdir(parents=True)
@@ -723,10 +762,12 @@ def create_linux_appimage(
 
     applications = appdir / "usr" / "share" / "applications"
     applications.mkdir(parents=True)
-    write_desktop_file(applications / "zzclawterm.desktop", APP_BIN)
-    shutil.copy2(applications / "zzclawterm.desktop", appdir / "zzclawterm.desktop")
-    shutil.copy2(ICON_DIR / "128x128.png", appdir / "zzclawterm.png")
-    copy_linux_icons(appdir)
+    write_desktop_file(applications / identity.linux_desktop_file, APP_BIN, identity)
+    shutil.copy2(
+        applications / identity.linux_desktop_file, appdir / identity.linux_desktop_file
+    )
+    shutil.copy2(ICON_DIR / "128x128.png", appdir / f"{identity.desktop_id}.png")
+    copy_linux_icons(appdir, identity)
 
     apprun = appdir / "AppRun"
     apprun.write_text(
@@ -746,6 +787,7 @@ def create_linux_appimage(
 def create_linux_deb(
     binary: Path, info: TargetInfo, version: str, artifact_version: str
 ) -> None:
+    identity = release_identity(version)
     root = WORK_DIR / "deb"
     app_root = root / "opt" / LINUX_PACKAGE
     app_root.mkdir(parents=True)
@@ -758,8 +800,12 @@ def create_linux_deb(
 
     applications = root / "usr" / "share" / "applications"
     applications.mkdir(parents=True)
-    write_desktop_file(applications / "zzclawterm.desktop", "/opt/zzclawterm/zzclawterm")
-    copy_linux_icons(root)
+    write_desktop_file(
+        applications / identity.linux_desktop_file,
+        f"/opt/{identity.desktop_id}/zzclawterm",
+        identity,
+    )
+    copy_linux_icons(root, identity)
 
     control_dir = root / "DEBIAN"
     control_dir.mkdir()
@@ -788,6 +834,7 @@ def create_linux_deb(
 def create_linux_rpm(
     binary: Path, info: TargetInfo, version: str, artifact_version: str
 ) -> None:
+    identity = release_identity(version)
     rpm_root = WORK_DIR / "rpm"
     top_dir = rpm_root / "rpmbuild"
     payload = rpm_root / "payload"
@@ -804,8 +851,12 @@ def create_linux_rpm(
     copy_release_documents(payload / "usr" / "share" / "doc" / LINUX_PACKAGE, version)
     applications = payload / "usr" / "share" / "applications"
     applications.mkdir(parents=True)
-    write_desktop_file(applications / "zzclawterm.desktop", "/opt/zzclawterm/zzclawterm")
-    copy_linux_icons(payload)
+    write_desktop_file(
+        applications / identity.linux_desktop_file,
+        f"/opt/{identity.desktop_id}/zzclawterm",
+        identity,
+    )
+    copy_linux_icons(payload, identity)
 
     rpm_version, rpm_release = linux_rpm_version(version)
     payload_path = str(payload.resolve()).replace("%", "%%")

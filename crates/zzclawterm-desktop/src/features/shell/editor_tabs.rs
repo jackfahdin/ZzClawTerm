@@ -1,15 +1,13 @@
-use std::collections::HashMap;
-
-use zzclawterm_transport::RemoteTextGeneration;
-use zzclawterm_ui::document_snapshot::ZzClawDocumentSnapshot;
-
+use crate::features::{AppLifecycleEvent, ZzClawTermApp};
+use crate::models::{NavItem, WorkspaceTabId};
 use gpui::{AppContext as _, Context, Window, div, prelude::*};
 use rust_i18n::t;
 use zzclawterm_core::InternalEditorDisplay;
+use zzclawterm_files::remote_file::RemoteTextGeneration;
+use zzclawterm_ui::document_snapshot::ZzClawDocumentSnapshot;
 use zzclawterm_ui::{ZzClawButton, ZzClawDialogWindowExt};
 
-use crate::features::{AppLifecycleEvent, ZzClawTermApp};
-use crate::models::{MainMode, NavItem, WorkspaceTabId};
+use std::collections::HashMap;
 
 pub(in crate::features) struct PendingWorkspaceClose {
     targets: Vec<String>,
@@ -45,6 +43,7 @@ impl ZzClawTermApp {
     }
 
     pub(crate) fn cancel_editor_exit_approval(&mut self) {
+        self.settings.take_quit_confirmation();
         self.shell.workspace.editor_exit_approvals.clear();
     }
 
@@ -98,7 +97,7 @@ impl ZzClawTermApp {
         match WorkspaceTabId::from_layout_key(key) {
             WorkspaceTabId::Session(id) => Some(id),
             WorkspaceTabId::Editor(id) => self.transfer.editor_tab_snapshot(&id)?.session_id,
-            WorkspaceTabId::FileManager(_) => None,
+            WorkspaceTabId::FileManager(_) | WorkspaceTabId::Settings => None,
         }
     }
 
@@ -107,6 +106,13 @@ impl ZzClawTermApp {
         key: &str,
         cx: &mut Context<Self>,
     ) {
+        let leaving_settings = self
+            .active_workspace_tab()
+            .is_some_and(|active| WorkspaceTabId::from_layout_key(&active).is_settings())
+            && !WorkspaceTabId::from_layout_key(key).is_settings();
+        if leaving_settings {
+            self.collapse_open_search_engine(cx);
+        }
         match WorkspaceTabId::from_layout_key(key) {
             WorkspaceTabId::Session(id) => {
                 self.select_session(id, cx);
@@ -137,7 +143,6 @@ impl ZzClawTermApp {
                     self.shell.sync_terminal_windows_active_tab(key);
                 self.shell.set_pane_focus_mode(false);
                 self.shell.navigation.selected_nav = NavItem::Workspace;
-                self.shell.navigation.main_mode = MainMode::Workspace;
                 self.shell.request_session_tab_scroll_into_view();
                 self.close_action_link_menu(cx);
                 let view = self.transfer.workspace_editor_view(&id);
@@ -147,6 +152,7 @@ impl ZzClawTermApp {
                 cx.notify();
             }
             WorkspaceTabId::FileManager(id) => self.activate_file_manager_tab(&id, cx),
+            WorkspaceTabId::Settings => self.activate_settings_workspace_tab(cx),
         }
     }
 
@@ -207,6 +213,15 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         if self.shell.workspace.editor_close.is_some() {
+            return;
+        }
+        // Settings owns a draft shared with the whole app and has its own
+        // confirmed close path; a mass-close must never discard it silently.
+        let targets = targets
+            .into_iter()
+            .filter(|key| !WorkspaceTabId::from_layout_key(key).is_settings())
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
             return;
         }
         self.shell.workspace.editor_close = Some(PendingWorkspaceClose {
@@ -341,6 +356,8 @@ impl ZzClawTermApp {
                         self.remove_workspace_file_manager_tab(&id, cx);
                     }
                     WorkspaceTabId::Session(id) => self.close_session(id, cx),
+                    // Filtered out in `request_workspace_tabs_close`.
+                    WorkspaceTabId::Settings => {}
                 }
             }
             self.release_unreferenced_editor_sessions(cx);
@@ -614,18 +631,17 @@ impl ZzClawTermApp {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{
-        Context, Entity, IntoElement, Modifiers, Render, TestAppContext, Window, div, prelude::*,
-    };
-    use zzclawterm_core::{InternalEditorDisplay, test_support::TestTempDir};
-    use zzclawterm_transport::RemoteTextWriteResult;
-    use zzclawterm_ui::ZzClawDialogWindowExt as _;
-
     use crate::features::ZzClawTermApp;
     use crate::features::test_support::{
         app_with_visible_local_session, editor_document as document,
     };
     use crate::models::{SmartSplitMode, TabDockEdge, TabDockZone, WorkspaceTabId};
+    use gpui::{
+        Context, Entity, IntoElement, Modifiers, Render, TestAppContext, Window, div, prelude::*,
+    };
+    use zzclawterm_core::{InternalEditorDisplay, test_support::TestTempDir};
+    use zzclawterm_files::remote_file::RemoteTextWriteResult;
+    use zzclawterm_ui::ZzClawDialogWindowExt as _;
 
     struct EditorCloseHost {
         app: Entity<ZzClawTermApp>,
@@ -1124,7 +1140,7 @@ mod tests {
                     request: crate::features::transfers::file_operations::FileOperationRequest::Mutation(
                         crate::features::transfers::file_operations::FileMutationIntent {
                             endpoint: crate::features::file_manager::PaneEndpoint::Local,
-                            directory: zzclawterm_transport::RemoteFilePath::new("/tmp"),
+                            directory: zzclawterm_files::sftp::RemoteFilePath::new("/tmp"),
                             mutation: crate::features::transfers::file_operations::FileMutation::CreateDirectory("out".into()),
                         }),
                     source_label: "local".into(), target_label: "local".into(),

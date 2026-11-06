@@ -7,12 +7,11 @@
 //! a slow load for a tab the user already refreshed or closed is dropped rather
 //! than shown.
 
+use gpui::RenderImage;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-use gpui::RenderImage;
 use zzclawterm_core::PreviewCategory;
-use zzclawterm_transport::RemoteTextGeneration;
+use zzclawterm_files::remote_file::RemoteTextGeneration;
 
 /// A single decoded page of a rasterized PDF, ready to paint.
 #[derive(Clone)]
@@ -478,7 +477,7 @@ pub(crate) struct TransferPreviewState {
 impl TransferPreviewState {
     pub(crate) fn tab_id_for_remote_path(
         session_id: Option<&str>,
-        remote_path: &zzclawterm_transport::RemoteFilePath,
+        remote_path: &zzclawterm_files::sftp::RemoteFilePath,
     ) -> String {
         format!(
             "{}\n{}",
@@ -487,8 +486,8 @@ impl TransferPreviewState {
         )
     }
 
-    pub(crate) fn remote_file_path(&self) -> zzclawterm_transport::RemoteFilePath {
-        zzclawterm_transport::RemoteFilePath {
+    pub(crate) fn remote_file_path(&self) -> zzclawterm_files::sftp::RemoteFilePath {
+        zzclawterm_files::sftp::RemoteFilePath {
             display_path: self.remote_path.clone(),
             raw_path_token: self.raw_path_token.clone(),
         }
@@ -587,13 +586,13 @@ fn disambiguated_label(name: &str, remote_path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use zzclawterm_core::PreviewCategory;
-    use zzclawterm_transport::{RemoteFilePath, RemoteTextGeneration};
-
     use super::{
         DelimitedSort, PreviewContent, PreviewDelimited, PreviewViewport, TransferPreviewState,
         TransferPreviewWorkspaceState,
     };
+    use zzclawterm_core::PreviewCategory;
+    use zzclawterm_files::remote_file::RemoteTextGeneration;
+    use zzclawterm_files::sftp::RemoteFilePath;
 
     fn preview_tab(session_id: &str, remote_path: &str) -> TransferPreviewState {
         TransferPreviewState {
@@ -880,6 +879,7 @@ mod tests {
     fn dummy_pdf_page() -> super::PreviewPdfPage {
         use gpui::RenderImage;
         use std::sync::Arc;
+
         // A 1x1 BGRA page; the surface content is irrelevant to cache logic.
         let bytes = vec![0u8, 0, 0, 255];
         let buffer = image::RgbaImage::from_raw(1, 1, bytes.clone()).unwrap();

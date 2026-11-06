@@ -1,12 +1,10 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::thread::JoinHandle;
-
-use futures::channel::mpsc::UnboundedSender;
-
 use crate::models::{
     TransferJobEvent, TransferJobKind, TransferJobResult, TransferJobState, TransferJobStatus,
 };
 use crate::thread_owner::spawn_joinable;
+use futures::channel::mpsc::UnboundedSender;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::thread::JoinHandle;
 
 #[cfg(test)]
 mod tests;
@@ -16,6 +14,7 @@ enum Direction {
     Download,
     Upload,
     Copy,
+    Delete,
 }
 
 impl Direction {
@@ -24,6 +23,7 @@ impl Direction {
             TransferJobKind::Download { .. } => Some(Self::Download),
             TransferJobKind::Upload { .. } => Some(Self::Upload),
             TransferJobKind::SendTo { .. } => Some(Self::Copy),
+            TransferJobKind::Delete { .. } => Some(Self::Delete),
             _ => None,
         }
     }
@@ -32,6 +32,7 @@ impl Direction {
             Self::Download => 0,
             Self::Upload => 1,
             Self::Copy => 2,
+            Self::Delete => 3,
         }
     }
 }
@@ -68,6 +69,27 @@ impl TransferAdmission {
         work: Box<dyn FnOnce() + Send>,
     ) {
         let direction = Direction::of(&job.kind).expect("bulk transfer direction");
+        self.enqueue_in_direction(job, direction, name, tx, work);
+    }
+
+    pub(super) fn enqueue_delete(
+        &mut self,
+        job: &mut TransferJobState,
+        name: &'static str,
+        tx: UnboundedSender<TransferJobResult>,
+        work: Box<dyn FnOnce() + Send>,
+    ) {
+        self.enqueue_in_direction(job, Direction::Delete, name, tx, work);
+    }
+
+    fn enqueue_in_direction(
+        &mut self,
+        job: &mut TransferJobState,
+        direction: Direction,
+        name: &'static str,
+        tx: UnboundedSender<TransferJobResult>,
+        work: Box<dyn FnOnce() + Send>,
+    ) {
         job.status = TransferJobStatus::Queued;
         job.detail = "Queued".to_string();
         self.order.push_back(job.id.clone());
@@ -94,11 +116,25 @@ impl TransferAdmission {
         download: u32,
         upload: u32,
     ) -> Vec<JoinHandle<()>> {
+        self.reconcile_with_spawn(jobs, download, upload, |name, work| {
+            spawn_joinable(name, work)
+        })
+    }
+
+    fn reconcile_with_spawn(
+        &mut self,
+        jobs: &mut [TransferJobState],
+        download: u32,
+        upload: u32,
+        mut spawn: impl FnMut(&'static str, Box<dyn FnOnce() + Send>) -> std::io::Result<JoinHandle<()>>,
+    ) -> Vec<JoinHandle<()>> {
         let limit = |value: u32| value.clamp(1, 10).saturating_sub(1).max(1) as usize;
         let limits = [
             limit(download),
             limit(upload),
             limit(download).min(limit(upload)),
+            // All delete entry points share this quota, independently of transfer settings.
+            2,
         ];
         let positions: HashMap<_, _> = jobs
             .iter()
@@ -107,7 +143,7 @@ impl TransferAdmission {
             .collect();
         let mut retired = Vec::new();
         let mut remove = Vec::new();
-        let mut running = [0_usize; 3];
+        let mut running = [0_usize; 4];
         for (id, task) in &mut self.tasks {
             let job = positions.get(id).map(|&index| &mut jobs[index]);
             match job {
@@ -120,15 +156,22 @@ impl TransferAdmission {
                             | TransferJobStatus::Cancelling
                     ) =>
                 {
-                    if job.status == TransferJobStatus::Cancelling && task.work.is_some() {
+                    if task.work.is_some()
+                        && (job.status == TransferJobStatus::Cancelling
+                            || job
+                                .control
+                                .as_ref()
+                                .is_some_and(|control| control.is_cancelled()))
+                    {
                         // Remain non-retryable until the terminal event is consumed;
                         // otherwise that event could cancel a retry using the same id.
+                        job.status = TransferJobStatus::Cancelling;
                         job.detail = "Cancelling".to_string();
                         job.control = None;
                         let _ = task.tx.unbounded_send(TransferJobResult {
                             id: id.clone(),
                             event: TransferJobEvent::Finished(Err(
-                                zzclawterm_transport::SFTP_TRANSFER_CANCELLED.into(),
+                                zzclawterm_files::sftp::SFTP_TRANSFER_CANCELLED.into(),
                             )),
                         });
                         remove.push(id.clone());
@@ -187,7 +230,15 @@ impl TransferAdmission {
             }
             task.admitted = true;
             job.status = TransferJobStatus::Running;
-            job.detail = "Transferring".to_string();
+            job.detail = if matches!(task.direction, Direction::Delete) {
+                rust_i18n::t!(
+                    "fileTransfer.detailDeleting",
+                    path = job.display_name.clone()
+                )
+                .to_string()
+            } else {
+                "Transferring".to_string()
+            };
             if let Some(control) = &job.control {
                 control.resume();
             }
@@ -195,18 +246,36 @@ impl TransferAdmission {
             if let Some(work) = task.work.take() {
                 let tx = task.tx.clone();
                 let failure_id = id.clone();
+                let control = job.control.clone();
                 // A paused transfer must not occupy a shared blocking-pool slot:
                 // its operation retains its runtime and can be readmitted later.
-                match spawn_joinable(task.name, move || {
-                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).is_err() {
-                        let _ = tx.unbounded_send(TransferJobResult {
-                            id: failure_id,
-                            event: TransferJobEvent::Finished(Err(
-                                "transfer worker panicked".into()
-                            )),
-                        });
-                    }
-                }) {
+                match spawn(
+                    task.name,
+                    Box::new(move || {
+                        // Cancellation may arrive after admission but before the worker starts.
+                        // Once work starts, its own result remains authoritative.
+                        if control
+                            .as_ref()
+                            .is_some_and(|control| control.is_cancelled())
+                        {
+                            let _ = tx.unbounded_send(TransferJobResult {
+                                id: failure_id,
+                                event: TransferJobEvent::Finished(Err(
+                                    zzclawterm_files::sftp::SFTP_TRANSFER_CANCELLED.into(),
+                                )),
+                            });
+                            return;
+                        }
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).is_err() {
+                            let _ = tx.unbounded_send(TransferJobResult {
+                                id: failure_id,
+                                event: TransferJobEvent::Finished(Err(
+                                    "transfer worker panicked".into()
+                                )),
+                            });
+                        }
+                    }),
+                ) {
                     Ok(thread) => task.thread = Some(thread),
                     Err(_) => {
                         let _ = task.tx.unbounded_send(TransferJobResult {

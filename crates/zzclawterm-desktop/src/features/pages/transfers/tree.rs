@@ -1,16 +1,15 @@
+use super::panel::TransferPanel;
+use crate::features::view_widgets::transfer_entry_icon;
 use gpui::{
     Context, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement as _,
     SharedString, Styled as _, div, prelude::*, px, rgb, uniform_list,
 };
 use rust_i18n::t;
-use zzclawterm_transport::{SftpFileEntry, SftpFileType};
+use zzclawterm_files::sftp::{SftpFileEntry, SftpFileType};
+
 use zzclawterm_ui::{
     ZzClawButton, ZzClawButtonVariant, ZzClawContextMenu, ZzClawUniformListScrollbar,
 };
-
-use crate::features::view_widgets::transfer_entry_icon;
-
-use super::panel::TransferPanel;
 
 pub(super) fn transfer_tree_view(
     panel: &TransferPanel,
@@ -368,10 +367,9 @@ fn transfer_tree_hover_details(entry: &SftpFileEntry) -> String {
 
 #[cfg(test)]
 mod tests {
-    use zzclawterm_transport::SftpFileEntry;
-    use zzclawterm_transport::SftpFileType;
 
     use super::transfer_tree_hover_details;
+    use zzclawterm_files::sftp::{SftpFileEntry, SftpFileType};
 
     #[test]
     fn hover_details_use_only_cached_entry_metadata() {

@@ -1,12 +1,9 @@
-use gpui::{Context, Window};
-use zzclawterm_transport::{RemoteFilePath, SftpFileEntry};
-
-use std::collections::VecDeque;
-
+use super::{normalized_transfer_browser_path, remote_file_name, remote_parent_path};
 use crate::features::ZzClawTermApp;
 use crate::models::{TransferBrowserNavigationSnapshot, TransferBrowserSessionCacheState};
-
-use super::{normalized_transfer_browser_path, remote_file_name, remote_parent_path};
+use gpui::{Context, Window};
+use std::collections::VecDeque;
+use zzclawterm_files::sftp::{RemoteFilePath, SftpFileEntry};
 
 impl ZzClawTermApp {
     pub(in crate::features::pages::transfers) fn toggle_transfer_browser_view_mode(
@@ -29,8 +26,8 @@ impl ZzClawTermApp {
         let backend = self
             .session
             .active_file_browser_backend()
-            .unwrap_or(zzclawterm_transport::FileBrowserBackendKind::Remote);
-        zzclawterm_transport::valid_file_browser_child_name(backend, name)
+            .unwrap_or(zzclawterm_files::file_browser::FileBrowserBackendKind::Remote);
+        zzclawterm_files::file_browser::valid_file_browser_child_name(backend, name)
     }
 
     pub(in crate::features) fn cache_transfer_browser_session(&mut self, session_id: &str) {
@@ -143,7 +140,7 @@ impl ZzClawTermApp {
         }
 
         if self.session.active_file_browser_backend()
-            == Some(zzclawterm_transport::FileBrowserBackendKind::Remote)
+            == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Remote)
         {
             self.start_transfer_initial_directory_job(cx);
             return;

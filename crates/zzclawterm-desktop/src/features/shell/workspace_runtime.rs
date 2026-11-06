@@ -1,18 +1,16 @@
-use std::collections::HashSet;
-
-use gpui::{
-    Context, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, deferred,
-};
-use zzclawterm_store::{StoreDomain, store_request};
-
 use crate::features::{
     ZzClawTermApp, formatting::short_id, view_widgets::horizontal_resize_handle_visual,
     view_widgets::vertical_resize_handle_visual,
 };
 use crate::models::{
-    MainMode, NavItem, WorkspacePaneNode, WorkspaceSplitDirection, WorkspaceSplitResizeState,
+    NavItem, WorkspacePaneNode, WorkspaceSplitDirection, WorkspaceSplitResizeState,
 };
+use gpui::{
+    Context, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, deferred,
+};
+use std::collections::HashSet;
+use zzclawterm_store::{StoreDomain, store_request};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn live_session_ids(&self) -> HashSet<String> {
@@ -35,21 +33,32 @@ impl ZzClawTermApp {
             let Some(root) = self.shell.workspace.pane_roots.remove(&tab_root) else {
                 continue;
             };
-            if let Some(node) = root.prune(&live_ids)
-                && node.is_split()
-            {
-                // Keep map key as original tab root when still present; else rekey.
-                let key = if node.contains_session(&tab_root) {
-                    tab_root.clone()
-                } else {
-                    node.session_ids()
+            if let Some(node) = root.prune(&live_ids) {
+                if live_ids.iter().any(|id| id == &tab_root) {
+                    // The tab root session is still alive: keep the projection
+                    // under it even when it pruned to a plain leaf or the root
+                    // is not a leaf of its own tree. A tmux control window
+                    // always projects foreign pane sessions under the host tab
+                    // — dropping or rekeying it would render the host's dead
+                    // control channel and make the tab look frozen while input
+                    // still routes to the hidden pane.
+                    self.shell
+                        .workspace
+                        .pane_roots
+                        .insert(tab_root.clone(), node);
+                } else if node.is_split() {
+                    // Root session is gone: rekey the surviving split under its
+                    // first leaf so the group keeps rendering.
+                    let key = node
+                        .session_ids()
                         .into_iter()
                         .next()
-                        .unwrap_or_else(|| tab_root.clone())
-                };
-                self.shell.workspace.pane_roots.insert(key, node);
+                        .unwrap_or_else(|| tab_root.clone());
+                    self.shell.workspace.pane_roots.insert(key, node);
+                }
+                // Root gone + single surviving leaf collapses to no stored
+                // tree; the leaf becomes a normal top-level tab.
             }
-            // Single leaf collapses to no stored tree for this tab.
         }
         // Also prune legacy workspace_split if roots empty (migration path).
         if self.shell.workspace.pane_roots.is_empty()
@@ -97,13 +106,7 @@ impl ZzClawTermApp {
             return;
         };
         let tab_root = self.tab_root_for_session(&active);
-        self.shell.workspace.split = self
-            .shell
-            .workspace
-            .pane_roots
-            .get(&tab_root)
-            .filter(|root| root.is_split())
-            .cloned();
+        self.shell.workspace.split = self.shell.workspace.pane_roots.get(&tab_root).cloned();
         self.sync_terminal_frame_snapshot_priority();
     }
 
@@ -176,9 +179,9 @@ impl ZzClawTermApp {
             return;
         }
         self.activate_session_id_with_surface_sync(&session_id, cx);
+        self.tmux_sync_active_pane(&session_id);
         self.sync_workspace_split_from_active_tab();
         self.shell.navigation.selected_nav = NavItem::Workspace;
-        self.shell.navigation.main_mode = MainMode::Workspace;
         self.shell
             .set_status(format!("focused pane {}", short_id(&session_id)));
         cx.notify();
@@ -392,6 +395,20 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let palette = self.theme_palette();
+        // tmux-projected splits (`tmux-split-*` ids from
+        // `workspace_node_from_tmux`) are layout-locked at 50/50: the divider
+        // is a plain line with no hover cursor or drag gesture, because the
+        // tmux layout — not the pointer — owns the geometry.
+        if split_id.starts_with("tmux-") {
+            return match direction {
+                WorkspaceSplitDirection::Horizontal => {
+                    horizontal_resize_handle_visual(palette, false, false).into_any_element()
+                }
+                WorkspaceSplitDirection::Vertical => {
+                    vertical_resize_handle_visual(palette, false, false).into_any_element()
+                }
+            };
+        }
         let dragging = self
             .shell
             .workspace
@@ -563,7 +580,6 @@ impl ZzClawTermApp {
             };
             if self.apply_restored_workspace_pane_layout(restored, active.as_deref(), cx) {
                 self.shell.navigation.selected_nav = NavItem::Workspace;
-                self.shell.navigation.main_mode = MainMode::Workspace;
                 self.shell
                     .set_status("restored workspace pane layout".to_string());
                 cx.notify();
@@ -601,7 +617,6 @@ impl ZzClawTermApp {
                     return;
                 }
                 this.shell.navigation.selected_nav = NavItem::Workspace;
-                this.shell.navigation.main_mode = MainMode::Workspace;
                 this.shell
                     .set_status("restored workspace pane layout".to_string());
                 cx.notify();
@@ -613,15 +628,15 @@ impl ZzClawTermApp {
 
 #[cfg(test)]
 mod restore_activation_tests {
-    use gpui::{AppContext as _, TestAppContext};
-    use zzclawterm_core::{AiExecutionProfile, AppRuntime, RuntimeMode, uuid};
-    use zzclawterm_transport::{LocalSessionConfig, RemoteStats, SshSessionConfig};
-
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
     use crate::features::ZzClawTermApp;
     use crate::models::{
         SessionLaunchConfig, SessionRuntimeMetadata, WorkspacePaneNode, WorkspaceSplitDirection,
     };
+    use gpui::{AppContext as _, TestAppContext};
+    use zzclawterm_core::{AiExecutionProfile, AppRuntime, RuntimeMode, uuid};
+    use zzclawterm_remote_ops::stats::RemoteStats;
+    use zzclawterm_transport::{LocalSessionConfig, SshSessionConfig};
 
     fn app(cx: &mut TestAppContext) -> gpui::Entity<ZzClawTermApp> {
         // A uuid rather than a clock reading: these tests run in parallel and

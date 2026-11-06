@@ -1,16 +1,3 @@
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use zzclawterm_core::ActionLinksMatcherSettings;
-use zzclawterm_terminal::{
-    TerminalEffects, TerminalOutputDecoder, TerminalScreen, TerminalSearchDirection,
-    TerminalSearchQuery, TerminalSnapshot,
-};
-
-use crate::models::recording::RecordingWritePipeline;
-use crate::terminal::{TerminalLineDecorations, terminal_screen_from_output};
-
 use super::{
     FindSearchJob, SELECTED_OCCURRENCE_SEARCH_CHUNK_ROWS, SelectedOccurrenceSearchJob,
     TERMINAL_FRAME_COMMAND_QUEUE_CAP, TERMINAL_FRAME_EVENT_WAKE_ALL,
@@ -39,6 +26,39 @@ use super::{
     terminal_line_decorations_estimated_bytes, terminal_snapshot_matches_grid_geometry,
     try_next_terminal_frame_command,
 };
+use crate::models::recording::RecordingWritePipeline;
+use crate::terminal::{TerminalLineDecorations, terminal_screen_from_output};
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use zzclawterm_core::ActionLinksMatcherSettings;
+use zzclawterm_terminal::{
+    TerminalEffects, TerminalOutputDecoder, TerminalScreen, TerminalSearchDirection,
+    TerminalSearchQuery, TerminalSnapshot,
+};
+
+#[test]
+fn frame_worker_wrap_preference_applies_to_created_seeded_and_transferred_sessions() {
+    let pipeline = TerminalFramePipeline::default();
+    pipeline.seed_session("existing", "abc", "UTF-8", 100);
+    pipeline.set_logical_line_snapshots(true);
+    pipeline.ensure_session("new", "UTF-8", 100);
+    pipeline.seed_session("seeded", "def", "UTF-8", 100);
+    pipeline.submit_output("from-output", b"ghi".to_vec(), "UTF-8", 100);
+    pipeline.finish_pending_output().unwrap();
+    for id in ["existing", "new", "seeded", "from-output"] {
+        let session = pipeline.take_session_for_transfer(id).unwrap().unwrap();
+        let geometry = (session.screen.cols(), session.screen.rows());
+        assert!(session.screen.snapshot().logical_lines.is_some(), "{id}");
+        let target = TerminalFramePipeline::default();
+        target
+            .insert_sessions_from_transfer(vec![(id.into(), session)])
+            .unwrap();
+        let session = target.take_session_for_transfer(id).unwrap().unwrap();
+        assert!(session.screen.snapshot().logical_lines.is_none());
+        assert_eq!((session.screen.cols(), session.screen.rows()), geometry);
+    }
+}
 
 #[test]
 fn frame_worker_publishes_input_colors_with_each_echo_and_obeys_rule_changes() {
@@ -148,6 +168,24 @@ fn line_number_gutter_keeps_high_water_width_after_scrollback_prunes() {
     snapshot.total_rows = 9;
     view.observe_line_number_digits(&snapshot);
     assert_eq!(view.max_line_number_digits, 4);
+}
+
+#[test]
+fn clear_all_resets_line_number_gutter_high_water_width() {
+    let mut view = TerminalViewState::new();
+    let mut snapshot = TerminalScreen::default().viewport_snapshot(0);
+    snapshot.total_rows = 100_000;
+    view.observe_line_number_digits(&snapshot);
+    assert_eq!(view.max_line_number_digits, 6);
+
+    let cleared = TerminalScreen::default().viewport_snapshot(0);
+    let expected = cleared.total_rows.max(1).to_string().len();
+    view.clear_presentation_except_input(2, &cleared);
+    assert_eq!(view.max_line_number_digits, expected);
+
+    // Output after the clear keeps numbering small; the width stays restored.
+    view.observe_line_number_digits(&cleared);
+    assert_eq!(view.max_line_number_digits, expected);
 }
 
 fn selected_occurrence_test_key(
@@ -343,6 +381,7 @@ fn apply_output_frame_to_view(view: &mut TerminalViewState, frame: TerminalFrame
     } = frame;
     let Some(snapshot) = snapshot else {
         view.apply_terminal_background_frame_parts(
+            &visible_text,
             None,
             None,
             protocol_state,
@@ -997,12 +1036,23 @@ fn terminal_frame_large_accepted_output_does_not_show_protection_overlay() {
 }
 
 #[test]
-fn terminal_background_frame_apply_skips_render_work() {
+fn terminal_degraded_frame_apply_keeps_output_tail() {
+    let mut view = TerminalViewState::new();
+    view.render_degraded = true;
+
+    apply_output_frame_to_view(&mut view, output_frame_with_sizes(1, 0));
+
+    assert_eq!(view.output, "x");
+}
+
+#[test]
+fn terminal_background_frame_apply_skips_render_work_but_keeps_output_tail() {
     let mut view = TerminalViewState::new();
     view.render_degraded = false;
     let frame = output_frame_with_sizes((32 * 1024) + 1, 0);
 
     view.apply_terminal_background_frame_parts(
+        &frame.visible_text,
         frame.snapshot.clone(),
         frame.action_links.clone(),
         frame.protocol_state,
@@ -1010,7 +1060,8 @@ fn terminal_background_frame_apply_skips_render_work() {
         frame.revision,
     );
 
-    assert_eq!(view.output, "");
+    // AI context and MCP read this tail for sessions that are not on screen.
+    assert_eq!(view.output, "x");
     assert_eq!(view.screen_revision, frame.revision);
     assert!(view.frame_snapshot.is_some());
     assert_eq!(view.output_burst_bytes, 0);
@@ -1485,7 +1536,7 @@ fn terminal_ui_output_tail_is_bounded_and_utf8_safe() {
 fn terminal_frame_visible_text_event_keeps_only_tail_for_ui() {
     let mut session = TerminalFrameSession::new("UTF-8", 1000);
     let mut recording_pipeline = super::super::RecordingWritePipeline::spawn(
-        zzclawterm_transport::DEFAULT_MEMORY_LIMIT_BYTES,
+        zzclawterm_recording::recording::DEFAULT_MEMORY_LIMIT_BYTES,
     );
     let mut recording_events = recording_pipeline
         .take_event_receiver()
@@ -2328,6 +2379,33 @@ fn terminal_frame_action_links_align_with_snapshot_lines() {
 }
 
 #[test]
+fn mac_ranges_map_wide_text_and_invalidate_only_when_the_matcher_changes() {
+    let mut screen = TerminalScreen::new(80, 3);
+    screen.advance_decoded_text("设备 [905d.7c16.b6d9]");
+    let snapshot = screen.viewport_snapshot(0);
+    let mut matchers = ActionLinksMatcherSettings::default();
+    let links = prepare_terminal_frame_action_links(&snapshot, true, &matchers).unwrap();
+    assert_eq!(
+        links.matches_by_line[0][0].kind,
+        crate::action_links::ActionLinkKind::Mac
+    );
+    assert_eq!(links.cell_ranges_by_line[0], [(6, 20)]);
+    let (_, stats) =
+        prepare_terminal_frame_action_links_reusing(&snapshot, true, &matchers, Some(&links));
+    assert_eq!(stats.reused_rows, snapshot.row_count());
+    assert_eq!(stats.rebuilt_rows, 0);
+    matchers.mac = false;
+    let (disabled, stats) =
+        prepare_terminal_frame_action_links_reusing(&snapshot, true, &matchers, Some(&links));
+    let disabled = disabled.unwrap();
+    assert_ne!(links.matcher_key, disabled.matcher_key);
+    assert_eq!(stats.reused_rows, 0);
+    assert_eq!(stats.rebuilt_rows, snapshot.row_count());
+    assert!(disabled.matches_by_line.iter().all(Vec::is_empty));
+    assert!(disabled.cell_ranges_by_line.iter().all(Vec::is_empty));
+}
+
+#[test]
 fn terminal_frame_action_links_reuse_unchanged_rows() {
     let mut screen = TerminalScreen::new(80, 8);
     screen.advance_decoded_text("visit http://example.com");
@@ -2520,7 +2598,7 @@ fn terminal_frame_worker_batches_output_burst_into_single_frame() {
     drop(tx);
 
     let recording_pipeline = super::super::RecordingWritePipeline::spawn(
-        zzclawterm_transport::DEFAULT_MEMORY_LIMIT_BYTES,
+        zzclawterm_recording::recording::DEFAULT_MEMORY_LIMIT_BYTES,
     );
     let mut pending = VecDeque::new();
     let mut sessions = HashMap::new();
@@ -2575,7 +2653,7 @@ fn terminal_frame_worker_collects_trailing_output_before_emitting() {
     }));
     drop(tx);
     let recording_pipeline = super::super::RecordingWritePipeline::spawn(
-        zzclawterm_transport::DEFAULT_MEMORY_LIMIT_BYTES,
+        zzclawterm_recording::recording::DEFAULT_MEMORY_LIMIT_BYTES,
     );
     let mut pending = VecDeque::new();
     let mut sessions = HashMap::new();
@@ -2612,7 +2690,7 @@ fn terminal_frame_worker_amortizes_snapshot_across_sixteen_pty_chunks() {
     drop(tx);
 
     let recording_pipeline = super::super::RecordingWritePipeline::spawn(
-        zzclawterm_transport::DEFAULT_MEMORY_LIMIT_BYTES,
+        zzclawterm_recording::recording::DEFAULT_MEMORY_LIMIT_BYTES,
     );
     let mut pending = VecDeque::new();
     let mut sessions = HashMap::new();
@@ -2659,7 +2737,7 @@ fn terminal_frame_worker_batch_stops_at_resize_boundary() {
     drop(tx);
 
     let recording_pipeline = super::super::RecordingWritePipeline::spawn(
-        zzclawterm_transport::DEFAULT_MEMORY_LIMIT_BYTES,
+        zzclawterm_recording::recording::DEFAULT_MEMORY_LIMIT_BYTES,
     );
     let mut pending = VecDeque::new();
     let mut sessions = HashMap::new();
@@ -2696,7 +2774,7 @@ fn terminal_frame_output_burst_does_not_wait_for_a_live_sender() {
     let (tx, rx) = terminal_frame_command_channel();
 
     let recording_pipeline = super::super::RecordingWritePipeline::spawn(
-        zzclawterm_transport::DEFAULT_MEMORY_LIMIT_BYTES,
+        zzclawterm_recording::recording::DEFAULT_MEMORY_LIMIT_BYTES,
     );
     let mut pending = VecDeque::new();
     let mut sessions = HashMap::new();
@@ -3863,7 +3941,7 @@ fn interleaved_frame_sessions_keep_their_own_output_and_recording_charsets() {
 
 #[test]
 fn synthetic_command_blocks_preserve_order_without_recording_or_output_observers() {
-    use zzclawterm_transport::{
+    use zzclawterm_recording::recording::{
         ExistingFileBehavior, RecordingContext, RecordingMode, RecordingProfile,
         RecordingRotationPolicy,
     };
@@ -3999,7 +4077,14 @@ fn hidden_session_keeps_history_anchor_when_releasing_its_snapshot() {
     view.apply_terminal_live_snapshot_frame(Arc::new(worker.snapshot()), None, 1);
     view.scroll_offset = 3;
     let baseline = view.history_state();
-    view.apply_terminal_background_frame_parts(None, None, TerminalProtocolState::default(), 0, 2);
+    view.apply_terminal_background_frame_parts(
+        "",
+        None,
+        None,
+        TerminalProtocolState::default(),
+        0,
+        2,
+    );
     assert!(view.frame_snapshot.is_none());
     assert_eq!(view.history_state(), baseline);
     worker.advance(b"12\r\n13\r\n");

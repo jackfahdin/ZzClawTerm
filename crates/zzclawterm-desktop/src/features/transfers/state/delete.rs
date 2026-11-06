@@ -1,10 +1,9 @@
-use std::collections::{HashMap, HashSet};
-
-use zzclawterm_transport::{
-    FileBrowserBackendKind, RemoteFilePath, file_browser_identity, file_browser_parent,
-};
-
 use super::TransferFeatureState;
+use std::collections::{HashMap, HashSet};
+use zzclawterm_files::file_browser::{
+    FileBrowserBackendKind, file_browser_identity, file_browser_parent,
+};
+use zzclawterm_files::sftp::RemoteFilePath;
 
 pub(super) struct TransferDeleteBatch {
     backend: FileBrowserBackendKind,
@@ -192,7 +191,8 @@ impl TransferFeatureState {
 #[cfg(test)]
 mod tests {
     use super::TransferDeleteBatch;
-    use zzclawterm_transport::{FileBrowserBackendKind, RemoteFilePath};
+    use zzclawterm_files::file_browser::FileBrowserBackendKind;
+    use zzclawterm_files::sftp::RemoteFilePath;
 
     #[cfg(windows)]
     #[test]

@@ -1,5 +1,4 @@
 use std::sync::Arc;
-
 use zzclawterm_transport::SessionManager;
 
 pub(crate) mod ssh_connections;
@@ -19,7 +18,13 @@ pub struct SessionHub {
 impl SessionHub {
     pub fn new() -> Self {
         Self {
-            manager: Arc::new(SessionManager::new()),
+            manager: Arc::new(SessionManager::with_ssh_services(
+                zzclawterm_transport::ssh_services::SshSessionServices {
+                    file_session_probe: Some(Arc::new(
+                        zzclawterm_files::session_probe::SftpSessionProbe,
+                    )),
+                },
+            )),
             ssh_connections: SshConnectionPool::default(),
         }
     }

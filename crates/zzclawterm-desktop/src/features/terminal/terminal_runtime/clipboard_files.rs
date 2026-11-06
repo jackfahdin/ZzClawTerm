@@ -4,7 +4,8 @@ use crate::models::{
     TransferJobStatus,
 };
 use gpui::{Context, Image};
-use zzclawterm_transport::{FileBrowserService, SftpTransferControl};
+use zzclawterm_files::file_browser::FileBrowserService;
+use zzclawterm_files::sftp::SftpTransferControl;
 
 impl ZzClawTermApp {
     pub(super) fn paste_clipboard_image(&mut self, image: Image, cx: &mut Context<Self>) {

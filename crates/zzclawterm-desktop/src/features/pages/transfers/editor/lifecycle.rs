@@ -1,13 +1,12 @@
-use gpui::{Context, Window};
-use zzclawterm_transport::{RemoteFilePath, RemoteTextGeneration, RemoteTextRevision};
-
+use super::super::NATIVE_EDITOR_MAX_BYTES;
 use crate::features::ZzClawTermApp;
 use crate::models::{
     TransferJobEvent, TransferJobKind, TransferJobOutput, TransferJobResult, TransferJobState,
     TransferJobStatus,
 };
-
-use super::super::NATIVE_EDITOR_MAX_BYTES;
+use gpui::{Context, Window};
+use zzclawterm_files::remote_file::{RemoteTextGeneration, RemoteTextRevision};
+use zzclawterm_files::sftp::RemoteFilePath;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn activate_transfer_editor_tab(

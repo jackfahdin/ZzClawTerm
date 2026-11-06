@@ -18,9 +18,14 @@ pub type ZzClawRoot = gpui_kit::component::Root;
 
 pub type ZzClawWindowHandle = WindowHandle<ZzClawRoot>;
 
+/// Install component actions and keybindings once before creating UI roots.
+pub fn init_components(cx: &mut App) {
+    gpui_kit::init(cx);
+}
+
 /// Override only this window's component root; restoring removes the override so
 /// subsequent theme changes continue to supply the background normally.
-pub fn set_nya_root_transparent(root: &mut ZzClawRoot, transparent: bool) {
+pub fn set_zzclaw_root_transparent(root: &mut ZzClawRoot, transparent: bool) {
     root.style().background = transparent.then(|| gpui::rgba(0).into());
 }
 
@@ -112,12 +117,12 @@ mod tests {
             zzclaw_root(content, window, cx)
         });
         main.update(cx, |root, _| {
-            super::set_nya_root_transparent(root, true);
+            super::set_zzclaw_root_transparent(root, true);
             assert_eq!(root.style().background, Some(gpui::rgba(0).into()));
         });
         child.update(cx, |root, _| assert!(root.style().background.is_none()));
         main.update(cx, |root, _| {
-            super::set_nya_root_transparent(root, false);
+            super::set_zzclaw_root_transparent(root, false);
             assert!(root.style().background.is_none());
         });
     }

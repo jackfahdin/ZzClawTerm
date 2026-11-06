@@ -5,24 +5,68 @@ use zzclawterm_core::ai::AiCommandCard;
 use zzclawterm_core::ai::harness::{
     AgentPlan, AgentTool, AgentToolCall, AgentToolResult, AgentVerification,
 };
-use zzclawterm_core::capabilities::CapabilityScopeSnapshot;
+use zzclawterm_core::capabilities::{AgentApprovalDecision, CapabilityScopeSnapshot};
 use zzclawterm_mcp_protocol::{RpcError, TerminalExecuteArgs};
 
 use crate::features::ZzClawTermApp;
 use crate::features::capability_runtime::{CapabilityCaller, CapabilityRequest};
-use crate::features::runtime_jobs::{AiChatJobResult, AiChatWorkerEvent};
 
-use super::ai_jobs::{AiJobRunOptions, run_ai_ask_job};
 use super::presentation::AiAgentStepKind;
 
 impl ZzClawTermApp {
-    pub(in crate::features) fn cancel_native_run_for_closed_session(
+    pub(in crate::features) fn respond_to_native_capability_approval(
+        &mut self,
+        run_id: &str,
+        ai_session_id: &str,
+        request_id: &str,
+        decision: AgentApprovalDecision,
+        cx: &mut Context<Self>,
+    ) {
+        // A virtualized row can outlive its conversation or tool call. Never
+        // let a stale callback approve another run, even after a scope switch.
+        if self.ai.chat_session_id() != ai_session_id
+            || !self.ai.native_run_is_live(run_id, ai_session_id)
+            || !self.ai.native_run_view().is_some_and(|view| {
+                view.run_id == run_id
+                    && view
+                        .call_id
+                        .as_ref()
+                        .is_some_and(|call_id| request_id == format!("native:{run_id}:{call_id}"))
+            })
+            || !self
+                .mcp
+                .capabilities
+                .native_approval_requests(run_id, ai_session_id)
+                .iter()
+                .any(|view| view.approval.request_id == request_id)
+        {
+            return;
+        }
+        self.respond_to_mcp_approval(request_id, decision, cx);
+    }
+
+    pub(in crate::features) fn cancel_ai_run_for_closed_session(
         &mut self,
         session_id: &str,
         cx: &mut Context<Self>,
     ) {
+        // A run can target a different terminal from the one that owns its
+        // conversation. Closing either must make its pending buttons inert.
+        for request in self
+            .mcp
+            .capabilities
+            .cancel_native_approvals_for_target(session_id)
+        {
+            let _ = request.reply.send(Err(RpcError {
+                code: "target_disconnected".into(),
+                message: "The authorization target was closed.".into(),
+            }));
+        }
+        self.defer_ai_panel_snapshot_flush(cx);
         let scope = format!("terminal:{session_id}");
-        if self.ai.native_owner_in_scope(&scope).is_none() {
+        if !self.ai.chat_or_agent_is_running_in_scope(&scope)
+            && self.ai.native_owner_in_scope(&scope).is_none()
+        {
             return;
         }
         let visible = self.ai.active_scope_key().to_string();
@@ -32,7 +76,7 @@ impl ZzClawTermApp {
     }
 
     fn persist_native_chat_projection(&mut self, cx: &mut Context<Self>) {
-        if !self.ai.settings_config().record_history {
+        if !self.ai.run_settings().record_history {
             return;
         }
         let Some(message) = self
@@ -319,47 +363,7 @@ impl ZzClawTermApp {
             return;
         };
         let agent_history = self.ai.native_initial_history();
-        let store = self.store_blocking_client();
-        let settings = self.ai.settings_config_cloned();
-        let job_id = launch.job_id;
-        let session_id = launch.session_id;
-        let tx = launch.tx;
-        let reject_tx = tx.clone();
-        let reject_session = session_id.clone();
-        if let Err(error) = self.blocking_jobs.submit_detached(
-            "native-agent-continuation",
-            move |scheduler_cancel| {
-                let result = if scheduler_cancel.is_cancelled() {
-                    Err("Agent cancelled".into())
-                } else {
-                    run_ai_ask_job(
-                        store,
-                        settings,
-                        request,
-                        AiJobRunOptions {
-                            mcp_credential: None,
-                            stream_tx: Some(tx.clone()),
-                            cancel: launch.cancel,
-                            job_id,
-                            agent_history,
-                            persist_user_message: false,
-                        },
-                    )
-                };
-                let _ = tx.unbounded_send(AiChatWorkerEvent::Finished(Box::new(AiChatJobResult {
-                    job_id,
-                    session_id,
-                    result,
-                })));
-            },
-        ) {
-            let _ =
-                reject_tx.unbounded_send(AiChatWorkerEvent::Finished(Box::new(AiChatJobResult {
-                    job_id,
-                    session_id: reject_session,
-                    result: Err(error.to_string()),
-                })));
-        }
+        self.launch_native_chat(request, launch, agent_history, false, cx);
         self.defer_ai_panel_snapshot_flush(cx);
     }
 

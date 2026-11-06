@@ -4,22 +4,6 @@
 //! component entity owns focus and popup state, and emits only committed value
 //! changes back to the application.
 
-use std::collections::HashMap;
-
-use gpui::{
-    App, AppContext, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, Styled as _, Subscription, Window, div, px,
-};
-use zzclawterm_core::{
-    AiAgentKind, AiPermissionMode, CodexThreadMode, ExistingFileBehavior, ExternalMcpSessionScope,
-    McpTerminalDisplayMode, RecordingMode, RecordingRotationPolicy, RiskLevel,
-};
-use zzclawterm_transport::SftpDuplicatePolicy;
-use zzclawterm_ui::{
-    NYA_FORM_CONTROL_HEIGHT_PX, ZzClawSelect, ZzClawSelectEvent, ZzClawSelectOption,
-    ZzClawSelectState,
-};
-
 use super::ZzClawTermApp;
 use super::ai::AiFullAccessSetting;
 use crate::features::shell::TabMouseActionTarget;
@@ -28,6 +12,20 @@ use crate::send_command::{
     SendCommandDataType, SendCommandLineEnding, SendCommandMode, SendCommandTarget,
 };
 use crate::temporary_ssh_link::TemporaryLinkProtocol;
+use gpui::{
+    App, AppContext, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, Styled as _, Subscription, Window, div, px,
+};
+use std::collections::HashMap;
+use zzclawterm_core::{
+    AiAgentKind, AiPermissionMode, CodexThreadMode, ExistingFileBehavior, ExternalMcpSessionScope,
+    McpTerminalDisplayMode, RecordingMode, RecordingRotationPolicy, RiskLevel,
+};
+use zzclawterm_files::sftp_transfer_types::SftpDuplicatePolicy;
+use zzclawterm_ui::{
+    NYA_FORM_CONTROL_HEIGHT_PX, ZzClawSelect, ZzClawSelectEvent, ZzClawSelectOption,
+    ZzClawSelectState,
+};
 
 pub(in crate::features) const FOLLOW_UI_THEME_VALUE: &str = "__nya_follow_ui_theme__";
 pub(in crate::features) const NO_SELECTION_VALUE: &str = "__nya_no_selection__";
@@ -74,9 +72,7 @@ impl ZzClawTermApp {
             .fields
             .iter()
             .filter(|(id, _)| {
-                id.starts_with("connection-editor-")
-                    && id.as_ref() != "connection-editor-section"
-                    && id.as_ref() != "connection-editor-kind"
+                id.starts_with("connection-editor-") && id.as_ref() != "connection-editor-kind"
             })
             .map(|(_, field)| field.clone())
             .collect::<Vec<_>>();
@@ -218,6 +214,10 @@ impl ZzClawTermApp {
             return;
         };
 
+        if self.change_runtime_auth_select(id, value, cx) {
+            return;
+        }
+
         if id == "connection-editor-kind" {
             if let Some(kind) = [
                 crate::models::ConnectionKindTab::Ssh,
@@ -231,22 +231,6 @@ impl ZzClawTermApp {
             .find(|kind| kind.label() == value)
             {
                 self.set_connection_editor_kind(kind, cx);
-            }
-            return;
-        }
-
-        if id == "connection-editor-section" {
-            if let Some(section) = self
-                .connection_state
-                .active_editor_draft()
-                .and_then(|editor| {
-                    crate::models::ConnectionEditorSection::for_kind(editor.kind)
-                        .iter()
-                        .copied()
-                        .find(|section| section.id() == value)
-                })
-            {
-                self.set_connection_editor_section(section, cx);
             }
             return;
         }
@@ -310,6 +294,15 @@ impl ZzClawTermApp {
                     self.set_diagnostics_retention_days(days, cx);
                 }
             }
+            "settings.general.diagnostics-shard-size" => {
+                if let Ok(bytes) = value.parse::<u64>() {
+                    self.set_diagnostics_log_shard_bytes(bytes, cx);
+                }
+            }
+            "settings.terminal.wrap-mode" => self.set_terminal_wrap_mode(
+                zzclawterm_core::models::settings::TerminalWrapMode::from_compat_value(value),
+                cx,
+            ),
             "settings.terminal.keep-alive-mode" => match value {
                 "strict" => self.set_terminal_keep_alive_mode("strict", cx),
                 "disabled" => self.set_terminal_keep_alive_mode("disabled", cx),
@@ -581,13 +574,11 @@ impl ZzClawTermApp {
                     "connection-editor-ssh-terminal-type" => {
                         ConnectionEditorSelect::SshTerminalType
                     }
+                    "connection-editor-rdp-backend" => ConnectionEditorSelect::RdpBackend,
                     "connection-editor-rdp-certificate-policy" => {
                         ConnectionEditorSelect::RdpCertificatePolicy
                     }
                     "connection-editor-rdp-display-mode" => ConnectionEditorSelect::RdpDisplayMode,
-                    "connection-editor-rdp-clipboard-mode" => {
-                        ConnectionEditorSelect::RdpClipboardMode
-                    }
                     "connection-editor-vnc-security-mode" => {
                         ConnectionEditorSelect::VncSecurityMode
                     }

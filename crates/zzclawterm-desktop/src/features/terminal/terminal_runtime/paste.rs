@@ -85,10 +85,11 @@ impl ZzClawTermApp {
         {
             let text = normalize_paste_newlines(&text);
             let editor = cx.new(|cx| {
-                ZzClawDocumentEditorState::new_with_placeholder(
+                ZzClawDocumentEditorState::new_source_with_placeholder(
                     window,
                     cx,
                     text,
+                    "bash",
                     t!("terminal.multiLinePasteTextPlaceholder").to_string(),
                 )
             });
@@ -132,10 +133,20 @@ impl ZzClawTermApp {
         session_id: &str,
         text: &str,
     ) -> Result<Vec<u8>, String> {
+        let bracketed = self.session_bracketed_paste(session_id);
+        // Outside bracketed paste the program sees the bytes as typed input, and
+        // a typed line break is CR (the Enter key). Sending LF makes it Ctrl+J,
+        // which programs such as nano 3.x treat as "justify" and join the lines.
+        // xterm, alacritty and iTerm2 convert the same way. The conversion is
+        // done on text, before the session encoding, so it stays encoding-safe.
+        let text = if bracketed {
+            std::borrow::Cow::Borrowed(text)
+        } else {
+            std::borrow::Cow::Owned(text.replace('\n', "\r"))
+        };
         let body = self.encode_session_outgoing(session_id, text.as_bytes())?;
         Ok(Self::wrap_terminal_paste_wire_bytes_for_bracketed(
-            &body,
-            self.session_bracketed_paste(session_id),
+            &body, bracketed,
         ))
     }
 
@@ -369,7 +380,8 @@ fn line_by_line_paste_bytes(text: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
     for line in text.split('\n') {
         bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
+        // Each line is submitted like a typed Enter, which is CR.
+        bytes.push(b'\r');
     }
     bytes
 }
@@ -432,7 +444,7 @@ mod tests {
     fn line_by_line_paste_keeps_each_logical_line_and_appends_enter() {
         assert_eq!(
             line_by_line_paste_bytes("first\n第二\n"),
-            "first\n第二\n\n".as_bytes()
+            "first\r第二\r\r".as_bytes()
         );
     }
 
@@ -486,6 +498,13 @@ mod tests {
                     assert!(app.terminal.overlay_visibility().paste_review);
                     let editor = app.terminal.paste_review_editor().unwrap();
                     assert_eq!(editor.read(cx).selected_range(cx), 12..12);
+                    editor.update(cx, |editor, cx| {
+                        editor.apply_edit(" # 编辑".into(), 21..21, window, cx);
+                    });
+                    assert_eq!(
+                        app.multi_line_paste_text(cx).as_deref(),
+                        Some("first\nsecond # 编辑")
+                    );
                     match action {
                         "cancel" => app.close_multi_line_paste(window, cx),
                         "direct" => app.direct_multi_line_paste(window, cx),
@@ -500,5 +519,28 @@ mod tests {
                 assert!(!app.read(cx).terminal.overlay_visibility().paste_review);
             });
         }
+    }
+
+    #[test]
+    fn empty_paste_review_keeps_the_editor_open_for_both_send_actions() {
+        let dir = TestConfigDir::new("zzclawterm-empty-paste-review");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "session-a");
+        let host_app = app.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| FocusHost { app: host_app });
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.paste_terminal_text("first\nsecond".into(), window, cx);
+                let editor = app.terminal.paste_review_editor().unwrap();
+                editor.update(cx, |editor, cx| editor.replace_content("", window, cx));
+                assert_eq!(app.multi_line_paste_text(cx).as_deref(), Some(""));
+                app.direct_multi_line_paste(window, cx);
+                assert!(app.terminal.overlay_visibility().paste_review);
+                app.send_multi_line_paste_by_line(window, cx);
+                assert!(app.terminal.overlay_visibility().paste_review);
+                app.close_multi_line_paste(window, cx);
+            });
+        });
     }
 }

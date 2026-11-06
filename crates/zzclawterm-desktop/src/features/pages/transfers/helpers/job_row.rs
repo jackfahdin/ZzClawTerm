@@ -1,21 +1,18 @@
+use super::transfer_progress_ratio;
+use crate::features::formatting::format_rate;
+use crate::features::pages::transfers::panel::TransferPanel;
+use crate::features::shell::gpui_code_font_family;
+use crate::features::transfers::format_file_size;
+use crate::models::{TransferJobKind, TransferJobRowSnapshot, TransferJobStatus};
+use crate::theme::ThemePalette;
 use gpui::{
     Animation, AnimationExt as _, Context, FontWeight, InteractiveElement as _, IntoElement,
     MouseButton, MouseDownEvent, ParentElement as _, SharedString, StatefulInteractiveElement as _,
     Styled as _, div, prelude::FluentBuilder as _, px, relative, rgb, svg,
 };
 use std::time::Duration;
-
 use zzclawterm_core::truncate_preview;
 use zzclawterm_ui::ZzClawTooltip;
-
-use crate::features::formatting::format_rate;
-use crate::features::shell::gpui_code_font_family;
-use crate::features::transfers::format_file_size;
-use crate::models::{TransferJobKind, TransferJobRowSnapshot, TransferJobStatus};
-use crate::theme::ThemePalette;
-
-use super::transfer_progress_ratio;
-use crate::features::pages::transfers::panel::TransferPanel;
 
 #[derive(Clone)]
 pub(in crate::features::pages::transfers) struct TransferJobRowLabels {
@@ -388,16 +385,14 @@ fn local_file_name(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::models::{TransferJobKind, TransferJobRowSnapshot, TransferJobStatus};
-    use std::path::PathBuf;
-
-    use zzclawterm_transport::SftpTransferProgress;
-
     use super::{
         TransferJobRowLabels, format_transfer_row_time, transfer_job_detail,
         transfer_job_file_name, transfer_job_icon_path, transfer_job_progress_percent,
         transfer_job_right_label, transfer_job_status_label,
     };
+    use crate::models::{TransferJobKind, TransferJobRowSnapshot, TransferJobStatus};
+    use std::path::PathBuf;
+    use zzclawterm_files::sftp_transfer_types::SftpTransferProgress;
 
     fn labels() -> TransferJobRowLabels {
         TransferJobRowLabels {
@@ -462,7 +457,7 @@ mod tests {
             target_parent_path: "/".into(),
         };
         job.progress = Some(progress("/target", 2048, Some(2048), Some(2), Some(2)));
-        job.summary = Some(zzclawterm_transport::SftpTransferSummary {
+        job.summary = Some(zzclawterm_files::sftp_transfer_types::SftpTransferSummary {
             remote_path: "/target".into(),
             local_path: PathBuf::new(),
             bytes: 1024,

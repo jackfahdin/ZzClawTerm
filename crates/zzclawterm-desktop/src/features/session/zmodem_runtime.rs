@@ -1,19 +1,25 @@
-use gpui::{Context, PathPromptOptions, SharedString};
-use std::{collections::HashSet, path::PathBuf, time::Instant};
-use zzclawterm_transport::zmodem::runtime::{
-    ZmodemRuntime as ZmodemWorker, ZmodemRuntimeEvent as ZmodemWorkerEvent,
-};
-use zzclawterm_transport::{
-    SftpDuplicateDecision, SftpDuplicatePolicy, SftpDuplicateRequest, SftpDuplicateResolver,
-    SftpService, SftpTransferDirection, SftpTransferProgress, SshSessionConfig, ZmodemAction,
-    ZmodemDetectResult, ZmodemDetector, ZmodemDirection, ZmodemEvent, ZmodemTransfer,
-};
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::features::ZzClawTermApp;
 use crate::features::formatting::short_id;
 use crate::models::{
     TransferJobEvent, TransferJobKind, TransferJobOutput, TransferJobResult, TransferJobState,
     TransferJobStatus,
+};
+use gpui::{Context, PathPromptOptions, SharedString};
+use zzclawterm_files::sftp::SftpService;
+use zzclawterm_files::sftp_transfer_types::{
+    SftpDuplicateDecision, SftpDuplicatePolicy, SftpDuplicateRequest, SftpDuplicateResolver,
+    SftpTransferDirection, SftpTransferProgress,
+};
+use zzclawterm_transport::zmodem::runtime::{
+    ZmodemRuntime as ZmodemWorker, ZmodemRuntimeEvent as ZmodemWorkerEvent,
+};
+use zzclawterm_transport::{
+    SshSessionConfig, ZmodemAction, ZmodemDetectResult, ZmodemDetector, ZmodemDirection,
+    ZmodemEvent, ZmodemTransfer,
 };
 
 pub(super) struct ZmodemSessionState {
@@ -76,6 +82,16 @@ impl Drop for ZmodemSessionState {
 }
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn modem_transfer_disabled_message(&self, session_id: &str) -> String {
+        if self.tmux.is_control_session(session_id)
+            || self.tmux.pane_for_session(session_id).is_some()
+        {
+            rust_i18n::t!("tmux.modemDisabled").to_string()
+        } else {
+            rust_i18n::t!("dialog.serialSoftwareFlowControlModemDisabled").to_string()
+        }
+    }
+
     pub(in crate::features) fn rebind_zmodem_recording(&mut self) {
         let recording = self.recording.writer();
         for (_, state) in self.session.zmodem_states_mut() {
@@ -128,6 +144,12 @@ impl ZzClawTermApp {
         files: Vec<PathBuf>,
         cx: &mut Context<Self>,
     ) {
+        if !self.session.manager().supports_modem_transfer(&session_id) {
+            self.shell
+                .set_status(self.modem_transfer_disabled_message(&session_id));
+            cx.notify();
+            return;
+        }
         if files.is_empty() {
             return;
         }
@@ -239,9 +261,8 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         if !self.session.manager().supports_modem_transfer(&session_id) {
-            self.shell.set_status(
-                rust_i18n::t!("dialog.serialSoftwareFlowControlModemDisabled").to_string(),
-            );
+            self.shell
+                .set_status(self.modem_transfer_disabled_message(&session_id));
             cx.notify();
             return;
         }
@@ -939,18 +960,19 @@ const ZMODEM_WORKER_EVENT_DRAIN_BATCH: usize = 32;
 
 #[cfg(test)]
 mod tests {
-    use crate::features::ZzClawTermApp;
-    use gpui::{AppContext as _, Context, Subscription, TestAppContext};
-    use std::time::{Duration, Instant};
-    use zzclawterm_core::{AiExecutionProfile, AppRuntime, RuntimeMode, uuid};
-    use zzclawterm_transport::{LocalSessionConfig, ZmodemDirection};
-
+    use super::ZmodemTransferJobUpdate;
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
+    use crate::features::ZzClawTermApp;
     use crate::features::test_support::app_with_visible_local_session;
     use crate::models::{SessionLaunchConfig, SessionRuntimeMetadata};
     use crate::test_support::TestConfigDir;
+    use gpui::{AppContext as _, Context, Subscription, TestAppContext};
 
-    use super::ZmodemTransferJobUpdate;
+    use std::time::{Duration, Instant};
+
+    use zzclawterm_core::{AiExecutionProfile, AppRuntime, RuntimeMode, uuid};
+
+    use zzclawterm_transport::{LocalSessionConfig, ZmodemDirection};
 
     const SESSION_ID: &str = "zmodem-panel-session";
 

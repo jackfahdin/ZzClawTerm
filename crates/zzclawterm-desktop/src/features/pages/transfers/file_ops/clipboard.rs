@@ -1,14 +1,3 @@
-use rust_i18n::t;
-use std::path::PathBuf;
-
-use gpui::{Context, Window};
-use zzclawterm_transport::{
-    FileBrowserBackendKind, FileBrowserService, RemoteFilePath, SftpDuplicatePolicy,
-    SftpDuplicateResolver, SftpFileEntry, SftpFileType, SftpPathTransferOptions,
-    SftpTransferControl, file_browser_copy_destination_invalid, file_browser_join,
-    file_browser_name, file_browser_path_is_root,
-};
-
 use crate::features::ZzClawTermApp;
 use crate::features::transfers::TransferFileClipboard;
 #[cfg(test)]
@@ -17,6 +6,17 @@ use crate::features::transfers::clipboard_copy::{ClipboardCopyRequest, run_clipb
 use crate::features::transfers::transfer_jobs::TransferProgressEventSender;
 use crate::models::{
     TransferJobEvent, TransferJobKind, TransferJobResult, TransferJobState, TransferJobStatus,
+};
+use gpui::{Context, Window};
+use rust_i18n::t;
+use std::path::PathBuf;
+use zzclawterm_files::file_browser::{
+    FileBrowserBackendKind, FileBrowserService, file_browser_copy_destination_invalid,
+    file_browser_join, file_browser_name, file_browser_path_is_root,
+};
+use zzclawterm_files::sftp::{RemoteFilePath, SftpFileEntry, SftpFileType, SftpTransferControl};
+use zzclawterm_files::sftp_transfer_types::{
+    SftpDuplicatePolicy, SftpDuplicateResolver, SftpPathTransferOptions,
 };
 
 fn invalid_copy_destination(
@@ -350,16 +350,17 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
-    use zzclawterm_transport::{FileBrowserBackendKind, SftpFileType};
+    use zzclawterm_files::file_browser::FileBrowserBackendKind;
+    use zzclawterm_files::sftp::SftpFileType;
 
     #[test]
     fn clipboard_copy_reports_partial_progress_before_the_finished_output() {
         use super::{ClipboardCopyRequest, run_clipboard_copy};
         use crate::models::TransferJobOutput;
         use std::sync::{Arc, Mutex};
-        use zzclawterm_transport::{
-            FileBrowserService, RemoteFilePath, SftpPathTransferOptions, SftpTransferControl,
-        };
+        use zzclawterm_files::file_browser::FileBrowserService;
+        use zzclawterm_files::sftp::{RemoteFilePath, SftpTransferControl};
+        use zzclawterm_files::sftp_transfer_types::SftpPathTransferOptions;
 
         let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-clipboard-progress");
         std::fs::create_dir_all(root.path()).unwrap();
@@ -401,11 +402,12 @@ mod tests {
 
     #[test]
     fn local_cut_deletes_source_only_after_a_successful_copy() {
-        use super::{ClipboardCopyRequest, run_clipboard_copy};
-        use zzclawterm_transport::{
-            FileBrowserService, RemoteFilePath, SftpPathTransferOptions, SftpTransferControl,
-        };
-
+        use crate::features::transfers::clipboard_copy::ClipboardCopyRequest;
+        use crate::features::transfers::clipboard_copy::run_clipboard_copy;
+        use zzclawterm_files::file_browser::FileBrowserService;
+        use zzclawterm_files::sftp::RemoteFilePath;
+        use zzclawterm_files::sftp::SftpTransferControl;
+        use zzclawterm_files::sftp_transfer_types::SftpPathTransferOptions;
         let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-clipboard-cut");
         std::fs::create_dir_all(root.path()).unwrap();
         // macOS temporary paths can contain symlink ancestors such as /var.
@@ -433,11 +435,12 @@ mod tests {
 
     #[test]
     fn cancelled_cut_keeps_the_source() {
-        use super::{ClipboardCopyRequest, run_clipboard_copy};
-        use zzclawterm_transport::{
-            FileBrowserService, RemoteFilePath, SftpPathTransferOptions, SftpTransferControl,
-        };
-
+        use crate::features::transfers::clipboard_copy::ClipboardCopyRequest;
+        use crate::features::transfers::clipboard_copy::run_clipboard_copy;
+        use zzclawterm_files::file_browser::FileBrowserService;
+        use zzclawterm_files::sftp::RemoteFilePath;
+        use zzclawterm_files::sftp::SftpTransferControl;
+        use zzclawterm_files::sftp_transfer_types::SftpPathTransferOptions;
         let root =
             zzclawterm_core::test_support::TestTempDir::new("zzclawterm-clipboard-cut-cancel");
         std::fs::create_dir_all(root.path()).unwrap();

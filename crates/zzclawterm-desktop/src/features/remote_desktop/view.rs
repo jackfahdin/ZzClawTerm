@@ -5,14 +5,15 @@ use std::borrow::Cow;
 use gpui::{
     Bounds, Context, CursorStyle, FontWeight, HoverListenerMode, IntoElement, KeyDownEvent,
     KeyUpEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    NavigationDirection, Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, Size, canvas,
-    div, prelude::*, px, rgb,
+    NavigationDirection, Pixels, Point, ScrollDelta, ScrollEvent, SharedString, Size, canvas, div,
+    prelude::*, px, rgb,
 };
 use zzclawterm_remote_desktop::{
     CertificatePromptReason, CursorShape, DisplayScaleMode, DisplayTransform, LogicalPoint,
     LogicalRect, LogicalSize, RdpCertificateResponse, RdpPointerButton, RemoteDesktopViewState,
     VncScaleMode,
 };
+use zzclawterm_ui::ZzClawSelectableText;
 
 use crate::features::ZzClawTermApp;
 use crate::widgets::small_button;
@@ -131,6 +132,11 @@ impl ZzClawTermApp {
         if let Some(error) = session.error.clone()
             && matches!(session.state, RemoteDesktopViewState::Failed)
         {
+            let builtin_id = session_id.clone();
+            let native_backend = self.session.metadata(&session_id).is_some_and(|metadata| {
+                matches!(&metadata.launch_config, crate::models::SessionLaunchConfig::Rdp(config)
+                    if config.backend == zzclawterm_remote_desktop::RdpBackend::Windows)
+            });
             let retry_id = session_id.clone();
             let close_id = session_id.clone();
             return div()
@@ -155,7 +161,13 @@ impl ZzClawTermApp {
                         .text_center()
                         .text_size(px(12.))
                         .text_color(rgb(palette.text_dimmed))
-                        .child(format_remote_desktop_error(&error)),
+                        // Selectable, because the protocol reason is exactly what gets
+                        // pasted into a bug report; the window root turns Ctrl+C into a
+                        // copy of the selection and propagates it when there is none.
+                        .child(ZzClawSelectableText::new(
+                            format!("rdp-error-{session_id}"),
+                            format_remote_desktop_error(&error),
+                        )),
                 )
                 .child(
                     div()
@@ -170,6 +182,28 @@ impl ZzClawTermApp {
                                 cx.notify();
                             }),
                         ))
+                        .when(native_backend, |row| {
+                            row.child(small_button(
+                                palette,
+                                format!("rdp-builtin-{session_id}"),
+                                "Switch to Builtin",
+                                cx.listener(move |this, _, _, cx| {
+                                    if let Some(metadata) = this.session.metadata_mut(&builtin_id)
+                                        && let crate::models::SessionLaunchConfig::Rdp(config) =
+                                            &mut metadata.launch_config
+                                    {
+                                        config.backend =
+                                            zzclawterm_remote_desktop::RdpBackend::Builtin;
+                                    }
+                                    // This explicit action changes this session only. Saved
+                                    // connection/authentication and resource grants are preserved.
+                                    this.remote_desktop.sessions.remove(&builtin_id);
+                                    this.remote_desktop.insert_connecting(builtin_id.clone());
+                                    this.retry_rdp_runtime(&builtin_id, cx);
+                                    cx.notify();
+                                }),
+                            ))
+                        })
                         .child(small_button(
                             palette,
                             format!("rdp-close-{session_id}"),
@@ -223,6 +257,13 @@ impl ZzClawTermApp {
                 )
                 .into_any_element();
         }
+        // The failure and disconnected views above use the same retry/close
+        // actions for both runtimes; only a session that is still connecting or
+        // connected belongs to the native popup.
+        #[cfg(windows)]
+        if session.native_rdp_config.is_some() || session.native_rdp.is_some() {
+            return self.native_rdp_view(session_id, cx);
+        }
         let (Some(framebuffer), Some(texture)) = (session.framebuffer.as_ref(), session.texture)
         else {
             let detail = match session.state {
@@ -235,9 +276,12 @@ impl ZzClawTermApp {
                 }
                 _ => t!("remoteDesktop.waitingFrame"),
             };
-            return self
-                .rdp_status_view("Remote Desktop", detail)
-                .into_any_element();
+            return rdp_viewport_probe(
+                session_id,
+                self.rdp_status_view("Remote Desktop", detail),
+                cx.entity(),
+            )
+            .into_any_element();
         };
         let remote_size = (framebuffer.width(), framebuffer.height());
         let scale_mode = self
@@ -291,8 +335,8 @@ impl ZzClawTermApp {
                     let session_id = viewport_session_id.clone();
                     let scale_factor = window.scale_factor();
                     window.defer(cx, move |_, cx| {
-                        app.update(cx, |this, _| {
-                            this.update_rdp_viewport(&session_id, bounds, scale_factor);
+                        app.update(cx, |this, cx| {
+                            this.update_rdp_viewport(&session_id, bounds, scale_factor, cx);
                         });
                     });
                     remote_desktop_image_bounds(bounds, remote_size.0, remote_size.1, scale_mode)
@@ -424,7 +468,7 @@ impl ZzClawTermApp {
                     cx.stop_propagation();
                     this.mark_user_activity();
                     if remote_cursor_texture_visible {
-                        cx.notify();
+                        this.request_remote_cursor_repaint(&move_id, cx);
                     }
                 }
             }))
@@ -613,24 +657,22 @@ impl ZzClawTermApp {
                     }
                 }),
             )
-            .on_scroll_wheel(
-                cx.listener(move |this, event: &ScrollWheelEvent, window, cx| {
-                    let line_height = f32::from(window.line_height()).max(1.0);
-                    let (delta_x, delta_y) = match event.delta {
-                        ScrollDelta::Pixels(delta) => (
-                            f32::from(delta.x) / line_height,
-                            f32::from(delta.y) / line_height,
-                        ),
-                        ScrollDelta::Lines(delta) => (delta.x, delta.y),
-                    };
-                    if (delta_x != 0.0 || delta_y != 0.0)
-                        && this.send_remote_wheel(&scroll_id, event.position, delta_x, delta_y)
-                    {
-                        cx.stop_propagation();
-                        this.mark_user_activity();
-                    }
-                }),
-            )
+            .on_scroll(cx.listener(move |this, event: &ScrollEvent, window, cx| {
+                let line_height = f32::from(window.line_height()).max(1.0);
+                let (delta_x, delta_y) = match event.delta {
+                    ScrollDelta::Pixels(delta) => (
+                        f32::from(delta.x) / line_height,
+                        f32::from(delta.y) / line_height,
+                    ),
+                    ScrollDelta::Lines(delta) => (delta.x, delta.y),
+                };
+                if (delta_x != 0.0 || delta_y != 0.0)
+                    && this.send_remote_wheel(&scroll_id, event.position, delta_x, delta_y)
+                {
+                    cx.stop_propagation();
+                    this.mark_user_activity();
+                }
+            }))
             .child(canvas)
             .when_some(input, |this, input| this.child(input))
             .into_any_element()
@@ -787,6 +829,39 @@ impl ZzClawTermApp {
                     .child(detail),
             )
     }
+}
+
+/// Records the size of the panel a session is drawn in, over a placeholder view.
+///
+/// The framebuffer canvas only exists once a frame has arrived, so a session
+/// that is still connecting would have nothing to size itself against and would
+/// negotiate its desktop twice. This probe paints nothing.
+fn rdp_viewport_probe(
+    session_id: String,
+    content: impl IntoElement,
+    app: gpui::Entity<ZzClawTermApp>,
+) -> impl IntoElement {
+    div()
+        .size_full()
+        .relative()
+        .child(
+            canvas(
+                move |bounds, window, cx| {
+                    let app = app.clone();
+                    let session_id = session_id.clone();
+                    let scale_factor = window.scale_factor();
+                    window.defer(cx, move |_, cx| {
+                        app.update(cx, |this, cx| {
+                            this.update_rdp_viewport(&session_id, bounds, scale_factor, cx);
+                        });
+                    });
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .child(content)
 }
 
 fn remote_desktop_image_bounds(

@@ -1,13 +1,13 @@
 use rust_i18n::t;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, FontWeight, IntoElement, KeyDownEvent, SharedString,
-    Window, div, prelude::*, px, rgb, rgba, svg,
+    AnyElement, App, ClickEvent, Context, FontWeight, IntoElement, KeyDownEvent, Rgba,
+    SharedString, Window, div, prelude::*, px, rgb, rgba, svg,
 };
 use zzclawterm_core::truncate_preview;
 use zzclawterm_ui::{
     ZzClawButton, ZzClawButtonVariant, ZzClawPopover, ZzClawScrollArea, ZzClawScrollable,
-    ZzClawSwitch, ZzClawTabItem, ZzClawTabs, ZzClawTabsVariant, ZzClawTooltip,
+    ZzClawSwitch, ZzClawTabItem, ZzClawTabs, ZzClawTabsVariant,
 };
 
 use super::{
@@ -65,9 +65,11 @@ impl ZzClawTermApp {
         let execute_hint = t!("quickCommands.executeHint");
         let append_hint = t!("quickCommands.appendHint");
         let command_script_label = t!("quickCommands.commandScript");
-        let command_placeholder = t!("quickCommands.commandPlaceholder");
-        let escape_hint = t!("quickCommands.escapeHint");
-        let escape_summary = t!("quickCommands.escapeSummary");
+        let command_placeholder = if editor.raw_send {
+            t!("quickCommands.rawCommandPlaceholder")
+        } else {
+            t!("quickCommands.commandPlaceholder")
+        };
         let cancel_label = t!("common.cancel");
         let save_label = t!("common.save");
         let wide_fields = viewport_width >= 768.;
@@ -118,6 +120,7 @@ impl ZzClawTermApp {
                 value: editor.command.clone(),
                 error: command_error,
             },
+            editor.raw_send,
             cx,
         );
         let category_search_draft = self
@@ -264,7 +267,7 @@ impl ZzClawTermApp {
             .hover(|style| style.bg(rgb(palette.hover)))
             .child(svg().size(px(14.)).path("icons/plus.svg"))
             .when(
-                !(new_category_name.is_empty() || new_category_duplicate),
+                !new_category_name.is_empty() && !new_category_duplicate,
                 |this| {
                     this.on_click(cx.listener(|this, _, _, cx| {
                         this.commit_quick_command_editor_new_category(cx);
@@ -650,27 +653,7 @@ impl ZzClawTermApp {
                                     .min_h(px(196.))
                                     .flex()
                                     .flex_col()
-                                    .child(command_input)
-                                    .child(
-                                        div()
-                                            .id("quick-command-escape-help")
-                                            .mt_1()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .text_size(px(10.))
-                                            .text_color(rgb(palette.text_muted))
-                                            .child(escape_summary)
-                                            .child(
-                                                svg()
-                                                    .size(px(12.))
-                                                    .path("icons/menu/info.svg")
-                                                    .text_color(rgb(palette.text_muted)),
-                                            )
-                                            .tooltip(move |window, cx| {
-                                                ZzClawTooltip::new(escape_hint.clone()).build(window, cx)
-                                            }),
-                                    ),
+                                    .child(command_input),
                             ),
                     )
                     .child(
@@ -725,6 +708,23 @@ impl ZzClawTermApp {
     }
 }
 
+/// Fill for a category choice row. Selected rows use a wash built from the theme
+/// primary color so they stay legible on both light and dark surfaces; hovering
+/// deepens that wash instead of replacing it with the neutral hover color.
+fn quick_command_category_choice_fill(
+    palette: crate::theme::ThemePalette,
+    selected: bool,
+    hovered: bool,
+) -> Rgba {
+    if selected {
+        rgba((palette.primary << 8) | if hovered { 0x29 } else { 0x1f })
+    } else if hovered {
+        rgb(palette.hover)
+    } else {
+        rgb(palette.surface)
+    }
+}
+
 fn quick_command_category_choice(
     palette: crate::theme::ThemePalette,
     id: String,
@@ -737,11 +737,7 @@ fn quick_command_category_choice(
         .h(px(36.))
         .w_full()
         .px_3()
-        .bg(if selected {
-            rgb(0x1d3357)
-        } else {
-            rgb(palette.surface)
-        })
+        .bg(quick_command_category_choice_fill(palette, selected, false))
         .cursor_pointer()
         .flex()
         .items_center()
@@ -753,7 +749,7 @@ fn quick_command_category_choice(
         } else {
             rgb(palette.text)
         })
-        .hover(|style| style.bg(rgb(palette.hover)))
+        .hover(move |style| style.bg(quick_command_category_choice_fill(palette, selected, true)))
         .child(div().min_w_0().text_ellipsis().child(label))
         .when(selected, |this| {
             this.child(
@@ -829,4 +825,44 @@ fn quick_command_icon_option(
             color_tag,
             16.,
         ))
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{rgb, rgba};
+
+    use super::quick_command_category_choice_fill;
+    use crate::theme::theme_palette;
+
+    #[test]
+    fn category_choice_fill_uses_theme_tokens_for_each_state() {
+        for id in ["github-dark", "github-light"] {
+            let palette = theme_palette(id);
+            assert_eq!(
+                quick_command_category_choice_fill(palette, true, false),
+                rgba((palette.primary << 8) | 0x1f),
+                "{id}: selected fill should be the theme primary wash",
+            );
+            assert_eq!(
+                quick_command_category_choice_fill(palette, true, true),
+                rgba((palette.primary << 8) | 0x29),
+                "{id}: selected hover should deepen the primary wash",
+            );
+            assert_eq!(
+                quick_command_category_choice_fill(palette, false, false),
+                rgb(palette.surface),
+                "{id}: idle fill should be the theme surface",
+            );
+            assert_eq!(
+                quick_command_category_choice_fill(palette, false, true),
+                rgb(palette.hover),
+                "{id}: hover fill should be the theme hover token",
+            );
+        }
+        // Light and dark appearances must resolve different selected fills.
+        assert_ne!(
+            quick_command_category_choice_fill(theme_palette("github-dark"), true, false),
+            quick_command_category_choice_fill(theme_palette("github-light"), true, false),
+        );
+    }
 }

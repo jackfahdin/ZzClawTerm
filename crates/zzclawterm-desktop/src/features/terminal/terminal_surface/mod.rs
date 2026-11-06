@@ -1,5 +1,6 @@
 mod decorations;
 mod helpers;
+mod ime;
 pub(in crate::features) use decorations::{
     TerminalDecorationSources, build_terminal_line_decorations,
     terminal_absolute_line_for_snapshot_row, terminal_action_links_cover_all_snapshot_rows,

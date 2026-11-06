@@ -1,7 +1,7 @@
-use std::collections::{BTreeMap, HashMap, hash_map::DefaultHasher};
-use std::hash::{Hash, Hasher};
+use std::collections::{BTreeMap, HashMap};
+use std::hash::Hash;
 use std::ops::Range;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alacritty_terminal::event::{Event, EventListener};
@@ -14,6 +14,7 @@ use alacritty_terminal::vte::ansi;
 use alacritty_terminal::vte::ansi::{Color, Handler as _, NamedColor, NamedPrivateMode, Rgb};
 
 pub mod agent_capture;
+mod cell_string;
 mod cells;
 pub mod command_navigation;
 pub mod editing;
@@ -21,11 +22,15 @@ mod encoding;
 mod graphics;
 mod kitty_payload;
 mod line_numbers;
+pub mod logical_lines;
 pub mod navigation;
 pub mod recording_sanitizer;
 mod reflow_timestamps;
+mod scroll_region;
 pub mod selection;
+mod signature;
 mod sixel;
+pub use cell_string::CellText;
 pub use cells::{
     TerminalTextCell, terminal_byte_index_for_cell_col, terminal_cell_col_for_byte_index,
     terminal_cell_count, terminal_char_cell_width, terminal_is_zero_width_mark,
@@ -188,7 +193,7 @@ pub struct CursorSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderCell {
-    pub text: Arc<str>,
+    pub text: CellText,
     pub style: CellStyle,
     pub width: u8,
     pub hyperlink: Option<Arc<str>>,
@@ -196,7 +201,7 @@ pub struct RenderCell {
 
 impl RenderCell {
     pub fn text(&self) -> &str {
-        self.text.as_ref()
+        self.text.as_str()
     }
 
     pub fn hyperlink_uri(&self) -> Option<&str> {
@@ -216,6 +221,8 @@ pub struct TerminalSnapshotRow {
     /// Logical line number in retained history, rebased by a local clear.
     /// Soft-wrapped continuations share their first row's number.
     pub display_line_number: Option<usize>,
+    /// Stable row coordinate with soft wraps removed; independent of retained history numbering.
+    pub unwrapped_line_index: Option<i64>,
     pub line_id: Option<TerminalLineId>,
     pub revision: u64,
     pub cells: Box<[RenderCell]>,
@@ -223,7 +230,10 @@ pub struct TerminalSnapshotRow {
     pub styled_spans: Box<[StyledSpan]>,
     pub signature: u64,
     pub timestamp_ms: Option<u64>,
+    /// This row continues the previous row's soft-wrapped logical line.
     pub wrapped: bool,
+    /// This row soft-wraps into the next row, even outside the snapshot window.
+    pub wraps_to_next: bool,
     pub hyperlinks: Box<[HyperlinkSpan]>,
     pub command_mark: Option<ShellCommandMark>,
     pub shell_input: Option<ShellInputLineKind>,
@@ -294,6 +304,9 @@ pub struct TerminalSnapshotMeta {
     pub display_offset: usize,
     pub shell_input_anchor: Option<ShellInputAnchor>,
     pub images: Vec<GraphicsImageSnapshot>,
+    /// Pinned numbering origin the row `display_line_number`s were computed
+    /// against. Snapshots with different bases must never be stitched together.
+    pub line_number_base: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -316,6 +329,8 @@ pub struct TerminalSnapshot {
     pub cols: usize,
     pub viewport_rows: usize,
     pub row_data: Arc<[Arc<TerminalSnapshotRow>]>,
+    /// Optional full-history logical-line index, committed with this frame.
+    pub logical_lines: Option<Arc<logical_lines::TerminalLogicalLineIndex>>,
     pub cursor: CursorSnapshot,
     pub selection: Option<SelectionSnapshot>,
     /// Rows available above the live screen (scrollback).
@@ -327,6 +342,8 @@ pub struct TerminalSnapshot {
     pub shell_input_anchor: Option<ShellInputAnchor>,
     /// Inline graphics placements visible in this viewport (Kitty / iTerm2 / Sixel).
     pub images: Vec<GraphicsImageSnapshot>,
+    /// Pinned numbering origin behind every row's `display_line_number`.
+    pub line_number_base: Option<i64>,
 }
 
 impl TerminalSnapshot {
@@ -356,6 +373,7 @@ impl TerminalSnapshot {
             cols: meta.cols,
             viewport_rows: meta.viewport_rows,
             row_data,
+            logical_lines: None,
             cursor: meta.cursor,
             selection: meta.selection,
             scrollback_len: meta.scrollback_len,
@@ -363,6 +381,7 @@ impl TerminalSnapshot {
             display_offset: meta.display_offset,
             shell_input_anchor: meta.shell_input_anchor,
             images: meta.images,
+            line_number_base: meta.line_number_base,
         }
     }
 
@@ -384,6 +403,21 @@ impl TerminalSnapshot {
 
     pub fn line(&self, row: usize) -> Option<&str> {
         self.row(row).map(|row| row.text.as_str())
+    }
+
+    /// Largest `display_line_number` retained by this snapshot, if any row
+    /// carries one.
+    ///
+    /// Line numbers are preserved across reflow, local clears, and scrollback
+    /// pruning via [`LineNumbers::retain_from`]. Their origin is tracked in
+    /// grid coordinates rather than display order, so the maximum can exceed
+    /// [`Self::total_rows`]. Width decisions for the gutter must use the
+    /// actual largest number rather than a row-count-derived estimate.
+    pub fn max_display_line_number(&self) -> Option<usize> {
+        self.row_data
+            .iter()
+            .filter_map(|row| row.display_line_number)
+            .max()
     }
 }
 
@@ -455,11 +489,13 @@ const TERMINAL_SNAPSHOT_ROW_CACHE_LIMIT: usize = 8_192;
 struct TerminalSnapshotRowCacheKey {
     cleared: bool,
     display_line_number: Option<usize>,
+    unwrapped_line_index: Option<i64>,
     cols: usize,
     revision: u64,
     signature: u64,
     timestamp_ms: Option<u64>,
     wrapped: bool,
+    wraps_to_next: bool,
     command_mark: Option<ShellCommandMark>,
     line_id: Option<TerminalLineId>,
     shell_input: Option<ShellInputLineKind>,
@@ -485,12 +521,16 @@ impl TerminalSnapshotRowCache {
         self.generation
     }
 
-    fn prune(&mut self) {
-        if self.entries.len() <= TERMINAL_SNAPSHOT_ROW_CACHE_LIMIT {
+    fn prune(&mut self, window_rows: usize) {
+        // A visible logical line may exceed the ordinary physical viewport
+        // cache. Keep enough weak entries to reuse its source row Arcs across
+        // frames instead of rebuilding the whole line on each appended cell.
+        let limit = TERMINAL_SNAPSHOT_ROW_CACHE_LIMIT.max(window_rows.saturating_mul(2));
+        if self.entries.len() <= limit {
             return;
         }
         self.entries.retain(|_, entry| entry.row.strong_count() > 0);
-        if self.entries.len() <= TERMINAL_SNAPSHOT_ROW_CACHE_LIMIT {
+        if self.entries.len() <= limit {
             return;
         }
         let mut oldest = self
@@ -499,9 +539,7 @@ impl TerminalSnapshotRowCache {
             .map(|(key, entry)| (*key, entry.last_used))
             .collect::<Vec<_>>();
         oldest.sort_unstable_by_key(|(_, last_used)| *last_used);
-        let remove = oldest
-            .len()
-            .saturating_sub(TERMINAL_SNAPSHOT_ROW_CACHE_LIMIT);
+        let remove = oldest.len().saturating_sub(limit);
         for (key, _) in oldest.into_iter().take(remove) {
             self.entries.remove(&key);
         }
@@ -580,6 +618,10 @@ struct ScreenLineState {
     clear_line_origin: Option<i64>,
     line_numbers: line_numbers::LineNumbers,
     last_cursor_line: Option<i64>,
+    /// Pinned hard-line number of this screen's cursor row, captured before a
+    /// width reflow that ran while the screen was inactive. Re-anchors the
+    /// numbering origin when the screen becomes active again.
+    reflow_number_anchor: Option<usize>,
     command_navigation: command_navigation::CommandNavigationState,
     pending_command_prompt: Option<i64>,
     epoch: u64,
@@ -590,6 +632,7 @@ struct ScreenLineState {
     active_input_end: Option<i64>,
     consumed_scroll_epoch: u64,
     consumed_generation: u64,
+    consumed_discarded_wraps: u64,
     pending_scroll_rows: u64,
 }
 
@@ -654,7 +697,10 @@ impl ScreenLineState {
 }
 
 pub struct TerminalCore {
+    #[cfg(feature = "benchmark")]
+    benchmark_counts: (u64, u64),
     parser: ansi::Processor,
+    scroll_region_tracker: scroll_region::ScrollRegionTracker,
     term: Term<ZzClawTermEventProxy>,
     term_config: Config,
     proxy: ZzClawTermEventProxy,
@@ -668,6 +714,8 @@ pub struct TerminalCore {
     snapshot_row_cache: Mutex<TerminalSnapshotRowCache>,
     search_cache: Mutex<TerminalSearchCache>,
     last_damage_summary: TerminalDamageSummary,
+    logical_line_snapshots: bool,
+    logical_line_index: logical_lines::LogicalLineIndexCache,
     rows: usize,
     cols: usize,
     scrollback_limit: usize,
@@ -822,7 +870,8 @@ impl TerminalCore {
         let proxy = ZzClawTermEventProxy::default();
         let size = TermSize { cols, rows };
         let scrollback_limit = config.scrolling_history;
-        let term = Term::new(config.clone(), &size, proxy.clone());
+        let mut term = Term::new(config.clone(), &size, proxy.clone());
+        term.set_presentation_tracking(true);
         let primary_lines = ScreenLineState {
             epoch: term.primary_screen_generation(),
             consumed_scroll_epoch: term.primary_grid_scroll_epoch(),
@@ -838,6 +887,9 @@ impl TerminalCore {
         let consumed_reset_generation = term.reset_generation();
         Self {
             parser: ansi::Processor::new(),
+            #[cfg(feature = "benchmark")]
+            benchmark_counts: (0, 0),
+            scroll_region_tracker: scroll_region::ScrollRegionTracker::new(rows),
             term,
             term_config: config,
             proxy,
@@ -851,6 +903,8 @@ impl TerminalCore {
             snapshot_row_cache: Mutex::new(TerminalSnapshotRowCache::default()),
             search_cache: Mutex::new(TerminalSearchCache::default()),
             last_damage_summary: TerminalDamageSummary::default(),
+            logical_line_snapshots: false,
+            logical_line_index: logical_lines::LogicalLineIndexCache::default(),
             rows,
             cols,
             scrollback_limit,
@@ -866,6 +920,50 @@ impl TerminalCore {
             #[cfg(test)]
             last_shell_input_commit_count: 0,
         }
+    }
+
+    /// Enable richer frames without changing the protocol grid or VT modes.
+    pub fn set_logical_line_snapshots(&mut self, enabled: bool) {
+        if self.logical_line_snapshots == enabled {
+            return;
+        }
+        self.logical_line_snapshots = enabled;
+        self.logical_line_index = logical_lines::LogicalLineIndexCache::default();
+        if enabled {
+            self.refresh_logical_line_index();
+        }
+    }
+
+    fn refresh_logical_line_index(&mut self) {
+        if !self.logical_line_snapshots {
+            return;
+        }
+        let history = self.history_state();
+        let origin = self.active_line_state().logical_origin;
+        let term = &self.term;
+        let last_col = Column(self.cols - 1);
+        self.logical_line_index
+            .update(history, origin, &self.last_damage_summary.lines, |line| {
+                let cell = &term.grid()[Line(line)][last_col];
+                (
+                    cell.flags.contains(Flags::WRAPLINE),
+                    cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER),
+                )
+            });
+    }
+
+    /// Coordinate-sensitive protocols and graphics retain the standard grid.
+    pub fn logical_line_display_supported(&self) -> bool {
+        !self.term.mode().intersects(
+            TermMode::ALT_SCREEN
+                | TermMode::MOUSE_MODE
+                | TermMode::APP_CURSOR
+                | TermMode::APP_KEYPAD
+                | TermMode::KITTY_KEYBOARD_PROTOCOL,
+        ) && self.scroll_region() == (0, self.rows.saturating_sub(1))
+            && !self
+                .graphics
+                .has_placements_for_screen(self.active_graphics_screen())
     }
 
     pub fn set_cell_metrics(&mut self, cell_width_px: u16, cell_height_px: u16) {
@@ -892,23 +990,93 @@ impl TerminalCore {
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let old_cols = self.cols;
-        let timestamps = (old_cols != usize::from(cols).max(1) && !self.alternate_screen())
+        let old_rows = self.rows;
+        let next_cols = usize::from(cols).max(1);
+        let next_rows = usize::from(rows).max(1);
+        if next_cols == old_cols && next_rows == old_rows {
+            return;
+        }
+        let cols_changed = old_cols != next_cols;
+        // Growing the viewport moves retained rows *down* in Alacritty grid
+        // coordinates (`grow_lines` pulls history rows into the taller view)
+        // without advancing the scroll epoch, so logical identities must be
+        // corrected below. Shrinking is already compensated by the epoch.
+        let rows_added = next_rows.saturating_sub(old_rows);
+        let timestamps = (cols_changed && !self.alternate_screen())
             .then(|| reflow_timestamps::capture(&self.term, self.active_line_state()));
-        if self.cols != usize::from(cols).max(1) || self.rows != usize::from(rows).max(1) {
+        // A width reflow rewrites grid coordinates arbitrarily and rebuilds the
+        // numbering indices, so remember the cursor's pinned number to re-anchor
+        // it afterwards. Row-only growth keeps logical identities instead (see
+        // `rows_added` below) and needs no number anchor.
+        let active_anchor = cols_changed
+            .then(|| {
+                self.active_line_state().line_numbers.pinned_number(
+                    self.active_line_state()
+                        .logical_line(self.term.grid().cursor.point.line),
+                )
+            })
+            .flatten();
+        if let Some(anchor) = active_anchor {
+            self.active_line_state_mut().reflow_number_anchor = Some(anchor);
+        }
+        if self.cols != next_cols || self.rows != next_rows {
             self.primary_lines.input_anchor = None;
             self.alternate_lines.input_anchor = None;
         }
-        self.cols = usize::from(cols).max(1);
-        self.rows = usize::from(rows).max(1);
+        self.cols = next_cols;
+        self.rows = next_rows;
         let size = TermSize {
             cols: self.cols,
             rows: self.rows,
         };
+        if cols_changed {
+            // Both grids reflow, so the inactive screen's rows move too.
+            // Remember its cursor's pinned number so its origin can be
+            // re-anchored when that screen becomes active again. Keep an
+            // existing anchor when the cursor is unknown or unnumbered.
+            let inactive = if self.alternate_screen() {
+                &mut self.primary_lines
+            } else {
+                &mut self.alternate_lines
+            };
+            if let Some(cursor) = inactive.last_cursor_line
+                && let Some(anchor) = inactive.line_numbers.pinned_number(cursor)
+            {
+                inactive.reflow_number_anchor = Some(anchor);
+            }
+        }
         self.term.resize(size);
+        if old_cols != self.cols || old_rows != self.rows {
+            self.scroll_region_tracker.resize(self.rows);
+        }
         self.sync_presentation_state();
+        if rows_added > 0 {
+            // Row-count growth shifts every retained row by `rows_added` grid
+            // lines (and advances the scroll epoch by the rows that were not
+            // pulled from history), while the scroll epoch stays put when
+            // history covers the growth. Absorb that displacement into
+            // `logical_origin` so logical identities (and therefore the wrap
+            // index, metadata keys, and absolute gutter numbers) stay fixed.
+            //
+            // This must also run when the columns changed: the initial
+            // viewport resize happens before any output exists, so there is
+            // no pinned cursor anchor to re-anchor numbering. Without this
+            // compensation the empty rows Alacritty creates and immediately
+            // discards during `grow_lines` advanced the scroll epoch and made
+            // a brand-new session start at `rows_added + 1` instead of 1.
+            let shift = rows_added as i64;
+            self.primary_lines.logical_origin -= shift;
+            self.alternate_lines.logical_origin -= shift;
+        }
         if self.cols != old_cols {
             self.primary_lines.metadata.clear();
             self.alternate_lines.metadata.clear();
+            // Width reflow rewrites grid coordinates (reflow scrolling does
+            // not advance the scroll epoch), so the wrap index and numbering
+            // origin must be rebuilt from scratch. Numbering continuity is
+            // restored from the pinned cursor anchor in
+            // `initialize_line_numbers`; per-row captured display numbers only
+            // rebuild `clear_line_origin` below.
             self.primary_lines.line_numbers = Default::default();
             self.alternate_lines.line_numbers = Default::default();
             self.primary_lines.clear_line_origin = None;
@@ -930,6 +1098,12 @@ impl TerminalCore {
             self.graphics.clear_screen(GraphicsScreenKind::Primary);
             self.graphics.clear_screen(GraphicsScreenKind::Alternate);
             self.clear_snapshot_row_cache();
+            // The width reflow above rebuilt both numbering indices. Re-arm
+            // the active screen's anchor for `initialize_line_numbers`, which
+            // runs below or when this screen becomes active again.
+            if let Some(anchor) = active_anchor {
+                self.active_line_state_mut().reflow_number_anchor = Some(anchor);
+            }
         }
         if let Some(timestamps) = timestamps {
             // Width reflow changes wrap positions throughout retained history.
@@ -957,11 +1131,6 @@ impl TerminalCore {
                             .map_or(origin, |old| old.min(origin)),
                     );
                 }
-                if let Some(number) = metadata.logical_line_number {
-                    self.active_line_state_mut()
-                        .line_numbers
-                        .restore_number(logical_line, number);
-                }
             }
         }
         self.stamp_changed_lines();
@@ -980,6 +1149,7 @@ impl TerminalCore {
         let _ = self.proxy.drain();
         self.sync_presentation_state();
         self.retain_active_presentation_range();
+        self.refresh_logical_line_index();
     }
 
     pub fn cols(&self) -> usize {
@@ -1092,9 +1262,7 @@ impl TerminalCore {
     }
 
     pub fn scroll_region(&self) -> (usize, usize) {
-        // Alacritty does not expose the scroll region publicly. Keep a conservative
-        // full-screen report for legacy UI diagnostics.
-        (0, self.rows.saturating_sub(1))
+        self.scroll_region_tracker.bounds()
     }
 
     pub fn origin_mode(&self) -> bool {
@@ -1156,6 +1324,7 @@ impl TerminalCore {
     /// a skipped UTF-8/charset, ANSI, OSC, or graphics payload.
     pub fn reset_stream_state(&mut self) {
         self.parser = ansi::Processor::new();
+        self.scroll_region_tracker.reset_stream();
         self.graphics_ingress = GraphicsIngress::new();
         self.session_encoding.reset_decoder();
         self.sidecar.osc = None;
@@ -1211,11 +1380,13 @@ impl TerminalCore {
         config.scrolling_history = self.scrollback_limit;
         let session_encoding = self.session_encoding.clone();
         let cell_metrics = (self.cell_width_px, self.cell_height_px);
+        let logical_line_snapshots = self.logical_line_snapshots;
         *self = Self::new_with_config(cols, rows, config);
         self.primary_lines.epoch = next_epoch;
         self.alternate_lines.epoch = next_epoch;
         self.session_encoding = session_encoding;
         self.set_cell_metrics(cell_metrics.0, cell_metrics.1);
+        self.set_logical_line_snapshots(logical_line_snapshots);
     }
 
     /// Discard history and completed output while retaining the editable input rows.
@@ -1327,8 +1498,16 @@ impl TerminalCore {
         self.session_encoding.encode_str(text)
     }
 
+    /// Cumulative parser synchronization batches and signature rows visited.
+    /// Available only for the opt-in throughput harness; disabled in normal builds.
+    #[cfg(feature = "benchmark")]
+    pub fn benchmark_counts(&self) -> (u64, u64) {
+        self.benchmark_counts
+    }
+
     pub fn advance(&mut self, bytes: &[u8]) {
         let mut graphics_ingress = std::mem::take(&mut self.graphics_ingress);
+        let mut placed_image_moved_cursor = false;
         graphics_ingress.advance_segments(bytes, |segment| {
             match segment {
                 GraphicsSegmentRef::Terminal(data) => {
@@ -1370,6 +1549,7 @@ impl TerminalCore {
                         self.parser.advance(&mut self.term, &ansi);
                         self.drain_alacritty_events();
                         self.sync_presentation_state();
+                        placed_image_moved_cursor = true;
                     }
                     for reply in result.pty_writes {
                         self.pending_effects.pty_write.push(reply);
@@ -1378,7 +1558,12 @@ impl TerminalCore {
             }
         });
         self.graphics_ingress = graphics_ingress;
-        self.stamp_changed_lines();
+        // Terminal slices stamp the rows they produced themselves. The kitty
+        // placement path is the only grid write outside a slice, so only it
+        // still needs a trailing stamp.
+        if placed_image_moved_cursor {
+            self.stamp_changed_lines();
+        }
     }
 
     /// Advance already-decoded UTF-8 terminal text.
@@ -1392,28 +1577,35 @@ impl TerminalCore {
         }
         let data = text.as_bytes();
         let boundaries = self.sidecar.advance(data);
+        // Slices stamp their own rows inside `advance_terminal_data_with_boundaries`.
         self.advance_terminal_data_with_boundaries(data, &boundaries);
-        self.stamp_changed_lines();
     }
 
     fn advance_terminal_data_with_boundaries(&mut self, data: &[u8], boundaries: &[ShellBoundary]) {
+        self.scroll_region_tracker.advance(data);
         let mut start = 0usize;
         for boundary in boundaries {
             let end = boundary.offset.min(data.len());
             if end > start {
-                self.parser.advance(&mut self.term, &data[start..end]);
-                self.drain_alacritty_events();
-                self.sync_presentation_state();
-                self.update_active_input_end();
+                self.advance_parser_chunks(&data[start..end]);
             }
             self.apply_shell_boundary(boundary.kind);
             start = end;
         }
         if start < data.len() {
-            self.parser.advance(&mut self.term, &data[start..]);
+            self.advance_parser_chunks(&data[start..]);
+        }
+    }
+
+    /// Eviction counters retain wrap endings even when a batch exceeds history.
+    /// Bound parser latency independently of the configured scrollback capacity.
+    fn advance_parser_chunks(&mut self, data: &[u8]) {
+        for part in data.chunks(16 * 1024) {
+            self.parser.advance(&mut self.term, part);
             self.drain_alacritty_events();
             self.sync_presentation_state();
             self.update_active_input_end();
+            self.stamp_changed_lines();
         }
     }
 
@@ -1455,6 +1647,9 @@ impl TerminalCore {
     ) -> (TerminalSnapshot, TerminalSnapshotBuildStats) {
         let max_offset = self.scrollback_len();
         let offset = offset.min(max_offset);
+        if self.logical_line_snapshots && self.logical_line_display_supported() {
+            return self.viewport_snapshot_with_window_and_stats(offset, 0, 0);
+        }
         let (mut snapshot, stats) = snapshot_from_term(
             &self.term,
             offset,
@@ -1490,8 +1685,35 @@ impl TerminalCore {
     ) -> (TerminalSnapshot, TerminalSnapshotBuildStats) {
         let scrollback_len = self.scrollback_len();
         let offset = offset.min(scrollback_len);
-        let older_rows = older_rows.min(scrollback_len.saturating_sub(offset));
-        let newer_rows = newer_rows.min(offset);
+        let mut older_rows = older_rows.min(scrollback_len.saturating_sub(offset));
+        let mut newer_rows = newer_rows.min(offset);
+        let logical_lines = (self.logical_line_snapshots && self.logical_line_display_supported())
+            .then(|| self.logical_line_index.snapshot());
+        if let Some(index) = logical_lines.as_ref() {
+            let anchor = scrollback_len - offset;
+            let logical_top = if offset == 0 {
+                index.logical_rows().saturating_sub(self.rows)
+            } else {
+                index
+                    .logical_row(anchor)
+                    .min(index.logical_rows().saturating_sub(self.rows))
+            };
+            let start = index.physical_row(logical_top.saturating_sub(older_rows));
+            let end = index
+                .physical_row((logical_top + self.rows + newer_rows).min(index.logical_rows()));
+            older_rows = older_rows.max(anchor.saturating_sub(start));
+            newer_rows = newer_rows
+                .max(end.saturating_sub(anchor + self.rows))
+                .min(offset);
+            // The original raw viewport is still present for protocol consumers.
+            // Include whole groups at both edges for presentation and copying.
+            let start = index.group(anchor.saturating_sub(older_rows)).start;
+            let end = index
+                .group((anchor + self.rows + newer_rows).saturating_sub(1))
+                .end;
+            older_rows = anchor.saturating_sub(start);
+            newer_rows = end.saturating_sub(anchor + self.rows).min(offset);
+        }
         let (mut snapshot, stats) = snapshot_window_from_term(
             &self.term,
             TerminalSnapshotWindow {
@@ -1503,6 +1725,7 @@ impl TerminalCore {
             self.shell_integration_enabled(),
             &self.snapshot_row_cache,
         );
+        snapshot.logical_lines = logical_lines;
         snapshot.images = self
             .graphics
             .viewport_images_for_screen(
@@ -1583,13 +1806,16 @@ impl TerminalCore {
 
     /// Full buffer text, preserving hard breaks and joining soft-wrapped rows.
     pub fn all_text(&self) -> Option<String> {
-        let mut text = String::new();
-        for (index, (line, wrapped)) in self.all_text_rows().into_iter().enumerate() {
-            if index > 0 && !wrapped {
-                text.push('\n');
-            }
-            text.push_str(line.trim_end());
-        }
+        // Share selection extraction so select-all also retains spaces at a
+        // soft boundary. Snapshot row text is intentionally trimmed for display.
+        let selection = selection::TerminalSelection::from_range(
+            selection::TerminalBufferCellPos::new(0, 0),
+            selection::TerminalBufferCellPos::new(
+                self.total_rows().saturating_sub(1),
+                self.cols - 1,
+            ),
+        );
+        let mut text = self.text_for_selection(selection).ok().flatten()?;
         text.truncate(text.trim_end_matches('\n').len());
         (!text.is_empty()).then_some(text)
     }
@@ -1832,7 +2058,10 @@ impl TerminalCore {
     }
 
     fn stamp_changed_lines(&mut self) {
-        self.sync_presentation_state();
+        #[cfg(feature = "benchmark")]
+        {
+            self.benchmark_counts.0 += 1;
+        }
         self.initialize_line_numbers();
         let cursor = self.term.grid().cursor.point.line;
         let state = self.active_line_state_mut();
@@ -1864,39 +2093,28 @@ impl TerminalCore {
             }
         };
         self.term.reset_damage();
-        let scan_start = if history_changed {
-            let scrolled = i32::try_from(scrolled_rows).unwrap_or(i32::MAX);
-            topmost.0.max(scrolled.saturating_neg())
+        let changes = if self.alternate_screen() {
+            self.term.take_alternate_grid_presentation_changes()
         } else {
-            0
-        };
-        let scan_end = i32::try_from(self.term.screen_lines())
-            .unwrap_or(i32::MAX)
-            .saturating_sub(1);
-        let full_scan = history_changed || full_damage;
-        #[cfg(test)]
-        let scanned = if full_scan {
-            (scan_start..=scan_end)
-                .filter(|line| *line >= topmost.0 && *line <= bottommost.0)
-                .count()
-        } else {
-            damaged_lines
-                .iter()
-                .filter(|line| **line >= topmost.0 && **line <= bottommost.0)
-                .count()
-        };
-        if full_scan {
-            for line_index in scan_start..=scan_end {
-                self.stamp_line_signature(line_index, cols, now_ms, topmost, bottommost);
-            }
-        } else {
-            for &line_index in &damaged_lines {
-                self.stamp_line_signature(line_index, cols, now_ms, topmost, bottommost);
-            }
+            self.term.take_primary_grid_presentation_changes()
         }
+        .expect("presentation tracking enabled");
+        let range = if changes.full_scan {
+            topmost.0..bottommost.0.saturating_add(1)
+        } else {
+            changes.rows.map_or(0..0, |rows| rows.start.0..rows.end.0)
+        };
         #[cfg(test)]
         {
-            self.last_signature_scan_count = scanned;
+            self.last_signature_scan_count = range.len();
+        }
+        for line_index in range {
+            self.stamp_line_signature(line_index, cols, now_ms, topmost, bottommost);
+            // Logical-line indexing must observe rewrites even when terminal
+            // rendering damage omits rows moved into history by this batch.
+            if self.logical_line_snapshots {
+                damaged_lines.push(line_index);
+            }
         }
         damaged_lines.sort_unstable();
         damaged_lines.dedup();
@@ -1909,6 +2127,7 @@ impl TerminalCore {
         if history_changed {
             self.retain_active_presentation_range();
         }
+        self.refresh_logical_line_index();
     }
 
     fn discard_cleared_history(&mut self) {
@@ -1932,6 +2151,7 @@ impl TerminalCore {
             self.term.grid_mut().update_history(history - discarded);
             self.term.grid_mut().update_history(self.scrollback_limit);
             self.last_damage_summary.history_changed = true;
+            self.sync_presentation_state();
             self.retain_active_presentation_range();
         }
     }
@@ -1947,6 +2167,10 @@ impl TerminalCore {
         let line = Line(line_index);
         if line < topmost || line > bottommost {
             return;
+        }
+        #[cfg(feature = "benchmark")]
+        {
+            self.benchmark_counts.1 += 1;
         }
         self.index_line_wrap(line);
         let signature = line_signature(&self.term, line, cols);
@@ -2016,11 +2240,38 @@ impl TerminalCore {
             return;
         }
         // An inactive primary grid can reflow while the alternate screen is
-        // visible. Rebuild its index once when it becomes active again.
-        for index in self.term.topmost_line().0..=self.term.bottommost_line().0 {
-            self.index_line_wrap(Line(index));
+        // visible. Rebuild its index once when it becomes active again by
+        // scanning the retained grid a single time; rows arrive in ascending
+        // logical order, so the wrap index can be appended directly instead
+        // of binary-searched per row.
+        let topmost = self.term.topmost_line();
+        let bottommost = self.term.bottommost_line();
+        let last_col = Column(self.term.columns() - 1);
+        let origin = self.active_line_state().logical_origin;
+        let mut wraps = Vec::new();
+        for index in topmost.0..=bottommost.0 {
+            if self.term.grid()[Line(index)][last_col]
+                .flags
+                .contains(Flags::WRAPLINE)
+            {
+                wraps.push(i64::from(index).saturating_add(origin));
+            }
         }
-        self.active_line_state_mut().line_numbers.initialized = true;
+        let cursor = self
+            .active_line_state()
+            .logical_line(self.term.grid().cursor.point.line);
+        let state = self.active_line_state_mut();
+        state.line_numbers.rebuild(wraps);
+        // A reflow or row-count resize that moved grid coordinates captured
+        // this screen's pinned cursor number beforehand. Re-anchor the origin
+        // onto the cursor row so the whole retained window keeps its absolute
+        // numbers. Only a screen that never had an anchor starts at the
+        // session's first hard line.
+        match state.reflow_number_anchor.take() {
+            Some(anchor) => state.line_numbers.restore_number(cursor, anchor),
+            None => state.line_numbers.ensure_origin(),
+        }
+        state.line_numbers.initialized = true;
     }
 
     fn allocate_line_revision(&mut self) -> u64 {
@@ -2080,8 +2331,6 @@ impl TerminalCore {
             self.alternate_lines.active_input_start = None;
             self.alternate_lines.input_anchor = None;
             self.alternate_lines.active_input_end = None;
-            self.primary_lines.epoch = self.primary_lines.epoch.saturating_add(1);
-            self.alternate_lines.epoch = self.alternate_lines.epoch.saturating_add(1);
             self.primary_lines.logical_origin = 0;
             self.alternate_lines.logical_origin = 0;
             self.primary_lines.pending_scroll_rows = 0;
@@ -2091,8 +2340,8 @@ impl TerminalCore {
             self.consumed_reset_generation = reset_generation;
         }
 
-        let primary_epoch = self.term.primary_grid_scroll_epoch();
-        let alternate_epoch = self.term.alternate_grid_scroll_epoch();
+        let primary_stats = self.term.primary_grid_presentation_stats().unwrap();
+        let alternate_stats = self.term.alternate_grid_presentation_stats().unwrap();
         let primary_generation = self.term.primary_screen_generation();
         let alternate_generation = self.term.alternate_screen_generation();
         // Entering and leaving alternate screen can occur in one parser chunk.
@@ -2102,14 +2351,14 @@ impl TerminalCore {
         }
         Self::sync_screen_line_state(
             &mut self.primary_lines,
-            primary_epoch,
+            primary_stats,
             primary_generation,
             GraphicsScreenKind::Primary,
             &mut self.graphics,
         );
         Self::sync_screen_line_state(
             &mut self.alternate_lines,
-            alternate_epoch,
+            alternate_stats,
             alternate_generation,
             GraphicsScreenKind::Alternate,
             &mut self.graphics,
@@ -2118,7 +2367,7 @@ impl TerminalCore {
 
     fn sync_screen_line_state(
         state: &mut ScreenLineState,
-        scroll_epoch: u64,
+        stats: alacritty_terminal::grid::GridPresentationStats,
         generation: u64,
         screen: GraphicsScreenKind,
         graphics: &mut TerminalGraphicsState,
@@ -2126,6 +2375,7 @@ impl TerminalCore {
         if generation != state.consumed_generation {
             state.clear_line_origin = None;
             state.last_cursor_line = None;
+            state.reflow_number_anchor = None;
             state.metadata.clear();
             state.line_numbers = Default::default();
             state.command_navigation = Default::default();
@@ -2134,19 +2384,29 @@ impl TerminalCore {
             state.active_input_start = None;
             state.input_anchor = None;
             state.active_input_end = None;
-            state.epoch = state.epoch.saturating_add(1);
+            // Identity changes follow actual resets, independent of how many
+            // generations were consumed in one parser batch.
+            state.epoch = state
+                .epoch
+                .saturating_add(generation.wrapping_sub(state.consumed_generation));
             state.pending_scroll_rows = 0;
             state.consumed_generation = generation;
-            state.consumed_scroll_epoch = scroll_epoch;
+            state.consumed_scroll_epoch = stats.generation_scroll_epoch;
+            state.consumed_discarded_wraps = 0;
             graphics.clear_screen(screen);
-            return;
         }
-        let delta = scroll_epoch.wrapping_sub(state.consumed_scroll_epoch);
+        let delta = stats.scroll_epoch.wrapping_sub(state.consumed_scroll_epoch);
+        state.line_numbers.add_discarded_wraps(
+            stats
+                .discarded_wraps
+                .wrapping_sub(state.consumed_discarded_wraps),
+        );
+        state.consumed_discarded_wraps = stats.discarded_wraps;
         state.logical_origin = state
             .logical_origin
             .saturating_add(i64::try_from(delta).unwrap_or(i64::MAX));
         state.pending_scroll_rows = state.pending_scroll_rows.wrapping_add(delta);
-        state.consumed_scroll_epoch = scroll_epoch;
+        state.consumed_scroll_epoch = stats.scroll_epoch;
     }
 
     fn retain_active_presentation_range(&mut self) {
@@ -2378,11 +2638,10 @@ fn snapshot_window_from_term(
             epoch: line_state.epoch,
             logical_line: line_state.logical_line(line),
         });
-        let display_line_number = line_id.and_then(|id| {
-            line_state
-                .line_numbers
-                .number(id.logical_line, line_state.logical_line(topmost))
-        });
+        let unwrapped_line_index =
+            line_id.map(|id| line_state.line_numbers.stable_coordinate(id.logical_line));
+        let display_line_number =
+            line_id.and_then(|id| line_state.line_numbers.number(id.logical_line));
         let shell_input = line_state.shell_input_kind(line_id.map(|id| id.logical_line));
         let shell_input_columns = shell_input.and_then(|kind| {
             if kind == ShellInputLineKind::Active
@@ -2413,14 +2672,22 @@ fn snapshot_window_from_term(
                     .flags
                     .contains(Flags::WRAPLINE)
         });
+        let wraps_to_next = line_in_grid.is_some_and(|line| {
+            cols > 0
+                && term.grid()[line][Column(cols - 1)]
+                    .flags
+                    .contains(Flags::WRAPLINE)
+        });
         let key = TerminalSnapshotRowCacheKey {
             cleared,
             display_line_number,
+            unwrapped_line_index,
             cols,
             revision,
             signature,
             timestamp_ms,
             wrapped,
+            wraps_to_next,
             command_mark,
             line_id,
             shell_input,
@@ -2446,10 +2713,12 @@ fn snapshot_window_from_term(
                 SnapshotRowMetadata {
                     cleared,
                     display_line_number,
+                    unwrapped_line_index,
                     revision,
                     signature,
                     timestamp_ms,
                     wrapped,
+                    wraps_to_next,
                     command_mark,
                     line_id,
                     shell_input,
@@ -2468,7 +2737,7 @@ fn snapshot_window_from_term(
         };
         row_data.push(snapshot_row);
     }
-    row_cache.prune();
+    row_cache.prune(rows);
     drop(row_cache);
 
     let cursor_point = content.cursor.point;
@@ -2514,6 +2783,7 @@ fn snapshot_window_from_term(
             display_offset,
             shell_input_anchor: line_state.input_anchor,
             images: Vec::new(),
+            line_number_base: line_state.line_numbers.base(),
         },
         row_data,
     );
@@ -2546,10 +2816,12 @@ fn history_state_from_term(
 struct SnapshotRowMetadata {
     cleared: bool,
     display_line_number: Option<usize>,
+    unwrapped_line_index: Option<i64>,
     revision: u64,
     signature: u64,
     timestamp_ms: Option<u64>,
     wrapped: bool,
+    wraps_to_next: bool,
     command_mark: Option<ShellCommandMark>,
     line_id: Option<TerminalLineId>,
     shell_input: Option<ShellInputLineKind>,
@@ -2566,10 +2838,12 @@ fn snapshot_row_from_term(
     let SnapshotRowMetadata {
         cleared,
         display_line_number,
+        unwrapped_line_index,
         revision,
         signature,
         timestamp_ms,
         wrapped,
+        wraps_to_next,
         command_mark,
         line_id,
         shell_input,
@@ -2578,9 +2852,11 @@ fn snapshot_row_from_term(
     } = metadata;
     let mut hyperlink_intern = HashMap::new();
     let cells = if let Some(line) = line {
+        // Index the grid once per row, not once per cell.
+        let grid_row = &term.grid()[line];
         (0..cols)
             .map(|col| {
-                let cell = &term.grid()[line][Column(col)];
+                let cell = &grid_row[Column(col)];
                 RenderCell {
                     text: cell_text(cell),
                     style: cell_style(cell),
@@ -2594,7 +2870,7 @@ fn snapshot_row_from_term(
     } else {
         (0..cols)
             .map(|_| RenderCell {
-                text: empty_render_cell_text(),
+                text: CellText::EMPTY,
                 style: CellStyle::default(),
                 width: 1,
                 hyperlink: None,
@@ -2609,6 +2885,7 @@ fn snapshot_row_from_term(
     TerminalSnapshotRow {
         cleared,
         display_line_number,
+        unwrapped_line_index,
         line_id,
         revision,
         styled_spans: compress_render_row(&cells).into_boxed_slice(),
@@ -2618,6 +2895,7 @@ fn snapshot_row_from_term(
         signature,
         timestamp_ms,
         wrapped,
+        wraps_to_next,
         command_mark,
         shell_input,
         shell_input_columns,
@@ -2626,17 +2904,42 @@ fn snapshot_row_from_term(
 }
 
 fn line_signature(term: &Term<ZzClawTermEventProxy>, line: Line, cols: usize) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for col in 0..cols {
-        let cell = &term.grid()[line][Column(col)];
-        hash_cell_text(cell, &mut hasher);
-        cell_style(cell).hash(&mut hasher);
-        render_cell_width(cell).hash(&mut hasher);
-        if let Some(link) = cell.hyperlink() {
-            Some(link.uri()).hash(&mut hasher);
-        } else {
-            Option::<&str>::None.hash(&mut hasher);
+    let row = &term.grid()[line];
+    let mut significant = cols;
+    while significant > 0 {
+        let cell = &row[Column(significant - 1)];
+        // `c == ' '` rejects almost every non-blank cell before any styling work.
+        if cell.c != ' '
+            || !signature::is_trivial_blank(
+                cell_text_is_blank(cell),
+                &cell_style(cell),
+                render_cell_width(cell),
+                cell.hyperlink().as_ref().map(|link| link.uri()),
+            )
+        {
+            break;
         }
+        significant -= 1;
+    }
+    let mut hasher = signature::RowHasher::new(significant);
+    let mut style_key = None;
+    let mut packed_style = signature::PackedCellStyle::new(&CellStyle::default());
+    for col in 0..significant {
+        let cell = &row[Column(col)];
+        let key = (cell.fg, cell.bg, cell.flags);
+        if style_key != Some(key) {
+            style_key = Some(key);
+            packed_style = signature::PackedCellStyle::new(&cell_style(cell));
+        }
+        let blank = cell_text_is_blank(cell);
+        let extra = cell.zerowidth().unwrap_or(&[]).iter().copied();
+        hasher.cell_with_style(
+            (!blank).then_some(cell.c),
+            extra,
+            &packed_style,
+            render_cell_width(cell),
+            cell.hyperlink().as_ref().map(|link| link.uri()),
+        );
     }
     hasher.finish()
 }
@@ -2741,12 +3044,24 @@ fn terminal_search_is_word_char(ch: char) -> bool {
 
 #[cfg(test)]
 fn render_row_signature(row: &[RenderCell]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for cell in row {
-        cell.text.hash(&mut hasher);
-        cell.style.hash(&mut hasher);
-        cell.width.hash(&mut hasher);
-        cell.hyperlink.hash(&mut hasher);
+    let mut significant = row.len();
+    while significant > 0 {
+        let cell = &row[significant - 1];
+        if !signature::is_trivial_blank(
+            cell.text.is_empty(),
+            &cell.style,
+            cell.width,
+            cell.hyperlink_uri(),
+        ) {
+            break;
+        }
+        significant -= 1;
+    }
+    let mut hasher = signature::RowHasher::new(significant);
+    for cell in &row[..significant] {
+        let mut chars = cell.text.chars();
+        let base = chars.next();
+        hasher.cell(base, chars, &cell.style, cell.width, cell.hyperlink_uri());
     }
     hasher.finish()
 }
@@ -2758,15 +3073,16 @@ fn unix_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn cell_text(cell: &Cell) -> Arc<str> {
+fn cell_text(cell: &Cell) -> CellText {
     if cell_text_is_blank(cell) {
-        return empty_render_cell_text();
+        return CellText::EMPTY;
     }
+    let Some(zerowidth) = cell.zerowidth().filter(|chars| !chars.is_empty()) else {
+        return CellText::from_char(cell.c);
+    };
     let mut text = cell.c.to_string();
-    if let Some(zerowidth) = cell.zerowidth() {
-        text.extend(zerowidth.iter().copied());
-    }
-    Arc::from(text)
+    text.extend(zerowidth.iter().copied());
+    CellText::from(text)
 }
 
 fn cell_text_is_blank(cell: &Cell) -> bool {
@@ -2787,17 +3103,6 @@ fn render_cell_width(cell: &Cell) -> u8 {
     }
 }
 
-fn hash_cell_text<H: Hasher>(cell: &Cell, hasher: &mut H) {
-    if cell_text_is_blank(cell) {
-        "".hash(hasher);
-    } else if cell.zerowidth().is_none_or(|chars| chars.is_empty()) {
-        let mut encoded = [0; 4];
-        cell.c.encode_utf8(&mut encoded).hash(hasher);
-    } else {
-        cell_text(cell).hash(hasher);
-    }
-}
-
 fn push_render_cell_text(output: &mut String, cell: &RenderCell) {
     if cell.text.is_empty() {
         if cell.width != 0 {
@@ -2806,11 +3111,6 @@ fn push_render_cell_text(output: &mut String, cell: &RenderCell) {
     } else {
         output.push_str(cell.text());
     }
-}
-
-fn empty_render_cell_text() -> Arc<str> {
-    static EMPTY: OnceLock<Arc<str>> = OnceLock::new();
-    Arc::clone(EMPTY.get_or_init(|| Arc::from("")))
 }
 
 fn intern_render_cell_hyperlink(intern: &mut HashMap<Arc<str>, Arc<str>>, uri: &str) -> Arc<str> {
@@ -2824,8 +3124,14 @@ fn intern_render_cell_hyperlink(intern: &mut HashMap<Arc<str>, Arc<str>>, uri: &
 
 fn cell_style(cell: &Cell) -> CellStyle {
     let flags = cell.flags;
-    let fg = color_to_style_fg(cell.fg);
-    let bg = color_to_style_bg(cell.bg);
+    // Default colors map to `(None, None)`; skip the match for the common case.
+    let (fg, bg) = if cell.fg == Color::Named(NamedColor::Foreground)
+        && cell.bg == Color::Named(NamedColor::Background)
+    {
+        ((None, None), (None, None))
+    } else {
+        (color_to_style_fg(cell.fg), color_to_style_bg(cell.bg))
+    };
     CellStyle {
         fg: fg.0,
         fg_rgb: fg.1,

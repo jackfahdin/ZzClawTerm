@@ -12,12 +12,13 @@ use std::{
     sync::{Arc, Weak},
     time::{Duration, UNIX_EPOCH},
 };
-use zzclawterm_transport::drag_export::{
+use zzclawterm_files::drag_export::{
     DragExportSource, RemoteDragFile, SftpReadSource, SftpReadStream,
 };
-use zzclawterm_transport::{
-    FileBrowserBackendKind, RemoteFileService, SftpFileEntry, SftpFileType, SftpTransferOptions,
-};
+use zzclawterm_files::file_browser::FileBrowserBackendKind;
+use zzclawterm_files::remote_file::RemoteFileService;
+use zzclawterm_files::sftp::{SftpFileEntry, SftpFileType};
+use zzclawterm_files::sftp_transfer_types::SftpTransferOptions;
 
 /// Immutable gesture snapshot: switching tabs or updating selection after the
 /// drag starts cannot redirect its source connection or remote path.
@@ -130,9 +131,9 @@ impl TransferDragExportService {
             let controls: Vec<_> = selection
                 .entries
                 .iter()
-                .map(|_| zzclawterm_transport::SftpTransferControl::new())
+                .map(|_| zzclawterm_files::sftp::SftpTransferControl::new())
                 .collect();
-            let lifetime = Arc::new(zzclawterm_transport::drag_export::DragSourceLifetime::new(
+            let lifetime = Arc::new(zzclawterm_files::drag_export::DragSourceLifetime::new(
                 service.clone(),
                 controls.clone(),
             )?);
@@ -170,10 +171,10 @@ impl TransferDragExportService {
             sender.clone(),
         );
         let controls = aggregate.controls();
-        let enumeration_control = zzclawterm_transport::SftpTransferControl::new();
+        let enumeration_control = zzclawterm_files::sftp::SftpTransferControl::new();
         let mut watched = controls.clone();
         watched.push(enumeration_control.clone());
-        let lifetime = Arc::new(zzclawterm_transport::drag_export::DragSourceLifetime::new(
+        let lifetime = Arc::new(zzclawterm_files::drag_export::DragSourceLifetime::new(
             service.clone(),
             watched,
         )?);
@@ -218,8 +219,8 @@ impl TransferDragExportService {
         selection: &TransferSelection,
         service: Weak<RemoteFileService>,
         aggregate: Arc<super::drag_aggregate::DragAggregate>,
-        parent: zzclawterm_transport::SftpTransferControl,
-        lifetime: Arc<zzclawterm_transport::drag_export::DragSourceLifetime>,
+        parent: zzclawterm_files::sftp::SftpTransferControl,
+        lifetime: Arc<zzclawterm_files::drag_export::DragSourceLifetime>,
         root_index: usize,
         file: RemoteDragFile,
     ) -> VirtualFileDescriptor {
@@ -244,9 +245,9 @@ struct RemoteTreeProvider {
     selection: TransferSelection,
     service: Weak<RemoteFileService>,
     aggregate: Arc<super::drag_aggregate::DragAggregate>,
-    controls: Vec<zzclawterm_transport::SftpTransferControl>,
-    lifetime: Arc<zzclawterm_transport::drag_export::DragSourceLifetime>,
-    control: zzclawterm_transport::SftpTransferControl,
+    controls: Vec<zzclawterm_files::sftp::SftpTransferControl>,
+    lifetime: Arc<zzclawterm_files::drag_export::DragSourceLifetime>,
+    control: zzclawterm_files::sftp::SftpTransferControl,
 }
 impl VirtualFileTreeProvider for RemoteTreeProvider {
     fn load(&self) -> std::io::Result<VirtualFileDragPayload> {
@@ -257,7 +258,7 @@ impl VirtualFileTreeProvider for RemoteTreeProvider {
         let source_snapshot = (*service).clone();
         drop(service);
         let entries =
-            zzclawterm_transport::drag_export::tree::enumerate_remote_drag_with_root_controls(
+            zzclawterm_files::drag_export::tree::enumerate_remote_drag_with_root_controls(
                 &source_snapshot,
                 self.selection.entries.clone(),
                 &self.control,
@@ -294,7 +295,7 @@ impl VirtualFileTreeProvider for RemoteTreeProvider {
 
 struct RemoteProvider {
     source: SftpReadSource,
-    _lifetime: Arc<zzclawterm_transport::drag_export::DragSourceLifetime>,
+    _lifetime: Arc<zzclawterm_files::drag_export::DragSourceLifetime>,
 }
 impl VirtualFileProvider for RemoteProvider {
     fn open(&self) -> std::io::Result<Box<dyn VirtualFileStream>> {
@@ -352,7 +353,7 @@ impl ZzClawTermApp {
                 .cloned()
                 .collect()
         };
-        let entries = match zzclawterm_transport::drag_export::tree::prune_nested_roots(entries) {
+        let entries = match zzclawterm_files::drag_export::tree::prune_nested_roots(entries) {
             Ok(entries) => entries,
             Err(error) => {
                 self.shell.set_status(error.to_string());
@@ -384,7 +385,8 @@ impl ZzClawTermApp {
         self.session.metadata(&selection.session_id)?;
         if selection.backend == FileBrowserBackendKind::Remote {
             let service = selection.source_service.as_ref().and_then(Weak::upgrade)?;
-            if service.selected_backend() != Some(zzclawterm_transport::RemoteFileBackendKind::Sftp)
+            if service.selected_backend()
+                != Some(zzclawterm_files::remote_file::RemoteFileBackendKind::Sftp)
             {
                 self.shell
                     .set_status("Remote drag export requires SFTP; use Download".to_string());
@@ -412,8 +414,9 @@ impl ZzClawTermApp {
 #[cfg(test)]
 mod tests {
     use super::{TransferDragExportService, TransferSelection};
-    use zzclawterm_transport::drag_export::DragExportSource;
-    use zzclawterm_transport::{FileBrowserBackendKind, SftpFileEntry, SftpFileType};
+    use zzclawterm_files::drag_export::DragExportSource;
+    use zzclawterm_files::file_browser::FileBrowserBackendKind;
+    use zzclawterm_files::sftp::{SftpFileEntry, SftpFileType};
     fn entry(name: &str, kind: SftpFileType) -> SftpFileEntry {
         SftpFileEntry {
             name: name.into(),
@@ -458,7 +461,7 @@ mod tests {
         let selection = TransferSelection {
             session_id: "session".into(),
             source_service: None,
-            transfer_options: zzclawterm_transport::SftpTransferOptions::default(),
+            transfer_options: zzclawterm_files::sftp_transfer_types::SftpTransferOptions::default(),
             backend: FileBrowserBackendKind::Remote,
             entries: vec![entry("你好.txt", SftpFileType::File)],
         };
@@ -484,7 +487,8 @@ mod tests {
             let selection = TransferSelection {
                 session_id: "session".into(),
                 source_service: None,
-                transfer_options: zzclawterm_transport::SftpTransferOptions::default(),
+                transfer_options:
+                    zzclawterm_files::sftp_transfer_types::SftpTransferOptions::default(),
                 backend: FileBrowserBackendKind::Remote,
                 entries: vec![entry("file", SftpFileType::File), entry("other", kind)],
             };
@@ -497,7 +501,7 @@ mod tests {
         let selection = TransferSelection {
             session_id: "session".into(),
             source_service: None,
-            transfer_options: zzclawterm_transport::SftpTransferOptions::default(),
+            transfer_options: zzclawterm_files::sftp_transfer_types::SftpTransferOptions::default(),
             backend: FileBrowserBackendKind::Remote,
             entries: vec![
                 entry("folder", SftpFileType::Directory),
@@ -505,7 +509,7 @@ mod tests {
             ],
         };
         let (sender, mut receiver) = futures::channel::mpsc::unbounded();
-        let service = std::sync::Arc::new(zzclawterm_transport::RemoteFileService::new(
+        let service = std::sync::Arc::new(zzclawterm_files::remote_file::RemoteFileService::new(
             zzclawterm_transport::SshSessionConfig::default(),
         ));
         let gpui::ExternalDragPayload::VirtualFileTree(tree) = TransferDragExportService::resolve(
@@ -552,7 +556,7 @@ mod tests {
         let selection = TransferSelection {
             session_id: "session".into(),
             source_service: None,
-            transfer_options: zzclawterm_transport::SftpTransferOptions::default(),
+            transfer_options: zzclawterm_files::sftp_transfer_types::SftpTransferOptions::default(),
             backend: FileBrowserBackendKind::Local,
             entries: vec![entry("dir", SftpFileType::Directory)],
         };
@@ -574,7 +578,7 @@ mod tests {
         let selection = TransferSelection {
             session_id: "session".into(),
             source_service: None,
-            transfer_options: zzclawterm_transport::SftpTransferOptions::default(),
+            transfer_options: zzclawterm_files::sftp_transfer_types::SftpTransferOptions::default(),
             backend: FileBrowserBackendKind::Remote,
             entries: vec![
                 entry("你好.txt", SftpFileType::File),
@@ -582,7 +586,7 @@ mod tests {
             ],
         };
         let (sender, mut receiver) = futures::channel::mpsc::unbounded();
-        let service = std::sync::Arc::new(zzclawterm_transport::RemoteFileService::new(
+        let service = std::sync::Arc::new(zzclawterm_files::remote_file::RemoteFileService::new(
             zzclawterm_transport::SshSessionConfig::default(),
         ));
         let gpui::ExternalDragPayload::VirtualFiles(files) = TransferDragExportService::resolve(
@@ -612,7 +616,8 @@ mod tests {
             let selection = TransferSelection {
                 session_id: "session".into(),
                 source_service: None,
-                transfer_options: zzclawterm_transport::SftpTransferOptions::default(),
+                transfer_options:
+                    zzclawterm_files::sftp_transfer_types::SftpTransferOptions::default(),
                 backend: FileBrowserBackendKind::Remote,
                 entries: vec![entry(name, SftpFileType::File)],
             };
@@ -631,7 +636,7 @@ mod tests {
         let selection = TransferSelection {
             session_id: "session".into(),
             source_service: None,
-            transfer_options: zzclawterm_transport::SftpTransferOptions::default(),
+            transfer_options: zzclawterm_files::sftp_transfer_types::SftpTransferOptions::default(),
             backend: FileBrowserBackendKind::Remote,
             entries: vec![entry("file", SftpFileType::File)],
         };
@@ -644,13 +649,13 @@ mod tests {
     #[test]
     fn gesture_snapshot_cannot_be_redirected_after_capture() {
         let drag = super::DraggedSelection::new("anchor".into());
-        let service = std::sync::Arc::new(zzclawterm_transport::RemoteFileService::new(
+        let service = std::sync::Arc::new(zzclawterm_files::remote_file::RemoteFileService::new(
             zzclawterm_transport::SshSessionConfig::default(),
         ));
         let selection = TransferSelection {
             session_id: "original".into(),
             source_service: Some(std::sync::Arc::downgrade(&service)),
-            transfer_options: zzclawterm_transport::SftpTransferOptions::default(),
+            transfer_options: zzclawterm_files::sftp_transfer_types::SftpTransferOptions::default(),
             backend: FileBrowserBackendKind::Remote,
             entries: vec![entry("original", SftpFileType::File)],
         };

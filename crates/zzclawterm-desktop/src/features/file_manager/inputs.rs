@@ -1,9 +1,8 @@
-use gpui::{AppContext as _, Context, Entity, Window};
-use zzclawterm_transport::RemoteFilePath;
-use zzclawterm_ui::{ZzClawInputEvent, ZzClawInputState};
-
 use super::pane::PaneId;
 use super::workspace::FileManagerWorkspace;
+use gpui::{AppContext as _, Context, Entity, Window};
+use zzclawterm_files::sftp::RemoteFilePath;
+use zzclawterm_ui::{ZzClawInputEvent, ZzClawInputState};
 
 pub(super) struct FileManagerPaneInputs {
     pub path: Entity<ZzClawInputState>,

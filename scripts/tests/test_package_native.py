@@ -211,9 +211,14 @@ class PackageNativeTests(unittest.TestCase):
                 fake.parent.mkdir(parents=True, exist_ok=True)
                 fake.write_bytes(b"MZ")
                 helpers.append(fake)
+            for relative in package_native.conpty_files(target):
+                path = root / "staging/resources/windows/conpty" / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"MZ")
             with (
                 mock.patch.object(package_native, "WORK_DIR", root / "work"),
                 mock.patch.object(package_native, "DIST_DIR", root / "dist"),
+                mock.patch.object(package_native.prepare_conpty, "STAGING", root / "staging"),
                 mock.patch.object(package_native, "run") as run_mock,
                 mock.patch.object(
                     package_native, "find_iscc", return_value="iscc"
@@ -246,6 +251,7 @@ class PackageNativeTests(unittest.TestCase):
             package_native.ROOT_DIR / "scripts" / "release" / "windows-installer.iss"
         ).read_text(encoding="utf-8")
         self.assertIn('Source: "{#SourceDir}\\*.exe"', script)
+        self.assertIn('Source: "{#SourceDir}\\conpty\\*"', script)
         self.assertIn('Source: "{#SourceDir}\\vcxsrv\\*"', script)
         self.assertIn(
             'Subkey: "Software\\Classes\\zzclawterm"; ValueType: string; '
@@ -380,9 +386,14 @@ class PackageNativeTests(unittest.TestCase):
                 fake.parent.mkdir(parents=True, exist_ok=True)
                 fake.write_bytes(b"MZ")
                 helpers.append(fake)
+            for relative in package_native.conpty_files(target):
+                path = root / "staging/resources/windows/conpty" / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"MZ")
             with (
                 mock.patch.object(package_native, "WORK_DIR", root / "work"),
                 mock.patch.object(package_native, "DIST_DIR", root / "dist"),
+                mock.patch.object(package_native.prepare_conpty, "STAGING", root / "staging"),
                 mock.patch.object(package_native, "run"),
                 mock.patch.object(
                     package_native, "find_iscc", return_value="iscc"
@@ -584,15 +595,17 @@ class PackageNativeTests(unittest.TestCase):
         self.assertEqual(link.linkname, "Versions/A")
         self.assertEqual(link.size, 0)
 
-    def test_linux_desktop_registers_only_zzclawterm_url_scheme(self) -> None:
+    def test_linux_desktop_registers_application_and_shell_url_schemes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "zzclawterm.desktop"
             package_native.write_desktop_file(path, "/opt/zzclawterm/zzclawterm")
             desktop = path.read_text(encoding="utf-8")
         self.assertIn("Exec=/opt/zzclawterm/zzclawterm %U\n", desktop)
-        self.assertIn("MimeType=x-scheme-handler/zzclawterm;\n", desktop)
-        self.assertNotIn("x-scheme-handler/ssh", desktop)
-        self.assertNotIn("x-scheme-handler/telnet", desktop)
+        self.assertIn(
+            "MimeType=x-scheme-handler/zzclawterm;x-scheme-handler/ssh;"
+            "x-scheme-handler/telnet;\n",
+            desktop,
+        )
 
     def test_deb_dependencies_cover_helper_binaries(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

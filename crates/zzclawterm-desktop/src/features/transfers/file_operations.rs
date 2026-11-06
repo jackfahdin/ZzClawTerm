@@ -1,20 +1,21 @@
 //! Frozen file operations, shared by the workspace and the transfer queue.
 
-use gpui::Context;
-use rust_i18n::t;
-use zzclawterm_transport::{
-    FileBrowserBackendKind, FileBrowserService, RemoteFilePath, SftpDuplicatePolicy,
-    SftpDuplicateResolver, SftpFileEntry, SftpPathTransferOptions, SftpTransferControl,
-    file_browser_copy_destination_invalid, file_browser_join, file_browser_name,
-    file_browser_parent, valid_file_browser_child_name,
-};
-
 use super::clipboard_copy::{ClipboardCopyRequest, run_clipboard_copy};
 use super::transfer_jobs::TransferProgressEventSender;
 use crate::features::ZzClawTermApp;
 use crate::models::{
     TransferJobEvent, TransferJobKind, TransferJobOutput, TransferJobResult, TransferJobState,
     TransferJobStatus,
+};
+use gpui::Context;
+use rust_i18n::t;
+use zzclawterm_files::file_browser::{
+    FileBrowserBackendKind, FileBrowserService, file_browser_copy_destination_invalid,
+    file_browser_join, file_browser_name, file_browser_parent, valid_file_browser_child_name,
+};
+use zzclawterm_files::sftp::{RemoteFilePath, SftpFileEntry, SftpTransferControl};
+use zzclawterm_files::sftp_transfer_types::{
+    SftpDuplicatePolicy, SftpDuplicateResolver, SftpPathTransferOptions,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -130,6 +131,16 @@ impl FileOperationContext {
 
     pub(in crate::features) fn can_pause(&self) -> bool {
         matches!(self.request, FileOperationRequest::Transfer(_))
+    }
+
+    pub(in crate::features) fn is_delete(&self) -> bool {
+        matches!(
+            &self.request,
+            FileOperationRequest::Mutation(FileMutationIntent {
+                mutation: FileMutation::Delete(_),
+                ..
+            })
+        )
     }
 }
 
@@ -372,7 +383,7 @@ fn execute_file_operation(
     target_service: FileBrowserService,
     control: SftpTransferControl,
     options: SftpPathTransferOptions,
-    progress: impl FnMut(zzclawterm_transport::SftpTransferProgress) + Send + 'static,
+    progress: impl FnMut(zzclawterm_files::sftp_transfer_types::SftpTransferProgress) + Send + 'static,
 ) -> Result<TransferJobOutput, String> {
     control
         .wait_if_paused_blocking()
@@ -408,16 +419,16 @@ fn execute_file_operation(
                 .map_err(|error| error.to_string())?;
             if !matches!(
                 source_properties.file_type,
-                zzclawterm_transport::SftpFileType::File
-                    | zzclawterm_transport::SftpFileType::Directory
+                zzclawterm_files::sftp::SftpFileType::File
+                    | zzclawterm_files::sftp::SftpFileType::Directory
             ) {
                 return Err("copy and move do not support symbolic links or special files".into());
             }
             if entry.is_symlink()
                 || !matches!(
                     entry.file_type,
-                    zzclawterm_transport::SftpFileType::File
-                        | zzclawterm_transport::SftpFileType::Directory
+                    zzclawterm_files::sftp::SftpFileType::File
+                        | zzclawterm_files::sftp::SftpFileType::Directory
                 )
             {
                 return Err("copy and move do not support symbolic links or special files".into());
@@ -446,7 +457,7 @@ fn execute_file_operation(
                     .map_err(|error| error.to_string())?
                     .iter()
                     .any(|e| {
-                        zzclawterm_transport::file_browser_path_eq(
+                        zzclawterm_files::file_browser::file_browser_path_eq(
                             target_service.kind(),
                             &e.path,
                             &target,
@@ -494,7 +505,7 @@ fn execute_file_operation(
             let parent = &intent.directory.display_path;
             let result = match intent.mutation {
                 FileMutation::Delete(path) => {
-                    if zzclawterm_transport::file_browser_path_is_root(
+                    if zzclawterm_files::file_browser::file_browser_path_is_root(
                         source_service.kind(),
                         &path.display_path,
                     ) {
@@ -566,7 +577,11 @@ fn reject_existing(
         .map_err(|error| error.to_string())?
         .iter()
         .any(|entry| {
-            zzclawterm_transport::file_browser_path_eq(service.kind(), &entry.path, target)
+            zzclawterm_files::file_browser::file_browser_path_eq(
+                service.kind(),
+                &entry.path,
+                target,
+            )
         })
     {
         Err("destination already exists; source was kept".into())

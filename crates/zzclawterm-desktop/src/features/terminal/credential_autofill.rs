@@ -1,32 +1,27 @@
-use rust_i18n::t;
-
-use futures::StreamExt as _;
-
-use std::time::{SystemTime, UNIX_EPOCH};
-use zzclawterm_ui::ZzClawScrollable;
-
-use gpui::{
-    Context, FontWeight, IntoElement, KeyDownEvent, SharedString, div, prelude::*, px, rgb, rgba,
-    svg,
+use super::command_suggestions::{
+    SUGGESTION_OVERLAY_FOOTER_HEIGHT, SUGGESTION_OVERLAY_HEADER_HEIGHT,
+    suggestion_overlay_desired_height,
 };
-use zzclawterm_core::{
-    ConnectionAuth, CredentialPromptKind, SavedConnection, SecretString, TerminalInputState,
-    credential_password_prompt_targets_user, credential_prompt_requests_password, truncate_preview,
-};
-use zzclawterm_store::{ConnectionStore, StorageError, StoreDomain, store_request};
-use zzclawterm_terminal::TerminalSnapshot;
-
 use crate::features::ZzClawTermApp;
 use crate::models::{
     ConnectionPasswordTarget, CredentialAutofillAction, CredentialAutofillMatchEvent,
     CredentialAutofillMatchRequest, CredentialAutofillMatchRequestKey, CredentialAutofillTarget,
     CredentialSuggestionState, PendingCredentialAutofill, credential_autofill_action,
 };
-
-use super::command_suggestions::{
-    SUGGESTION_OVERLAY_FOOTER_HEIGHT, SUGGESTION_OVERLAY_HEADER_HEIGHT,
-    suggestion_overlay_desired_height,
+use futures::StreamExt as _;
+use gpui::{
+    Context, FontWeight, IntoElement, KeyDownEvent, SharedString, div, prelude::*, px, rgb, rgba,
+    svg,
 };
+use rust_i18n::t;
+use std::time::{SystemTime, UNIX_EPOCH};
+use zzclawterm_core::{
+    ConnectionAuth, CredentialPromptKind, SavedConnection, SecretString, TerminalInputState,
+    credential_password_prompt_targets_user, credential_prompt_requests_password, truncate_preview,
+};
+use zzclawterm_store::{ConnectionStore, StorageError, StoreDomain, store_request};
+use zzclawterm_terminal::TerminalSnapshot;
+use zzclawterm_ui::ZzClawScrollable;
 
 const CREDENTIAL_AUTOFILL_INPUT_TAIL_LIMIT: usize = 4096;
 const PENDING_PASSWORD_TTL_MS: u64 = 60_000;
@@ -1348,16 +1343,6 @@ fn credential_autofill_detect_prompt_kind(prompt: &str) -> Option<CredentialProm
 
 #[cfg(test)]
 mod tests {
-    use crate::features::ZzClawTermApp;
-    use gpui::{AppContext as _, TestAppContext};
-    use zzclawterm_core::{
-        AiExecutionProfile, ConnectionAuth, ConnectionPasswordSource, ConnectionType,
-        CredentialPromptKind, SavedConnection,
-    };
-    use zzclawterm_core::{SavedPassword, SecretString};
-    use zzclawterm_store::ConnectionStore;
-    use zzclawterm_transport::SshSessionConfig;
-
     use super::{
         CREDENTIAL_AUTOFILL_INPUT_TAIL_LIMIT, ConnectionPasswordResolve,
         CredentialAutofillRuntimeBacklog, connection_auth_inline_password,
@@ -1369,9 +1354,16 @@ mod tests {
         credential_autofill_snapshot_detection_can_run, credential_autofill_visible_tail,
         credential_suggestion_step_selection, resolve_connection_password_from_store,
     };
+    use crate::features::ZzClawTermApp;
     use crate::features::test_support::app_with_visible_local_session;
     use crate::models::{ConnectionPasswordTarget, CredentialAutofillTarget, SessionLaunchConfig};
     use crate::test_support::TestConfigDir;
+    use gpui::{AppContext as _, TestAppContext};
+    use zzclawterm_core::{
+        AiExecutionProfile, ConnectionAuth, ConnectionPasswordSource, ConnectionType,
+        CredentialPromptKind, SavedConnection,
+    };
+    use zzclawterm_transport::SshSessionConfig;
 
     fn backlog(
         queued_output_bytes: usize,
@@ -1587,7 +1579,7 @@ mod tests {
 
     #[test]
     fn connection_auth_inline_password_accepts_only_hydrated_plaintext() {
-        use zzclawterm_core::{ConnectionAuth, SecretString};
+        use zzclawterm_core::SecretString;
         let inline = ConnectionAuth {
             mode: "password".into(),
             password: Some(SecretString::from("secret")),
@@ -1616,6 +1608,7 @@ mod tests {
 
     #[test]
     fn connection_has_resolvable_password_reads_catalog_shape() {
+        use zzclawterm_core::SecretString;
         // Catalog (unhydrated): ciphertext inline with has_password = true.
         let catalog_inline = ConnectionAuth {
             mode: "password".into(),
@@ -1656,7 +1649,7 @@ mod tests {
 
     #[test]
     fn connection_has_resolvable_password_follows_password_source() {
-        use zzclawterm_core::{ConnectionAuth, ConnectionPasswordSource, SecretString};
+        use zzclawterm_core::SecretString;
         // The account is only the password when the source says so, so a
         // connection that owns its password must not be offered a candidate
         // that resolves to MissingPassword at fill time.
@@ -1697,6 +1690,7 @@ mod tests {
     /// carriage return.
     #[test]
     fn connection_password_resolves_from_store_to_the_terminal_payload() {
+        use zzclawterm_core::SecretString;
         use zzclawterm_store::ConnectionStore;
 
         let root = crate::test_support::TestConfigDir::new("zzclawterm-connection-password-fill");
@@ -1759,6 +1753,7 @@ mod tests {
     #[test]
     fn account_source_uses_account_password_despite_stale_connection_record() {
         use zzclawterm_core::SecretString;
+        use zzclawterm_store::ConnectionStore;
 
         let root = TestConfigDir::new("zzclawterm-account-source-stale-connection");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
@@ -1778,6 +1773,8 @@ mod tests {
 
     #[test]
     fn connection_source_never_uses_saved_account_password() {
+        use zzclawterm_core::SecretString;
+        use zzclawterm_store::ConnectionStore;
         let root = TestConfigDir::new("zzclawterm-connection-source-with-account");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
         save_test_account(&store, Some("account-secret"));
@@ -1816,6 +1813,8 @@ mod tests {
 
     #[test]
     fn non_password_auth_never_resolves_connection_password() {
+        use zzclawterm_core::SecretString;
+        use zzclawterm_store::ConnectionStore;
         let root = TestConfigDir::new("zzclawterm-non-password-auth");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
         let auth = ConnectionAuth {
@@ -1839,6 +1838,8 @@ mod tests {
 
     #[test]
     fn legacy_password_source_follows_hydrated_auth_rule() {
+        use zzclawterm_core::SecretString;
+        use zzclawterm_store::ConnectionStore;
         let root = TestConfigDir::new("zzclawterm-legacy-password-source");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
         save_test_account(&store, Some("account-secret"));
@@ -1871,6 +1872,8 @@ mod tests {
 
     #[test]
     fn account_source_does_not_fall_back_to_stale_connection_password() {
+        use zzclawterm_core::SecretString;
+        use zzclawterm_store::ConnectionStore;
         let root = TestConfigDir::new("zzclawterm-account-source-unavailable");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
         let mut auth = account_password_auth();
@@ -1897,6 +1900,9 @@ mod tests {
     #[test]
     fn account_source_decryption_error_does_not_use_stale_connection_password() {
         use redb::{Database, TableDefinition};
+        use zzclawterm_core::SecretString;
+        use zzclawterm_core::models::credentials::SavedPassword;
+        use zzclawterm_store::ConnectionStore;
 
         let root = TestConfigDir::new("zzclawterm-account-source-corrupt");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
@@ -1940,8 +1946,10 @@ mod tests {
 
     #[test]
     fn account_source_locked_vault_does_not_use_stale_connection_password() {
-        use redb::{Database, TableDefinition};
-
+        use redb::Database;
+        use redb::TableDefinition;
+        use zzclawterm_core::SecretString;
+        use zzclawterm_store::ConnectionStore;
         let root = TestConfigDir::new("zzclawterm-account-source-locked");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
         save_test_account(&store, Some("account-secret"));
@@ -2378,10 +2386,13 @@ mod tests {
         use std::time::{Duration, Instant};
         use zzclawterm_core::SecretString;
         use zzclawterm_store::ConnectionStore;
-        use zzclawterm_transport::{
+
+        use zzclawterm_recording::recording::{
             ExistingFileBehavior, RecordingContext, RecordingMode, RecordingProfile,
-            RecordingRotationPolicy, TelnetSessionConfig,
+            RecordingRotationPolicy,
         };
+
+        use zzclawterm_transport::TelnetSessionConfig;
 
         let root = TestConfigDir::new("zzclawterm-credential-sensitive-wire");
         let store = ConnectionStore::open(root.path().join("config")).unwrap();

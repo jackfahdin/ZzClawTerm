@@ -37,6 +37,8 @@ use super::{
     AutoRefreshClaim, EnvironmentValue, MAX_ENVIRONMENT_VARIABLE_NAME_LENGTH,
     ShellEnvironmentCache, ShellEnvironmentError, normalize_environment_variable_name,
 };
+#[cfg(unix)]
+use std::fs;
 #[cfg(windows)]
 use std::io::ErrorKind;
 #[cfg(unix)]
@@ -46,12 +48,9 @@ use std::path::{Path, PathBuf};
 #[cfg(any(unix, windows))]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-#[cfg(unix)]
-use std::{fs, path::PathBuf};
 
 #[cfg(any(unix, windows))]
 impl super::ShellEnvironmentCache {
-    #[cfg(windows)]
     pub(crate) fn with_values_for_test(
         program: PathBuf,
         values: std::collections::HashMap<String, EnvironmentValue>,

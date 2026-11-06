@@ -9,6 +9,5 @@ mod state;
 
 pub(in crate::features) use state::{
     DockerDerivedItems, DockerPresentationState, GpuPresentationState, NpuPresentationState,
-    ProcessPresentationState, ProcessSortColumns, RemoteOpsFeatureFocus, RemoteOpsFeatureState,
-    StatsPresentationState,
+    ProcessPresentationState, RemoteOpsFeatureFocus, RemoteOpsFeatureState, StatsPresentationState,
 };

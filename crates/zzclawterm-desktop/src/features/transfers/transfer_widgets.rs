@@ -1,6 +1,7 @@
-use zzclawterm_transport::{SftpDuplicateDecision, SftpDuplicatePolicy, SftpTransferProgress};
-
 use crate::models::TransferJobKind;
+use zzclawterm_files::sftp_transfer_types::{
+    SftpDuplicateDecision, SftpDuplicatePolicy, SftpTransferProgress,
+};
 
 pub(in crate::features) fn duplicate_policy_label(policy: SftpDuplicatePolicy) -> &'static str {
     match policy {

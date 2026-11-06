@@ -1,24 +1,23 @@
+use crate::features::{ZzClawTermApp, runtime_jobs::await_blocking_job};
+use crate::models::SessionLaunchConfig;
+use gpui::Context;
 use rust_i18n::t;
-
 use std::collections::HashSet;
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
-
-use gpui::Context;
 use time::OffsetDateTime;
+
 use time::macros::format_description;
+
 use zzclawterm_core::{
     AppSettingsSummary, ExistingFileBehavior as CoreExistingFileBehavior, Group,
     RecordingMode as CoreRecordingMode, RecordingRotationPolicy as CoreRecordingRotationPolicy,
 };
-use zzclawterm_transport::{
+use zzclawterm_recording::recording::{
     ExistingFileBehavior as TransportExistingFileBehavior, RecordingContext, RecordingMode,
     RecordingProfile, RecordingRotationPolicy as TransportRecordingRotationPolicy,
 };
-
-use crate::features::{ZzClawTermApp, runtime_jobs::await_blocking_job};
-use crate::models::SessionLaunchConfig;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn toggle_active_session_recording(&mut self, cx: &mut Context<Self>) {
@@ -248,7 +247,7 @@ impl ZzClawTermApp {
         let path = match session_transcript_file_path(
             self.settings.summary(),
             &session.name,
-            OffsetDateTime::now_utc(),
+            OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc()),
         ) {
             Ok(path) => path,
             Err(error) => {
@@ -422,7 +421,7 @@ fn session_transcript_file_path(
         .map_err(|error| format!("failed to format transcript timestamp: {error}"))?;
     let file_name = format!(
         "session-{}-{timestamp}.log",
-        zzclawterm_transport::safe_recording_name(session_name)
+        zzclawterm_recording::recording::safe_recording_name(session_name)
     );
     Ok(directory.join(file_name))
 }
@@ -544,13 +543,11 @@ fn map_recording_rotation(
 
 #[cfg(test)]
 mod tests {
+    use super::{first_available_path, recording_group_path, session_transcript_file_path};
     use std::fs;
     use std::path::PathBuf;
-
     use time::{Date, Month, PrimitiveDateTime, Time, UtcOffset};
     use zzclawterm_core::{AppSettingsSummary, Group};
-
-    use super::{first_available_path, recording_group_path, session_transcript_file_path};
 
     fn group(id: &str, name: &str, parent_id: Option<&str>) -> Group {
         Group {
@@ -562,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn session_transcript_path_uses_safe_name_and_utc_iso_timestamp() {
+    fn session_transcript_path_uses_safe_name_and_iso_timestamp() {
         let settings = AppSettingsSummary {
             recording_path: "/tmp/zzclawterm-recordings".to_string(),
             ..AppSettingsSummary::default()

@@ -289,24 +289,14 @@ impl ZzClawTermApp {
         let display_offset = self.terminal_display_offset_for_session(
             (!session_id.is_empty()).then_some(session_id.as_str()),
         );
-        // Live sessions already paint the grid on TerminalSurface. Skip cloning /
-        // building a shell-side viewport snapshot except when IME preedit needs
-        // cursor placement, or when there is no session (empty bootstrap canvas).
-        let needs_shell_viewport_snapshot =
-            session_id.is_empty() || (is_active && !self.terminal.input.ime_marked_text.is_empty());
-        let snapshot = if needs_shell_viewport_snapshot {
-            self.terminal_snapshot_for_session(
-                (!session_id.is_empty()).then_some(session_id.as_str()),
-                display_offset,
-            )
+        // Live grid and IME preedit are painted together by TerminalSurface.
+        let snapshot = if session_id.is_empty() {
+            self.terminal_snapshot_for_session(None, display_offset)
         } else {
-            // Chrome wrappers do not paint cells from this value. Reuse one immutable
-            // placeholder instead of rebuilding an 80x24 snapshot on every shell paint.
             terminal_shell_placeholder_snapshot()
         };
         let line_count = snapshot.row_count();
         let cursor_row = snapshot.cursor.row;
-        let cursor_col = snapshot.cursor.col;
         let snapshot_rows = snapshot.row_count();
         let snapshot_cols = snapshot.cols;
         let viewport_snapshot_duration = snapshot_stage_started_at.elapsed();
@@ -488,26 +478,6 @@ impl ZzClawTermApp {
         let terminal_font_family = terminal_font.family.clone();
         let terminal_font_fallbacks = terminal_font.fallbacks.clone();
         let terminal_gpui_font = terminal_font.font();
-        let ime_preedit_text = (is_active
-            && !session_id.is_empty()
-            && !self.terminal.input.ime_marked_text.is_empty())
-        .then(|| self.terminal.input.ime_marked_text.clone());
-        let ime_preedit_position = ime_preedit_text.as_ref().map(|_| {
-            let insets = self.terminal_content_insets();
-            let gutter = self.terminal_gutter_width_px_for_session(
-                (!session_id.is_empty()).then_some(session_id.as_str()),
-            );
-            let row = if cursor_row == usize::MAX {
-                line_count.saturating_sub(1)
-            } else {
-                cursor_row.min(snapshot_rows.saturating_sub(1))
-            };
-            let col = cursor_col.min(snapshot_cols.saturating_sub(1));
-            (
-                insets.left + gutter + col as f32 * cell_w,
-                insets.top + row as f32 * cell_h,
-            )
-        });
         let gutter = if session_id.is_empty() && gutter_enabled {
             let line_number_digits =
                 self.terminal_line_number_digits_for_session(None, snapshot.as_ref());
@@ -1008,7 +978,9 @@ impl ZzClawTermApp {
                                                     return;
                                                 }
                                             } else if (modifiers.control || modifiers.platform)
-                                                && this.try_activate_action_link_at_click(event, cx)
+                                                && this.try_activate_action_link_at_click(
+                                                    event, window, cx,
+                                                )
                                             {
                                                 cx.stop_propagation();
                                                 return;
@@ -1053,39 +1025,6 @@ impl ZzClawTermApp {
                                                 cx,
                                             ))
                                         }),
-                                )
-                                .when_some(
-                                    ime_preedit_text.clone().zip(ime_preedit_position),
-                                    |this, (marked_text, (x, y))| {
-                                        this.child(
-                                            div()
-                                                .absolute()
-                                                .left(px(x))
-                                                .top(px(y))
-                                                .h(px(cell_h))
-                                                .max_w(px(360.))
-                                                .px_1()
-                                                .flex()
-                                                .items_center()
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .border_b_2()
-                                                .border_color(rgb(palette.link))
-                                                .bg(rgba((palette.terminal_cursor << 8) | 0x33))
-                                                .text_color(rgb(palette.terminal_fg))
-                                                .font(terminal_gpui_font.clone())
-                                                .font_weight(FontWeight(
-                                                    self.settings.summary().terminal_font_weight
-                                                        as f32,
-                                                ))
-                                                .text_size(px(self
-                                                    .settings
-                                                    .summary()
-                                                    .terminal_font_size
-                                                    as f32))
-                                                .child(marked_text),
-                                        )
-                                    },
                                 )
                                 .when(file_drop_hover && !session_id.is_empty(), |this| {
                                     this.child(

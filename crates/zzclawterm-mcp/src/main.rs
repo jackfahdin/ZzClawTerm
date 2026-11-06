@@ -4,13 +4,15 @@ use std::sync::Arc;
 
 use bridge::{BridgeClient, BridgeEndpoint, endpoint_from_environment_or_discovery};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, Implementation, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, Implementation,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
 use serde_json::{Map, Value, json};
-use zzclawterm_mcp_protocol::{MCP_TOOL_REGISTRY, validate_tool_arguments, validate_tool_result};
+use zzclawterm_mcp_protocol::{
+    MCP_TOOL_REGISTRY, tool, validate_tool_arguments, validate_tool_result,
+};
 
 #[derive(Clone)]
 struct ZzClawTermMcp {
@@ -54,7 +56,7 @@ impl ServerHandler for ZzClawTermMcp {
             .await
         {
             Ok(value) => match validate_tool_result(&request.name, &value) {
-                Ok(()) => CallToolResult::structured(value),
+                Ok(()) => CallToolResult::structured(structured_content(&request.name, value)),
                 Err(error) => CallToolResult::structured_error(json!({
                     "code": "bridge_protocol_error",
                     "message": error.to_string()
@@ -72,7 +74,12 @@ impl ServerHandler for ZzClawTermMcp {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(self.tools.as_ref().clone()))
+        // MCP 2026-07-28 requires `ttlMs` and `cacheScope` on list results, and strict
+        // clients reject `tools/list` without them. The tool set is per bridge session,
+        // so the result is private and not cached.
+        Ok(ListToolsResult::with_all_items(self.tools.as_ref().clone())
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Private))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
@@ -88,6 +95,16 @@ impl ServerHandler for ZzClawTermMcp {
                 )
                 .await;
         }
+    }
+}
+
+/// MCP requires `structuredContent` to be an object. `sftp_list` returns a bare array of
+/// entries over the bridge, so it is wrapped as `{ "items": [...] }`; other results pass
+/// through unchanged.
+fn structured_content(tool_name: &str, value: Value) -> Value {
+    match value {
+        Value::Array(items) if tool_name == tool::SFTP_LIST => json!({ "items": items }),
+        other => other,
     }
 }
 
@@ -130,7 +147,28 @@ mod tests {
     };
     use zzclawterm_mcp_protocol::{MCP_TOOL_REGISTRY, RpcRequest, RpcResponse, tool};
 
-    use super::{BridgeEndpoint, ZzClawTermMcp, build_tools};
+    use super::{BridgeEndpoint, ZzClawTermMcp, build_tools, structured_content};
+
+    #[test]
+    fn sftp_list_structured_content_is_an_object() {
+        assert_eq!(
+            structured_content(tool::SFTP_LIST, json!([{ "name": "a" }, { "name": "b" }])),
+            json!({ "items": [{ "name": "a" }, { "name": "b" }] })
+        );
+        // An empty directory still gives an object.
+        assert_eq!(
+            structured_content(tool::SFTP_LIST, json!([])),
+            json!({ "items": [] })
+        );
+    }
+
+    #[test]
+    fn other_tool_results_pass_through_unchanged() {
+        let home = json!({ "path": "/home/user" });
+        assert_eq!(structured_content(tool::SFTP_HOME, home.clone()), home);
+        let stat = json!({ "name": "a", "size": 1 });
+        assert_eq!(structured_content(tool::SFTP_STAT, stat.clone()), stat);
+    }
 
     #[test]
     fn listed_tool_annotations_come_from_the_shared_registry() {
@@ -248,6 +286,16 @@ mod tests {
                                 "connected": true
                             })
                         }
+                        tool::SFTP_LIST => json!([{
+                            "name": "notes.txt",
+                            "is_dir": false,
+                            "is_symlink": false,
+                            "size": 5,
+                            "permissions": "rw-r--r--",
+                            "owner": "user",
+                            "group": "user",
+                            "mtime": 0
+                        }]),
                         other => panic!("unexpected tool: {other}"),
                     },
                     other => panic!("unexpected bridge method: {other}"),
@@ -306,6 +354,8 @@ mod tests {
         .await;
         let listed = receive_response(&mut client_lines, 2).await;
         assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 16);
+        assert_eq!(listed["result"]["ttlMs"], 0);
+        assert_eq!(listed["result"]["cacheScope"], "private");
 
         send_client_message(
             &mut client_writer,
@@ -363,6 +413,30 @@ mod tests {
                 "connected": true
             })
         );
+
+        // MCP requires structuredContent to be an object (#1002): the bridge's entry array
+        // is returned under `items`.
+        send_client_message(
+            &mut client_writer,
+            r#"{
+                    "jsonrpc": "2.0",
+                    "id": 6,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "sftp_list",
+                        "arguments": { "sessionId": "session-2", "path": "/home/user" }
+                    }
+                }"#,
+        )
+        .await;
+        let listed = receive_response(&mut client_lines, 6).await;
+        let structured = &listed["result"]["structuredContent"];
+        assert!(
+            structured.is_object(),
+            "structuredContent must be an object: {structured}"
+        );
+        assert_eq!(structured["items"][0]["name"], "notes.txt");
+        assert_eq!(structured["items"].as_array().map(Vec::len), Some(1));
 
         drop(client_writer);
         drop(client_lines);

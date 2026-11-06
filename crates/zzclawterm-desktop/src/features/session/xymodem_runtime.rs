@@ -1,18 +1,17 @@
 use super::transfer_wire::TransferWire;
+use crate::features::ZzClawTermApp;
+use crate::models::{TransferJobKind, TransferJobState, TransferJobStatus};
+use gpui::{Context, PathPromptOptions, SharedString, Window};
+use rust_i18n::t;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
-
-use gpui::{Context, PathPromptOptions, SharedString, Window};
-use rust_i18n::t;
+use zzclawterm_files::sftp_transfer_types::SftpTransferProgress;
+use zzclawterm_transport::SessionKind;
 use zzclawterm_transport::xymodem::{
     XymodemAction, XymodemError, XymodemOptions, XymodemProgress, XymodemProtocol, XymodemSender,
 };
-use zzclawterm_transport::{SessionKind, SftpTransferProgress};
-
-use crate::features::ZzClawTermApp;
-use crate::models::{TransferJobKind, TransferJobState, TransferJobStatus};
 
 pub(super) struct XymodemSessionState {
     worker: XymodemWorker,
@@ -295,9 +294,8 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         if !self.session.manager().supports_modem_transfer(&session_id) {
-            self.shell.set_status(
-                rust_i18n::t!("dialog.serialSoftwareFlowControlModemDisabled").to_string(),
-            );
+            self.shell
+                .set_status(self.modem_transfer_disabled_message(&session_id));
             cx.notify();
             return;
         }
@@ -573,12 +571,10 @@ fn xymodem_job_failure(error: XymodemError) -> XymodemJobFailure {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
-    use zzclawterm_transport::xymodem::{XymodemError, XymodemProtocol};
-
     use super::{XymodemWorker, xymodem_job_failure};
     use crate::test_support::TestConfigDir;
+    use std::fs;
+    use zzclawterm_transport::xymodem::{XymodemError, XymodemProtocol};
 
     #[test]
     fn protocol_worker_can_stop_and_restart_without_retaining_file_handles() {

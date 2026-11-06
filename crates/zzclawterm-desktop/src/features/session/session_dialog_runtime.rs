@@ -3,11 +3,13 @@ use rust_i18n::t;
 use gpui::{Context, Window};
 use zzclawterm_core::ConnectionType;
 use zzclawterm_store::StoreDomain;
+use zzclawterm_ui::ZzClawDialogWindowExt as _;
 
 use crate::features::ZzClawTermApp;
 use crate::models::{SessionLaunchConfig, StartupCommandAction};
 
 use super::state::RenameSessionSubmission;
+use crate::features::shell::tab_mouse::TabActionTarget;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn open_rename_session(
@@ -16,28 +18,80 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(current_name) = self.session.display_name(&session_id) else {
+        self.open_rename_tab_target(TabActionTarget::Session(session_id), window, cx);
+    }
+
+    pub(in crate::features) fn open_rename_tab_target(
+        &mut self,
+        target: TabActionTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(current_name) = self.session.tab_action_display_name(&target) else {
             self.shell
                 .set_status("session no longer exists".to_string());
             cx.notify();
             return;
         };
-        self.session.dialogs.open_rename(session_id, &current_name);
+        self.session.dialogs.open_tab_rename(target, &current_name);
         self.forget_text_inputs("session.rename");
         self.shell.set_status("rename tab opened".to_string());
-        self.open_form_dialog(
+        let handle = self.open_tracked_form_dialog(
             (
                 t!("tabCtx.renameTitle").to_string(),
                 320.,
                 t!("common.save").to_string(),
-                |app, _, cx| app.rename_session_dialog_content(cx),
+                |app, window, cx| {
+                    app.dismiss_missing_tab_rename(window, cx);
+                    app.rename_session_dialog_content(cx)
+                },
                 |app, _, cx| app.submit_rename_session(cx),
                 |app, cx| app.close_rename_session(cx),
             ),
             window,
             cx,
         );
+        self.session.dialogs.set_rename_dialog_handle(handle);
         cx.notify();
+    }
+
+    fn dismiss_missing_tab_rename(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(target) = self.session.dialogs.rename_target().cloned() else {
+            return;
+        };
+        if self.session.tab_action_display_name(&target).is_some() {
+            return;
+        }
+        let Some(handle) = self.session.dialogs.rename_dialog_handle().cloned() else {
+            return;
+        };
+        if !handle.is_top(window, cx) {
+            return;
+        }
+        let app = cx.weak_entity();
+        let window = window.window_handle();
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                if !handle.is_top(window, cx) {
+                    return;
+                }
+                let close = app
+                    .update(cx, |app, cx| {
+                        if app.session.dialogs.rename_target() == Some(&target)
+                            && app.session.tab_action_display_name(&target).is_none()
+                        {
+                            app.close_rename_session(cx);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if close {
+                    window.close_nya_dialog(cx);
+                }
+            });
+        });
     }
 
     pub(in crate::features) fn close_rename_session(&mut self, cx: &mut Context<Self>) {
@@ -48,7 +102,16 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn submit_rename_session(&mut self, cx: &mut Context<Self>) -> bool {
-        let (session_id, trimmed) = match self.session.dialogs.take_rename_submission() {
+        if self
+            .session
+            .dialogs
+            .rename_target()
+            .is_some_and(|target| self.session.tab_action_display_name(target).is_none())
+        {
+            self.close_rename_session(cx);
+            return true;
+        }
+        let (target, trimmed) = match self.session.dialogs.take_rename_submission() {
             RenameSessionSubmission::Inactive => {
                 self.shell.set_status("no tab rename is active".to_string());
                 cx.notify();
@@ -60,12 +123,14 @@ impl ZzClawTermApp {
                 cx.notify();
                 return false;
             }
-            RenameSessionSubmission::Ready { session_id, name } => (session_id, name),
+            RenameSessionSubmission::Ready { target, name } => (target, name),
         };
         self.forget_text_inputs("session.rename");
-        self.session
-            .set_custom_name(session_id.clone(), trimmed.clone());
-        self.shell.set_status(format!("renamed tab to {trimmed}"));
+        if self.session.rename_tab_target(&target, trimmed.clone()) {
+            self.shell.set_status(format!("renamed tab to {trimmed}"));
+        } else {
+            self.shell.set_status("tab no longer exists".to_string());
+        }
         cx.notify();
         true
     }
@@ -258,11 +323,23 @@ impl ZzClawTermApp {
         session_id: &str,
         cx: &mut Context<Self>,
     ) {
+        // A tmux host closing takes its virtual pane sessions with it —
+        // detached or not, they only exist as projections of this session.
+        // The converse (a pane leaf being removed) drops its host-side index
+        // entry so `pane_for_session` cannot resurrect it.
+        if let Some(pane_sessions) = self.tmux.remove_host(session_id) {
+            for pane_session_id in pane_sessions {
+                self.remove_session_state(&pane_session_id, cx);
+            }
+        } else {
+            self.tmux.drop_pane_session(session_id);
+        }
+        self.clear_terminal_composition_for_session(session_id, cx);
         self.transfer.cancel_bulk_jobs_for_session(session_id);
         self.reconcile_bulk_transfer_jobs();
         self.commands.cancel_staged_quick_command(session_id);
         self.close_terminal_executions_for_session(session_id, cx);
-        self.cancel_native_run_for_closed_session(session_id, cx);
+        self.cancel_ai_run_for_closed_session(session_id, cx);
         self.flush_session_asset_monitoring(session_id, cx);
         self.remote_ops.clear_stats_sample(session_id);
         self.clear_terminal_selection_state_for_session(session_id);
@@ -270,6 +347,7 @@ impl ZzClawTermApp {
         self.session.start.clear_reconnect_failure(session_id);
         // If this leaf was a tab root, drop its pane tree (prune will rekey survivors).
         self.shell.remove_workspace_session(session_id);
+        self.file_manager.remove_sftp_session(session_id);
         self.session.remove_session_catalog(session_id);
         self.session.clear_event_bridge_session(session_id);
         self.terminal.remove_frame_session(session_id);

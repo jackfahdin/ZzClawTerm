@@ -1,20 +1,7 @@
-//! Keeping the remote panes' derived state in step with things they cannot observe.
-//!
-//! `RemoteOpsFeatureState` maintains its own invariant: every mutator that changes the
-//! data, the query, the sort or the tab recomputes the derived list and re-clamps the
-//! stored scroll offsets. That is why the render pass no longer needs `&mut` access.
-//!
-//! One input is outside the state's reach. The process table hides its memory and user
-//! columns at narrow widths, and the sort key has to be constrained to the columns that
-//! are actually shown -- but the panel width lives in `ShellFeatureState`. So the app
-//! pushes it in, from the three places it can change.
-
-use gpui::Context;
+//! Synchronize remote monitoring demand after active-session changes.
 
 use crate::features::ZzClawTermApp;
-use crate::features::remote::ProcessSortColumns;
-
-use crate::features::pages::remote::{ProcessDisplayMode, process_display_mode};
+use gpui::Context;
 
 impl ZzClawTermApp {
     /// Re-sync the Remote panels' GPUI-facing state after the active session changed.
@@ -37,39 +24,17 @@ impl ZzClawTermApp {
         self.sync_remote_panel_demand(cx);
         self.defer_remote_panel_snapshot_flush(cx);
     }
-
-    /// Tell the process pane which sort columns the current panel width can show.
-    ///
-    /// Returns whether anything changed, so a caller mid-drag can skip a repaint.
-    /// Idempotent, and cheap: the pane compares before recomputing.
-    ///
-    /// Called from every width change rather than from `render`, which is what used to
-    /// do it: a resize is an event, and doing it here is what lets the render pass be
-    /// read-only. Mid-drag included, so a column disappearing still moves the sort key
-    /// off it immediately rather than at the end of the gesture.
-    pub(in crate::features) fn reconcile_remote_process_sort_columns(&mut self) -> bool {
-        let mode = process_display_mode(self.shell.right_panel_width());
-        self.remote_ops
-            .set_process_sort_columns(ProcessSortColumns {
-                allow_memory: !matches!(
-                    mode,
-                    ProcessDisplayMode::Compact | ProcessDisplayMode::Narrow
-                ),
-                allow_user: mode == ProcessDisplayMode::Wide,
-            })
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext as _, TestAppContext};
-    use zzclawterm_core::{AppRuntime, RuntimeMode, uuid};
-    use zzclawterm_transport::RemoteProcess;
-
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
     use crate::features::ZzClawTermApp;
     use crate::features::pages::remote::RemoteMonitorKind;
     use crate::models::{NavItem, RemoteProcessSortKey};
+    use gpui::{AppContext as _, TestAppContext};
+    use zzclawterm_core::{AppRuntime, RuntimeMode, uuid};
+    use zzclawterm_remote_ops::remote_process::RemoteProcess;
 
     fn app(cx: &mut TestAppContext) -> gpui::Entity<ZzClawTermApp> {
         // A uuid rather than a clock reading: these tests run in parallel and
@@ -127,48 +92,25 @@ mod tests {
         }
     }
 
-    /// Resizing the panel narrow must constrain the sort key, with nothing painting.
-    ///
-    /// The width -> columns mapping is the one input the pane cannot observe, so this
-    /// drives it the way the app does: set the width, call the reconcile, read the
-    /// result. `render` used to do this, which is why a test could not tell whether the
-    /// constraint was a property of the state or a side effect of drawing.
     #[test]
-    fn narrowing_the_right_panel_constrains_the_sort_key_with_no_render() {
+    fn narrowing_the_right_panel_preserves_sort_and_selection() {
         let mut cx = TestAppContext::single();
-        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx);
-        cx.update_entity(&app, |app, _| {
+        cx.update_entity(&app, |app, cx| {
             app.remote_ops
-                .apply_processes(vec![process(1, 9.0, 1.0), process(2, 1.0, 9.0)]);
+                .apply_processes(vec![process(1, 9., 1.), process(2, 1., 9.)]);
             app.remote_ops
                 .toggle_process_sort(RemoteProcessSortKey::Memory);
-
-            // Wide enough for every column.
-            app.shell.set_right_panel_width_for_test(700.);
-            assert!(!app.reconcile_remote_process_sort_columns());
-            assert_eq!(
-                app.remote_ops.process_presentation().sort_key,
-                RemoteProcessSortKey::Memory,
-                "a wide panel keeps the memory sort"
-            );
-            assert_eq!(app.remote_ops.derived_processes()[0].pid, 2);
-
-            // Below the 430px threshold the memory column is gone.
-            app.shell.set_right_panel_width_for_test(360.);
-            assert!(
-                app.reconcile_remote_process_sort_columns(),
-                "the columns changed, so the caller is told to repaint"
-            );
-            assert_eq!(
-                app.remote_ops.process_presentation().sort_key,
-                RemoteProcessSortKey::Cpu
-            );
-            assert_eq!(
-                app.remote_ops.derived_processes()[0].pid,
-                1,
-                "and the rows follow the new key"
-            );
+            app.remote_ops.toggle_process_selection(2);
+            for width in [720., 600., 430., 320., 280., 200.] {
+                app.shell.set_right_panel_width_for_test(width);
+                app.flush_remote_panel_snapshots(cx);
+                let state = app.remote_ops.process_presentation();
+                assert_eq!(state.sort_key, RemoteProcessSortKey::Memory);
+                assert_eq!(state.selected_pid, Some(2));
+                assert_eq!(app.remote_ops.derived_processes()[0].pid, 2);
+            }
         });
     }
 

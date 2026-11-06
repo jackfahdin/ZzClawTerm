@@ -148,7 +148,7 @@ impl ZzClawTermApp {
     pub(crate) fn shutdown_blocking_jobs(&mut self, cx: &mut Context<Self>) -> Task<()> {
         self.plugins.shutdown(cx);
         self.ai.invalidate_provider_jobs();
-        self.ai.cancel_chat_and_agent();
+        self.ai.cancel_all_chats_and_agents();
         let agent_worker = self.ai.shutdown_agent_management_worker();
         let stop_jobs = self.blocking_jobs.begin_shutdown();
         let stop_transfers = self.transfer.begin_bulk_shutdown();
@@ -159,27 +159,61 @@ impl ZzClawTermApp {
         // a no-op off Windows or when the server was reused, never spawned.
         zzclawterm_transport::shutdown_managed_x11_server();
         self.shutdown_remote_desktop_workers();
+        #[cfg(windows)]
+        let native_hosts = self.remote_desktop.take_native_hosts_for_shutdown();
         let session_shutdown = self.session.take_shutdown();
         let frame_worker = self.terminal.take_frame_shutdown();
         let recording_shutdown = self.recording.take_shutdown();
         let stop_editor_watchers = self.transfer.begin_external_editor_shutdown();
-        cx.background_spawn(async move {
-            stop_editor_watchers.await;
-            session_shutdown();
-            if let Some(shutdown) = frame_worker {
-                shutdown();
-            }
-            if let Some(shutdown) = recording_shutdown {
-                for error in shutdown() {
-                    tracing::warn!(%error, "recording shutdown failed");
+        cx.spawn(async move |_, cx| {
+            #[cfg(windows)]
+            {
+                let mut hosts = native_hosts;
+                for host in &mut hosts {
+                    host.request_shutdown();
+                }
+                loop {
+                    for host in &mut hosts {
+                        if let Some(operation) = host.take_operation() {
+                            host.commit(operation.run());
+                        }
+                    }
+                    hosts.retain(|host| !host.is_closed());
+                    let retained =
+                        zzclawterm_windows_rdp::maintain_retired(std::time::Instant::now());
+                    if retained != 0 {
+                        tracing::warn!(
+                            count = retained,
+                            "retained native RDP resources at shutdown deadline"
+                        );
+                    }
+                    if hosts.is_empty() && zzclawterm_windows_rdp::retired_count() == 0 {
+                        break;
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(100))
+                        .await;
                 }
             }
-            if let Some(worker) = agent_worker {
-                let _ = worker.join();
-            }
-            stop_jobs();
-            stop_transfers();
-            ssh_connections.finish_disconnects();
+            cx.background_spawn(async move {
+                stop_editor_watchers.await;
+                session_shutdown();
+                if let Some(shutdown) = frame_worker {
+                    shutdown();
+                }
+                if let Some(shutdown) = recording_shutdown {
+                    for error in shutdown() {
+                        tracing::warn!(%error, "recording shutdown failed");
+                    }
+                }
+                if let Some(worker) = agent_worker {
+                    let _ = worker.join();
+                }
+                stop_jobs();
+                stop_transfers();
+                ssh_connections.finish_disconnects();
+            })
+            .await;
         })
     }
 
@@ -259,10 +293,15 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         if let Some(controller) = self.desktop_controller.clone() {
+            let registration = self
+                .cloud_sync
+                .operations
+                .followup("cloud-sync-shared-refresh");
             cx.defer(move |cx| {
                 let _ = controller.update(cx, |controller, cx| {
                     controller.replace_shared_snapshot(snapshot, domain, cx)
                 });
+                drop(registration);
             });
         }
     }
@@ -397,8 +436,48 @@ mod tests {
 
     use gpui::{AppContext as _, TestAppContext};
     use zzclawterm_core::test_support::TestTempDir;
+    use zzclawterm_core::{AiAgentKind, AiMode};
 
     use crate::features::test_support::app_with_visible_local_session;
+
+    #[gpui::test]
+    fn workspace_shutdown_cancels_agents_in_inactive_terminal_scopes(cx: &mut TestAppContext) {
+        let directory = TestTempDir::new("zzclawterm-workspace-agent-shutdown");
+        let app = app_with_visible_local_session(cx, directory.path(), "agent-shutdown");
+        let launches = cx.update_entity(&app, |app, _| {
+            let mut launches = Vec::new();
+            for (scope, kind) in [
+                ("terminal:claude", AiAgentKind::ClaudeCode),
+                ("terminal:codex", AiAgentKind::Codex),
+                ("unbound:", AiAgentKind::Zzclawterm),
+            ] {
+                app.ai.switch_visible_scope(scope);
+                app.ai.set_chat_run_mode(AiMode::Agent, kind);
+                launches.push(
+                    app.ai
+                        .begin_chat_request("inspect".into(), AiMode::Agent, None),
+                );
+            }
+            launches
+        });
+
+        let cleanup = cx.update_entity(&app, |app, cx| app.shutdown_blocking_jobs(cx));
+
+        for launch in &launches {
+            assert!(launch.cancel.load(Ordering::Acquire));
+        }
+        cx.update_entity(&app, |app, _| {
+            assert_eq!(app.ai.active_scope_key(), "unbound:");
+            assert!(!app.ai.any_chat_or_agent_running());
+            for launch in launches {
+                let scope = app.ai.scope_for_ai_session(&launch.session_id).unwrap();
+                app.ai.switch_scope(&scope);
+                assert!(!app.ai.apply_chat_delta(launch.job_id, "late", None));
+            }
+        });
+        cleanup.detach();
+        cx.run_until_parked();
+    }
 
     #[gpui::test]
     fn workspace_shutdown_keeps_gpui_updates_responsive_while_a_request_finishes(

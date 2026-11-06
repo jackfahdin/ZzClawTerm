@@ -113,6 +113,7 @@ impl ZzClawTermApp {
         }
         self.forget_text_inputs("security.editor.key-");
         self.security.close_key_editor();
+        self.session.prompt_restore_credential_focus();
         cx.notify();
     }
 

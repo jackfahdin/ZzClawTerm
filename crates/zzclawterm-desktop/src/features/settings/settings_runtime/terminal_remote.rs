@@ -243,6 +243,33 @@ impl ZzClawTermApp {
         }
     }
 
+    pub(in crate::features) fn toggle_remote_stats_show_users(&mut self, cx: &mut Context<Self>) {
+        self.settings.toggle_remote_stats_show_users();
+        self.save_terminal_settings(cx);
+    }
+
+    pub(in crate::features) fn toggle_terminal_wrap_markers(&mut self, cx: &mut Context<Self>) {
+        self.settings.toggle_terminal_wrap_markers();
+        self.save_terminal_settings(cx);
+    }
+
+    pub(in crate::features) fn toggle_terminal_zebra_stripes_by_row(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.toggle_terminal_zebra_stripes_by_row();
+        self.save_terminal_settings(cx);
+    }
+
+    pub(in crate::features) fn set_terminal_wrap_mode(
+        &mut self,
+        mode: zzclawterm_core::models::settings::TerminalWrapMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.set_terminal_wrap_mode(mode);
+        self.save_terminal_settings(cx);
+    }
+
     pub(in crate::features) fn toggle_terminal_zebra_stripes(&mut self, cx: &mut Context<Self>) {
         self.settings.toggle_terminal_zebra_stripes();
         self.save_terminal_settings(cx);

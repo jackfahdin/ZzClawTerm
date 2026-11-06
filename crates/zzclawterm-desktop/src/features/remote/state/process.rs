@@ -4,7 +4,7 @@ use crate::models::{RemoteProcessSortDirection, RemoteProcessSortKey};
 use futures::channel::mpsc::UnboundedReceiver;
 use std::sync::Arc;
 use std::time::Instant;
-use zzclawterm_transport::RemoteProcess;
+use zzclawterm_remote_ops::remote_process::RemoteProcess;
 
 pub(in crate::features) enum ProcessApplyOutcome {
     Ignored,
@@ -15,16 +15,14 @@ pub(in crate::features) enum ProcessApplyOutcome {
 pub(super) struct ProcessPaneState {
     job: RemoteJobState<ProcessJobResult>,
     items: Arc<[RemoteProcess]>,
+    /// Lowercased text each process is searched by, parallel to `items`. Built on the
+    /// first non-empty query after a new list arrives and dropped with the list, so a
+    /// panel nobody searches never pays for it.
+    search_keys: Option<Arc<[String]>>,
     /// Bumped by every mutation that changes what `process_presentation` returns.
     revision: u64,
     data_generation: u64,
     derived: Option<ProcessDerivedCache>,
-    /// Which sort keys the current panel width can show a column for.
-    ///
-    /// Pushed by the app when the right panel is resized. Held here because the sort
-    /// key must be constrained to it whenever *either* changes, and the render pass is
-    /// no longer allowed to do that constraining itself.
-    sort_columns: ProcessSortColumns,
     snapshot_loaded: bool,
     status: String,
     search_draft: String,
@@ -33,25 +31,6 @@ pub(super) struct ProcessPaneState {
     selected_pid: Option<u32>,
     menu_pid: Option<u32>,
     nice_draft: String,
-}
-
-/// Whether the process table is wide enough to sort by memory and by user.
-///
-/// Defaults to permissive, matching the widest layout: a narrow panel pushes the real
-/// values in before anything is shown.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::features) struct ProcessSortColumns {
-    pub allow_memory: bool,
-    pub allow_user: bool,
-}
-
-impl Default for ProcessSortColumns {
-    fn default() -> Self {
-        Self {
-            allow_memory: true,
-            allow_user: true,
-        }
-    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -196,6 +175,7 @@ impl ProcessPaneState {
             self.menu_pid = None;
         }
         self.items = processes.into();
+        self.search_keys = None;
         self.data_generation = self.data_generation.wrapping_add(1);
         self.derived = None;
         self.snapshot_loaded = true;
@@ -204,6 +184,7 @@ impl ProcessPaneState {
 
     fn clear_data(&mut self) {
         self.items = Arc::from([]);
+        self.search_keys = None;
         self.data_generation = self.data_generation.wrapping_add(1);
         self.derived = None;
         self.snapshot_loaded = false;
@@ -245,24 +226,8 @@ impl ProcessPaneState {
     /// Cheap to call redundantly: the recompute is keyed, so an unchanged key returns
     /// the cached list.
     fn reconcile(&mut self) {
-        // Sort first: the derived list is keyed on the sort key, so constraining after
-        // recomputing would sort by a key the table cannot show.
-        if (!self.sort_columns.allow_user && self.sort_key == RemoteProcessSortKey::User)
-            || (!self.sort_columns.allow_memory && self.sort_key == RemoteProcessSortKey::Memory)
-        {
-            self.sort_key = RemoteProcessSortKey::Cpu;
-        }
         self.derived_items();
         self.touch();
-    }
-
-    pub(super) fn set_sort_columns(&mut self, columns: ProcessSortColumns) -> bool {
-        if self.sort_columns == columns {
-            return false;
-        }
-        self.sort_columns = columns;
-        self.reconcile();
-        true
     }
 
     /// The filtered, sorted list, without recomputing.
@@ -287,12 +252,21 @@ impl ProcessPaneState {
         {
             return cache.items.clone();
         }
-        let mut items = self
-            .items
-            .iter()
-            .filter(|process| process_matches(process, &key.normalized_query))
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut items = if key.normalized_query.is_empty() {
+            self.items.to_vec()
+        } else {
+            let items = &self.items;
+            let search_keys = self
+                .search_keys
+                .get_or_insert_with(|| items.iter().map(process_search_key).collect());
+            debug_assert_eq!(items.len(), search_keys.len());
+            items
+                .iter()
+                .zip(search_keys.iter())
+                .filter(|(_, search_key)| search_key.contains(&key.normalized_query))
+                .map(|(process, _)| process.clone())
+                .collect::<Vec<_>>()
+        };
         sort_processes(&mut items, key.sort_key, key.sort_direction);
         let items: Arc<[RemoteProcess]> = items.into();
         self.derived = Some(ProcessDerivedCache {
@@ -309,10 +283,7 @@ impl ProcessPaneState {
     }
 }
 
-fn process_matches(process: &RemoteProcess, normalized_query: &str) -> bool {
-    if normalized_query.is_empty() {
-        return true;
-    }
+fn process_search_key(process: &RemoteProcess) -> String {
     format!(
         "{} {} {} {} {} {}",
         process.pid,
@@ -323,7 +294,6 @@ fn process_matches(process: &RemoteProcess, normalized_query: &str) -> bool {
         process.command_line
     )
     .to_ascii_lowercase()
-    .contains(normalized_query)
 }
 
 fn sort_processes(
@@ -331,44 +301,43 @@ fn sort_processes(
     key: RemoteProcessSortKey,
     direction: RemoteProcessSortDirection,
 ) {
-    processes.sort_by(|left, right| {
-        let ordering = match key {
-            RemoteProcessSortKey::Command => left
-                .command
-                .cmp(&right.command)
-                .then_with(|| left.pid.cmp(&right.pid)),
-            RemoteProcessSortKey::Memory => left
-                .memory_percent
-                .partial_cmp(&right.memory_percent)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    left.rss_kb
-                        .partial_cmp(&right.rss_kb)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| left.pid.cmp(&right.pid)),
-            RemoteProcessSortKey::Pid => left.pid.cmp(&right.pid),
-            RemoteProcessSortKey::User => left
-                .user
-                .cmp(&right.user)
-                .then_with(|| left.pid.cmp(&right.pid)),
-            RemoteProcessSortKey::Cpu => left
-                .cpu_percent
-                .partial_cmp(&right.cpu_percent)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    left.memory_percent
-                        .partial_cmp(&right.memory_percent)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .then_with(|| left.pid.cmp(&right.pid)),
-        };
+    processes.sort_by(|left, right| compare_processes(left, right, key, direction));
+}
 
-        match direction {
-            RemoteProcessSortDirection::Ascending => ordering,
-            RemoteProcessSortDirection::Descending => ordering.reverse(),
-        }
-    });
+fn compare_processes(
+    left: &RemoteProcess,
+    right: &RemoteProcess,
+    key: RemoteProcessSortKey,
+    direction: RemoteProcessSortDirection,
+) -> std::cmp::Ordering {
+    // Remote metrics may contain NaN. Treating unordered values as equal makes
+    // the secondary keys create cycles with otherwise ordered numeric values.
+    let ordering = match key {
+        RemoteProcessSortKey::Command => left
+            .command
+            .cmp(&right.command)
+            .then_with(|| left.pid.cmp(&right.pid)),
+        RemoteProcessSortKey::Memory => left
+            .memory_percent
+            .total_cmp(&right.memory_percent)
+            .then_with(|| left.rss_kb.cmp(&right.rss_kb))
+            .then_with(|| left.pid.cmp(&right.pid)),
+        RemoteProcessSortKey::Pid => left.pid.cmp(&right.pid),
+        RemoteProcessSortKey::User => left
+            .user
+            .cmp(&right.user)
+            .then_with(|| left.pid.cmp(&right.pid)),
+        RemoteProcessSortKey::Cpu => left
+            .cpu_percent
+            .total_cmp(&right.cpu_percent)
+            .then_with(|| left.memory_percent.total_cmp(&right.memory_percent))
+            .then_with(|| left.pid.cmp(&right.pid)),
+    };
+
+    match direction {
+        RemoteProcessSortDirection::Ascending => ordering,
+        RemoteProcessSortDirection::Descending => ordering.reverse(),
+    }
 }
 
 impl ProcessPaneState {
@@ -376,10 +345,10 @@ impl ProcessPaneState {
         Self {
             job: RemoteJobState::new(),
             items: Arc::from([]),
+            search_keys: None,
             revision: 0,
             data_generation: 0,
             derived: None,
-            sort_columns: ProcessSortColumns::default(),
             snapshot_loaded: false,
             status: "ready".to_string(),
             search_draft: String::new(),
@@ -453,8 +422,9 @@ impl ProcessPaneState {
             }
             Err(error) => {
                 if was_list_refresh {
-                    let terminal =
-                        error.contains(zzclawterm_transport::PROCESS_LIST_UNSUPPORTED_ERROR);
+                    let terminal = error.contains(
+                        zzclawterm_remote_ops::remote_process::PROCESS_LIST_UNSUPPORTED_ERROR,
+                    );
                     if self.record_refresh_failure(terminal) >= 3 {
                         self.clear_data();
                     }
@@ -464,5 +434,319 @@ impl ProcessPaneState {
         };
         self.set_status(status.clone());
         ProcessApplyOutcome::Applied { status }
+    }
+}
+
+#[cfg(test)]
+mod search_key_tests {
+    use zzclawterm_remote_ops::remote_process::RemoteProcess;
+
+    use super::ProcessPaneState;
+
+    fn process(pid: u32, user: &str, command: &str, command_line: &str) -> RemoteProcess {
+        RemoteProcess {
+            pid,
+            ppid: 1,
+            user: user.to_string(),
+            state: "S".to_string(),
+            cpu_percent: 0.0,
+            memory_percent: 0.0,
+            rss_kb: 0,
+            vsz_kb: 0,
+            elapsed: String::new(),
+            command: command.to_string(),
+            command_line: command_line.to_string(),
+        }
+    }
+
+    fn sample() -> Vec<RemoteProcess> {
+        vec![
+            process(100, "root", "sshd", "/usr/sbin/sshd -D"),
+            process(2001, "www-data", "nginx", "nginx: worker process"),
+            process(31337, "Dev", "Python3", "python3 -m http.server 8000"),
+            process(4, "root", "kworker", "[kworker/0:1-events]"),
+        ]
+    }
+
+    /// The matching rule from before the keys were cached.
+    fn reference_matches(process: &RemoteProcess, normalized_query: &str) -> bool {
+        if normalized_query.is_empty() {
+            return true;
+        }
+        format!(
+            "{} {} {} {} {} {}",
+            process.pid,
+            process.ppid,
+            process.user,
+            process.state,
+            process.command,
+            process.command_line
+        )
+        .to_ascii_lowercase()
+        .contains(normalized_query)
+    }
+
+    fn pids(items: &[RemoteProcess]) -> Vec<u32> {
+        let mut pids: Vec<u32> = items.iter().map(|item| item.pid).collect();
+        pids.sort_unstable();
+        pids
+    }
+
+    #[test]
+    fn search_keys_are_built_only_for_a_non_empty_query_and_dropped_with_the_list() {
+        let mut state = ProcessPaneState::new();
+        state.apply_processes(sample());
+        assert!(
+            state.search_keys.is_none(),
+            "an unused panel must not pay for the keys"
+        );
+        state.derived_items();
+        assert!(state.search_keys.is_none(), "an empty query needs no keys");
+
+        state.apply_search("ssh".to_string());
+        assert_eq!(state.search_keys.as_ref().map(|keys| keys.len()), Some(4));
+
+        // While a query is active a fresh list is searched at once, so its keys are
+        // rebuilt immediately and must describe the new list, never the old one.
+        state.apply_processes(vec![process(7, "alice", "sshd", "sshd: alice")]);
+        assert_eq!(state.search_keys.as_ref().map(|keys| keys.len()), Some(1));
+
+        // With the query cleared, a fresh list drops the keys again.
+        state.apply_search(String::new());
+        state.apply_processes(sample());
+        assert!(
+            state.search_keys.is_none(),
+            "a fresh list with no query must not build keys"
+        );
+        state.apply_search("ssh".to_string());
+        assert!(state.search_keys.is_some());
+        // Clearing the data leaves no stale keys behind: with the query still active
+        // the empty list is searched at once, so at most an empty key set remains.
+        state.clear_data();
+        assert!(
+            state
+                .search_keys
+                .as_ref()
+                .is_none_or(|keys| keys.is_empty())
+        );
+    }
+
+    #[test]
+    fn filtering_matches_the_original_rule_for_every_query() {
+        let processes = sample();
+        for query in [
+            "",
+            "ssh",
+            "SSH",
+            "root",
+            "www",
+            "dev",
+            "python3",
+            "8000",
+            "1",
+            "31337",
+            "worker",
+            "[kworker",
+            "-d",
+            "no such thing",
+            " ",
+            "nginx: w",
+        ] {
+            let mut state = ProcessPaneState::new();
+            state.apply_processes(processes.clone());
+            state.apply_search(query.to_string());
+            let normalized = query.trim().to_ascii_lowercase();
+            let expected: Vec<u32> = {
+                let matching: Vec<RemoteProcess> = processes
+                    .iter()
+                    .filter(|process| reference_matches(process, &normalized))
+                    .cloned()
+                    .collect();
+                pids(&matching)
+            };
+            assert_eq!(pids(&state.derived_items()), expected, "query {query:?}");
+        }
+    }
+
+    #[test]
+    fn a_second_list_is_searched_with_its_own_keys() {
+        let mut state = ProcessPaneState::new();
+        state.apply_processes(sample());
+        state.apply_search("sshd".to_string());
+        assert_eq!(pids(&state.derived_items()), [100]);
+
+        state.apply_processes(vec![process(7, "alice", "bash", "-bash")]);
+        assert!(pids(&state.derived_items()).is_empty());
+        state.apply_search("bash".to_string());
+        assert_eq!(pids(&state.derived_items()), [7]);
+    }
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::{compare_processes, sort_processes};
+    use crate::models::{RemoteProcessSortDirection, RemoteProcessSortKey};
+    use zzclawterm_remote_ops::remote_process::RemoteProcess;
+
+    use std::cmp::Ordering;
+
+    fn process(pid: u32, cpu: f64, memory: f64, rss: u64) -> RemoteProcess {
+        use zzclawterm_remote_ops::remote_process::RemoteProcess;
+        RemoteProcess {
+            pid,
+            ppid: 1,
+            user: format!("user{}", pid % 2),
+            state: "S".to_string(),
+            cpu_percent: cpu,
+            memory_percent: memory,
+            rss_kb: rss,
+            vsz_kb: 0,
+            elapsed: String::new(),
+            command: format!("command{}", pid % 3),
+            command_line: String::new(),
+        }
+    }
+
+    #[test]
+    fn nan_metrics_do_not_form_cycles_with_pid_ties() {
+        for key in [RemoteProcessSortKey::Cpu, RemoteProcessSortKey::Memory] {
+            let mut items = vec![
+                process(2, f64::NAN, f64::NAN, 0),
+                process(1, 1.0, 1.0, 0),
+                process(3, 0.0, 0.0, 0),
+            ];
+            sort_processes(&mut items, key, RemoteProcessSortDirection::Ascending);
+            assert_eq!(
+                items.iter().map(|item| item.pid).collect::<Vec<_>>(),
+                [3, 1, 2]
+            );
+            sort_processes(&mut items, key, RemoteProcessSortDirection::Descending);
+            assert_eq!(
+                items.iter().map(|item| item.pid).collect::<Vec<_>>(),
+                [2, 1, 3]
+            );
+        }
+    }
+
+    #[test]
+    fn process_sort_modes_obey_ordering_laws_with_non_finite_metrics() {
+        let values = [
+            -f64::NAN,
+            f64::NEG_INFINITY,
+            -1.0,
+            -0.0,
+            0.0,
+            1.0,
+            f64::INFINITY,
+            f64::NAN,
+        ];
+        let mut items = Vec::new();
+        for (cpu_index, cpu) in values.into_iter().enumerate() {
+            for (memory_index, memory) in values.into_iter().enumerate() {
+                items.push(process(
+                    (cpu_index * values.len() + memory_index) as u32,
+                    cpu,
+                    memory,
+                    (memory_index % 3) as u64,
+                ));
+            }
+        }
+        items.push(items[0].clone());
+        for key in [
+            RemoteProcessSortKey::Cpu,
+            RemoteProcessSortKey::Memory,
+            RemoteProcessSortKey::Pid,
+            RemoteProcessSortKey::User,
+            RemoteProcessSortKey::Command,
+        ] {
+            for direction in [
+                RemoteProcessSortDirection::Ascending,
+                RemoteProcessSortDirection::Descending,
+            ] {
+                let orders: Vec<Vec<_>> = items
+                    .iter()
+                    .map(|left| {
+                        items
+                            .iter()
+                            .map(|right| compare_processes(left, right, key, direction))
+                            .collect()
+                    })
+                    .collect();
+                for a in 0..items.len() {
+                    assert_eq!(orders[a][a], Ordering::Equal);
+                    for b in 0..items.len() {
+                        assert_eq!(orders[a][b], orders[b][a].reverse());
+                        for c in 0..items.len() {
+                            if orders[a][b].is_le() && orders[b][c].is_le() {
+                                assert!(
+                                    orders[a][c].is_le(),
+                                    "non-transitive: {key:?}, {direction:?}, {a}/{b}/{c}"
+                                );
+                            }
+                            if orders[a][b] == Ordering::Equal {
+                                assert_eq!(orders[a][c], orders[b][c]);
+                            }
+                        }
+                    }
+                }
+                let mut sorted = items.clone();
+                sorted.reverse();
+                sort_processes(&mut sorted, key, direction);
+                for (index, left) in sorted.iter().enumerate() {
+                    for right in &sorted[index..] {
+                        assert!(compare_processes(left, right, key, direction).is_le());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn metric_total_order_includes_infinities_and_signed_zero() {
+        let values = [
+            -f64::NAN,
+            f64::NEG_INFINITY,
+            -1.0,
+            -0.0,
+            0.0,
+            1.0,
+            f64::INFINITY,
+            f64::NAN,
+        ];
+        for key in [RemoteProcessSortKey::Cpu, RemoteProcessSortKey::Memory] {
+            let mut items: Vec<_> = values
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| process(index as u32, value, value, 0))
+                .collect();
+            items.reverse();
+            sort_processes(&mut items, key, RemoteProcessSortDirection::Ascending);
+            assert_eq!(
+                items.iter().map(|item| item.pid).collect::<Vec<_>>(),
+                (0..8).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn process_metric_ties_keep_secondary_fields_and_pid_order() {
+        let mut items = vec![
+            process(4, 1.0, 3.0, 1),
+            process(3, 1.0, 2.0, 2),
+            process(2, 1.0, 2.0, 1),
+            process(1, 1.0, 2.0, 1),
+        ];
+        for key in [RemoteProcessSortKey::Cpu, RemoteProcessSortKey::Memory] {
+            sort_processes(&mut items, key, RemoteProcessSortDirection::Ascending);
+            assert_eq!(
+                items.iter().map(|item| item.pid).collect::<Vec<_>>(),
+                [1, 2, 3, 4]
+            );
+            sort_processes(&mut items, key, RemoteProcessSortDirection::Descending);
+            assert_eq!(
+                items.iter().map(|item| item.pid).collect::<Vec<_>>(),
+                [4, 3, 2, 1]
+            );
+        }
     }
 }

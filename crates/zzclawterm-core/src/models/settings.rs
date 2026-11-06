@@ -1,6 +1,31 @@
 pub mod panel_visibility;
 pub mod x11;
 
+/// Display policy only; applications retain control of the terminal's VT modes.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalWrapMode {
+    #[default]
+    Character,
+    None,
+}
+
+impl TerminalWrapMode {
+    pub fn from_compat_value(value: &str) -> Self {
+        match value {
+            "none" => Self::None,
+            _ => Self::Character,
+        }
+    }
+
+    pub const fn compat_value(self) -> &'static str {
+        match self {
+            Self::Character => "character",
+            Self::None => "none",
+        }
+    }
+}
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -289,6 +314,8 @@ impl InternalEditorDisplay {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActionLinksMatcherSettings {
     #[serde(default = "default_true_action_link")]
+    pub mac: bool,
+    #[serde(default = "default_true_action_link")]
     pub ipv4: bool,
     #[serde(default = "default_true_action_link")]
     pub archive: bool,
@@ -303,6 +330,7 @@ fn default_true_action_link() -> bool {
 impl Default for ActionLinksMatcherSettings {
     fn default() -> Self {
         Self {
+            mac: true,
             ipv4: true,
             archive: true,
             host_port: true,
@@ -465,6 +493,10 @@ pub struct AppSettingsSummary {
     pub terminal_show_workspace_padding: bool,
     pub terminal_show_line_numbers: bool,
     pub terminal_show_timestamps: bool,
+    #[serde(default)]
+    pub terminal_wrap_mode: TerminalWrapMode,
+    #[serde(default)]
+    pub terminal_show_wrap_markers: bool,
     pub terminal_show_multi_line_paste_dialog: bool,
     pub terminal_paste_image_as_path: bool,
     #[serde(default)]
@@ -474,7 +506,9 @@ pub struct AppSettingsSummary {
     pub terminal_low_latency_mode: bool,
     #[serde(default = "default_terminal_zebra_stripes_enabled")]
     pub terminal_zebra_stripes_enabled: bool,
-    /// Detect clickable entities (IP/host:port/archive) in terminal output (Tauri action_links_enabled).
+    #[serde(default)]
+    pub terminal_zebra_stripes_by_row: bool,
+    /// Detect clickable entities (IP/MAC/host:port/archive) in terminal output (Tauri action_links_enabled).
     #[serde(default)]
     pub terminal_action_links_enabled: bool,
     #[serde(default)]
@@ -483,6 +517,9 @@ pub struct AppSettingsSummary {
     #[serde(default = "default_search_engines")]
     pub search_custom_engines: Vec<SearchEngineConfig>,
     pub ui_remote_stats_interval: u32,
+    /// Show `who` sessions in the resource monitor and the host header reading.
+    #[serde(default)]
+    pub ui_remote_stats_show_users: bool,
     #[serde(default = "default_hardware_monitor_interval")]
     pub ui_gpu_monitor_interval: u32,
     #[serde(default = "default_hardware_monitor_interval")]
@@ -647,6 +684,10 @@ pub struct AppSettingsSummary {
     pub recording_memory_limit_bytes: u64,
     pub diagnostics_level: String,
     pub diagnostics_retention_days: u32,
+    /// Per-file diagnostics log budget in bytes. Unset or invalid values fall
+    /// back to the 10 MiB default; the log layer clamps it to a supported range.
+    #[serde(default = "default_diagnostics_log_shard_bytes")]
+    pub diagnostics_log_shard_bytes: u64,
     pub startup_restore: bool,
     /// When true (default), restore multi-leaf tab window layout with sessions.
     #[serde(default = "default_true")]
@@ -754,15 +795,19 @@ impl Default for AppSettingsSummary {
             terminal_show_workspace_padding: false,
             terminal_show_line_numbers: false,
             terminal_show_timestamps: false,
+            terminal_wrap_mode: TerminalWrapMode::Character,
+            terminal_show_wrap_markers: false,
             terminal_show_multi_line_paste_dialog: true,
             terminal_paste_image_as_path: true,
             terminal_reconnect_restore_cwd: false,
             terminal_low_latency_mode: false,
             terminal_zebra_stripes_enabled: default_terminal_zebra_stripes_enabled(),
+            terminal_zebra_stripes_by_row: false,
             terminal_action_links_enabled: false,
             terminal_action_links_matchers: ActionLinksMatcherSettings::default(),
             search_custom_engines: default_search_engines(),
             ui_remote_stats_interval: 3,
+            ui_remote_stats_show_users: false,
             ui_gpu_monitor_interval: 3,
             ui_ascend_npu_monitor_interval: 3,
             ui_process_manager_interval: 5,
@@ -853,6 +898,7 @@ impl Default for AppSettingsSummary {
             recording_memory_limit_bytes: 5 * 1024 * 1024,
             diagnostics_level: "info".to_string(),
             diagnostics_retention_days: 7,
+            diagnostics_log_shard_bytes: default_diagnostics_log_shard_bytes(),
             startup_restore: false,
             startup_restore_window_layout: true,
             minimize_to_tray: false,
@@ -925,6 +971,10 @@ fn default_quick_cmd_height() -> u32 {
 
 fn default_serial_send_height() -> u32 {
     180
+}
+
+fn default_diagnostics_log_shard_bytes() -> u64 {
+    crate::diagnostics::DEFAULT_LOG_SHARD_BYTES
 }
 
 fn default_quick_cmd_view_mode() -> String {
@@ -1041,6 +1091,20 @@ fn default_highlight_color_light() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mac_matcher_defaults_on_for_legacy_settings_and_preserves_explicit_false() {
+        for value in [serde_json::json!({}), serde_json::json!({"ipv4": false})] {
+            let matchers: super::ActionLinksMatcherSettings =
+                serde_json::from_value(value).unwrap();
+            assert!(matchers.mac);
+        }
+        let matchers: super::ActionLinksMatcherSettings =
+            serde_json::from_value(serde_json::json!({"mac": false})).unwrap();
+        assert!(!matchers.mac);
+        assert_eq!(serde_json::to_value(matchers).unwrap()["mac"], false);
+        assert!(!super::AppSettingsSummary::default().terminal_action_links_enabled);
+    }
+
     #[test]
     fn legacy_and_unknown_encoding_labels_round_trip_unchanged() {
         for label in ["UTF8", " CP936 ", "shift-jis", "euckr", "unknown", ""] {
@@ -1191,6 +1255,7 @@ mod tests {
         assert!(summary.ui_asset_sort_key.is_none());
         assert!(summary.ui_asset_sort_direction.is_none());
         assert!(!summary.terminal_reconnect_restore_cwd);
+        assert!(!summary.ui_remote_stats_show_users);
         assert_eq!(summary.transfer_internal_editor_font_size, 13);
         // Legacy documents lack the X Server management keys; they must fall
         // back to autostart-on, on-demand-on and empty (auto-discover) path.
@@ -1207,6 +1272,12 @@ mod tests {
         // defaulting on, so legacy documents keep the panel enabled.
         assert!(summary.interaction_credential_autofill_enabled);
         assert!(summary.interaction_copy_success_notification);
+
+        assert_eq!(
+            summary.diagnostics_log_shard_bytes,
+            crate::diagnostics::DEFAULT_LOG_SHARD_BYTES,
+            "legacy documents without a shard size must log into 10 MiB files"
+        );
     }
 
     #[test]
@@ -1239,6 +1310,21 @@ mod tests {
         assert!(!decoded.x11_server_on_demand);
         assert_eq!(decoded.x11_server_path, "D:\\tools\\vcxsrv\\vcxsrv.exe");
         assert!(!decoded.x11_server_tray_icon);
+    }
+
+    #[test]
+    fn login_monitoring_is_opt_in_for_legacy_settings_and_roundtrips() {
+        let mut value = serde_json::to_value(AppSettingsSummary::default()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("ui_remote_stats_show_users");
+        let mut summary: AppSettingsSummary = serde_json::from_value(value).unwrap();
+        assert!(!summary.ui_remote_stats_show_users);
+        summary.ui_remote_stats_show_users = true;
+        let restored: AppSettingsSummary =
+            serde_json::from_str(&serde_json::to_string(&summary).unwrap()).unwrap();
+        assert!(restored.ui_remote_stats_show_users);
     }
 
     #[test]
@@ -1294,6 +1380,22 @@ mod tests {
         assert_eq!(decoded.ui_start_workspace_mode, "assets");
         assert_eq!(decoded.ui_asset_sort_key.as_deref(), Some("hostname"));
         assert_eq!(decoded.ui_asset_sort_direction.as_deref(), Some("desc"));
+    }
+
+    #[test]
+    fn row_stripes_are_opt_in_for_current_and_legacy_settings() {
+        let mut value = serde_json::to_value(AppSettingsSummary::default()).unwrap();
+        assert_eq!(value["terminal_zebra_stripes_by_row"], false);
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("terminal_zebra_stripes_by_row");
+        let mut settings: AppSettingsSummary = serde_json::from_value(value).unwrap();
+        assert!(!settings.terminal_zebra_stripes_by_row);
+        settings.terminal_zebra_stripes_by_row = true;
+        let roundtrip: AppSettingsSummary =
+            serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+        assert!(roundtrip.terminal_zebra_stripes_by_row);
     }
 
     #[test]

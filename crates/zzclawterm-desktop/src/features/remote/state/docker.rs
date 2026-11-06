@@ -6,7 +6,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use zzclawterm_transport::{
+use zzclawterm_remote_ops::docker::{
     DockerComposeProject, DockerComposeService, DockerContainer, DockerContainerDetails,
     DockerImage, DockerNetwork, DockerVolume, RemoteDockerOverview,
 };
@@ -618,6 +618,9 @@ impl DockerPaneState {
     }
 
     pub(super) fn start_docker_details(&mut self, container_id: String, status: String) {
+        if self.details_container_id.as_ref() != Some(&container_id) {
+            self.details = None;
+        }
         self.details_container_id = Some(container_id);
         self.details_last_refresh_at = Some(Instant::now());
         self.status = status;
@@ -643,8 +646,11 @@ impl DockerPaneState {
         container_id: String,
         details: DockerContainerDetails,
     ) {
+        // Closing, switching sessions, or removing the container invalidates this result.
+        if self.details_container_id.as_ref() != Some(&container_id) {
+            return;
+        }
         self.details = Some(details);
-        self.details_container_id = Some(container_id);
         self.touch();
     }
 

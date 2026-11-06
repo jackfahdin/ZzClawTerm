@@ -12,6 +12,16 @@ use zzclawterm_ui::ZzClawIconButton;
 use crate::features::{ZzClawTermApp, formatting::short_id, view_widgets::mono_icon};
 use crate::theme::ThemePalette;
 
+/// A start keeps its identity across retries and registration as a formal tab.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::features) enum TabActionTarget {
+    Session(String),
+    Start {
+        sequence: u64,
+        allocated_at: std::time::Instant,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub(in crate::features) struct WorkspaceTabDragPayload {
     pub source_workspace_id: zzclawterm_core::WorkspaceId,
@@ -447,31 +457,67 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let ClickEvent::Mouse(mouse) = event {
-            let is_left_double_click = mouse.down.button == MouseButton::Left
-                && mouse.up.button == MouseButton::Left
-                && event.click_count() >= 2;
-            if is_left_double_click {
-                let action = self
-                    .settings
-                    .summary()
-                    .interaction_tab_double_click_action
-                    .clone();
-                if action != "none" {
-                    cx.stop_propagation();
-                    self.run_tab_mouse_action(session_id, action, window, cx);
-                    return;
-                }
+        self.handle_tab_target_click(TabActionTarget::Session(session_id), event, window, cx);
+    }
+
+    pub(in crate::features) fn handle_tab_target_click(
+        &mut self,
+        target: TabActionTarget,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let ClickEvent::Mouse(mouse) = event
+            && mouse.down.button == MouseButton::Left
+            && mouse.up.button == MouseButton::Left
+            && event.click_count() >= 2
+        {
+            let action = self
+                .settings
+                .summary()
+                .interaction_tab_double_click_action
+                .clone();
+            if self.tab_target_action_enabled(&target, &action) {
+                cx.stop_propagation();
+                self.run_tab_target_action(target, &action, window, cx);
+                return;
             }
         }
+        self.select_tab_action_target(&target, window, cx);
+    }
 
-        self.select_session(session_id.clone(), cx);
-        self.focus_terminal_session(&session_id, window, cx);
+    pub(in crate::features) fn select_tab_action_target(
+        &mut self,
+        target: &TabActionTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((id, _, ended)) = self.session.start_action_request(target) {
+            let id = id.to_string();
+            if ended.is_some() {
+                self.select_failed_session_start(id, cx);
+            } else {
+                self.select_pending_session_start(id, cx);
+            }
+        } else if let Some(id) = self.session.resolved_tab_action_session(target) {
+            self.select_session(id.clone(), cx);
+            self.focus_terminal_session(&id, window, cx);
+        }
     }
 
     pub(in crate::features) fn handle_session_tab_mouse_down(
         &mut self,
         session_id: String,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.handle_tab_target_mouse_down(TabActionTarget::Session(session_id), event, window, cx);
+    }
+
+    pub(in crate::features) fn handle_tab_target_mouse_down(
+        &mut self,
+        target: TabActionTarget,
         event: &MouseDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -489,18 +535,49 @@ impl ZzClawTermApp {
                 .clone(),
             _ => return,
         };
-        let enabled = self.tab_mouse_action_enabled(&session_id, &action);
-        if event.button == MouseButton::Right && (action == "none" || !enabled) {
+        let enabled = self.tab_target_action_enabled(&target, &action);
+        if event.button == MouseButton::Right && !enabled {
             cx.stop_propagation();
-            self.open_tab_actions_at(
-                session_id,
-                Some((f32::from(event.position.x), f32::from(event.position.y))),
-                window,
-                cx,
-            );
-        } else if action != "none" && enabled {
+            let anchor = (f32::from(event.position.x), f32::from(event.position.y));
+            if self.session.start_action_request(&target).is_some() {
+                self.open_start_tab_actions_at(target, anchor, window, cx);
+            } else if let Some(id) = self.session.resolved_tab_action_session(&target) {
+                self.open_tab_actions_at(id, Some(anchor), window, cx);
+            }
+        } else if enabled {
             cx.stop_propagation();
-            self.run_tab_mouse_action(session_id, action, window, cx);
+            self.run_tab_target_action(target, &action, window, cx);
+        }
+    }
+
+    pub(in crate::features) fn tab_target_action_enabled(
+        &self,
+        target: &TabActionTarget,
+        action: &str,
+    ) -> bool {
+        if let Some(context) = self.start_tab_action_context(target) {
+            context.enabled(action)
+        } else {
+            self.session
+                .resolved_tab_action_session(target)
+                .is_some_and(|id| self.tab_mouse_action_enabled(&id, action))
+        }
+    }
+
+    pub(in crate::features) fn run_tab_target_action(
+        &mut self,
+        target: TabActionTarget,
+        action: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.tab_target_action_enabled(&target, action) {
+            return;
+        }
+        if self.session.start_action_request(&target).is_some() {
+            self.run_start_tab_mouse_action(target, action, window, cx);
+        } else if let Some(id) = self.session.resolved_tab_action_session(&target) {
+            self.run_tab_mouse_action(id, action.to_string(), window, cx);
         }
     }
 

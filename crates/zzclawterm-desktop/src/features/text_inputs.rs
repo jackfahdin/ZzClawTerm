@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use gpui::{
-    AppContext, BoxShadow, Context, Entity, InteractiveElement as _, IntoElement,
+    App, AppContext, BoxShadow, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Rgba, SharedString, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _, px, rgb,
 };
@@ -175,6 +175,22 @@ impl ZzClawTermApp {
         true
     }
 
+    /// True while window focus sits inside any registry input. Click handlers
+    /// that normally refocus the terminal on container clicks must skip while
+    /// a field owns the caret, or a box in an overlay strip (e.g. the tmux
+    /// command input) can never be typed into.
+    pub(in crate::features) fn text_input_focused(&self, window: &Window, cx: &App) -> bool {
+        let Some(focused) = window.focused(cx) else {
+            return false;
+        };
+        self.text_inputs.fields.values().any(|field| {
+            let field = field.read(cx);
+            // Once the inner gpui-kit component exists it owns the real focus
+            // handle; the outer `focus` only matters before that first mount.
+            field.focus_handle() == focused || field.component_focus_handle(cx) == focused
+        })
+    }
+
     /// An existing field, without creating one.
     ///
     /// `text_input` takes `&mut self` because it builds the entity on first use, so
@@ -260,15 +276,23 @@ impl ZzClawTermApp {
                         app.on_text_input_changed(subscription_id.clone(), text.clone(), cx);
                         if subscription_id.starts_with("ai.agent-answer.") {
                             app.submit_native_answer_input(subscription_id.as_ref(), cx);
+                        } else if let Some(host) = subscription_id.strip_prefix("tmux.command.") {
+                            app.submit_tmux_command_input(host, text.as_str(), cx);
                         } else if subscription_id.as_ref() == "ai.chat.prompt" {
                             if app.ai.chat_mention_is_open() {
                                 app.select_ai_mention_candidate(cx);
-                            } else {
+                            } else if !app.ai.chat_or_agent_is_running() {
+                                // The draft stays editable during a run; Enter
+                                // must neither start nor queue a second request.
                                 app.start_ai_ask(cx);
                             }
                         }
                     }
-                    ZzClawInputEvent::Blurred(_) => {}
+                    ZzClawInputEvent::Blurred(_) => {
+                        if let Some(host) = subscription_id.strip_prefix("tmux.command.") {
+                            app.on_tmux_command_blurred(host, cx);
+                        }
+                    }
                 },
             );
         self.text_inputs.fields.insert(id.clone(), entity.clone());
@@ -475,7 +499,9 @@ impl ZzClawTermApp {
         // Remote panels render cached snapshots, so their input subscriptions need the
         // same deferred flush boundary as panel event handlers.
         let remote_panel_input = id.starts_with("remote.");
-        if let Some(rest) = id.strip_prefix("settings.number.") {
+        if let Some(host) = id.strip_prefix("tmux.command.") {
+            self.on_tmux_command_draft(host, text, cx);
+        } else if let Some(rest) = id.strip_prefix("settings.number.") {
             self.apply_settings_number_input(rest, &text, cx);
         } else if let Some(rest) = id.strip_prefix("ai.number.") {
             self.apply_ai_number_input(rest, &text, cx);
@@ -566,12 +592,18 @@ impl ZzClawTermApp {
             self.apply_temporary_serial_port_name(text, cx);
         } else if id.as_ref() == "temporary-ssh.baud-rate" {
             self.apply_temporary_serial_baud_rate(text, cx);
+        } else if let Some(rest) = id.strip_prefix("windterm-account.") {
+            if let Some((uuid, field)) = rest.rsplit_once('.') {
+                self.apply_windterm_account_input(uuid, field, text, cx);
+            }
         } else if let Some(field) = id.strip_prefix("session.") {
             self.apply_session_text_input(field, text, cx);
         } else if id.as_ref() == "lock-screen.password" {
             self.apply_lock_password_input(text, cx);
         } else if id.as_ref() == "security.unlock.password" {
             self.apply_security_unlock_password_input(text, cx);
+        } else if id.as_ref() == "ssh.auth.name" {
+            self.apply_runtime_auth_name(text, cx);
         } else if let Some(prompt_id) = id.strip_prefix("ssh.credential.") {
             self.apply_ssh_credential_input(prompt_id, text, cx);
         } else if let Some(field_id) = id.strip_prefix("ssh.keyboard-interactive.") {
@@ -900,7 +932,6 @@ mod tests {
     #[test]
     fn ai_secret_toggle_reveals_current_draft_and_restores_it_when_hidden() {
         use crate::features::test_support::app_with_visible_local_session;
-        use gpui::TestAppContext;
         use zzclawterm_core::{ai::AiProviderKind, test_support::TestTempDir};
         let root = TestTempDir::new("zzclawterm-ai-secret-draft-toggle");
         let mut cx = TestAppContext::single();
@@ -931,7 +962,6 @@ mod tests {
     #[test]
     fn header_secret_toggle_and_provider_switch_preserve_only_the_owning_draft() {
         use crate::features::test_support::app_with_visible_local_session;
-        use gpui::TestAppContext;
         use zzclawterm_core::test_support::TestTempDir;
         let root = TestTempDir::new("zzclawterm-header-secret-lifecycle");
         let mut cx = TestAppContext::single();

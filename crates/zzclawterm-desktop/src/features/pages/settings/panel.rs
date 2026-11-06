@@ -1,24 +1,4 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-
-use rust_i18n::t;
-
 use crate::features::ai::agent_management::AgentManagementView;
-use gpui::{
-    AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity,
-    Window, div, prelude::*, px, rgb,
-};
-use zzclawterm_core::{
-    AiSettings, AppSettingsSummary, CloudSyncHistoryEntry, CloudSyncSettings, CloudSyncState,
-    KeywordHighlightConfig, TranslationSettings,
-};
-use zzclawterm_ui::{
-    NYA_FORM_CONTROL_HEIGHT_PX, ZzClawInputShell, ZzClawNumberInputState, ZzClawSelect,
-    ZzClawSelectOption, ZzClawSelectState, ZzClawSettingsLayout, ZzClawSettingsNavGroup,
-    ZzClawSettingsNavItem, ZzClawSliderState, ZzClawSliderValue,
-};
-
 use crate::features::selects::SelectRegistry;
 use crate::features::settings::{
     KeybindingPresentationState, KeywordHighlightPresentationState, SearchEnginePresentationState,
@@ -35,16 +15,35 @@ use crate::models::{
     TranslationSecretDraft,
 };
 use crate::theme::ThemePalette;
+use gpui::{
+    AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
+    KeyDownEvent, ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity,
+    Window, canvas, div, prelude::*, px, rgb,
+};
+use rust_i18n::t;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use zzclawterm_core::{
+    AiSettings, AppSettingsSummary, CloudSyncHistoryEntry, CloudSyncSettings, CloudSyncState,
+    KeywordHighlightConfig, TranslationSettings,
+};
+use zzclawterm_ui::{
+    NYA_FORM_CONTROL_HEIGHT_PX, ZzClawInputShell, ZzClawNumberInputState, ZzClawSelect,
+    ZzClawSelectOption, ZzClawSelectState, ZzClawSettingsLayout, ZzClawSettingsNavGroup,
+    ZzClawSettingsNavItem, ZzClawSliderState, ZzClawSliderValue,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::features) enum SettingsSurface {
-    MainPage,
-    NativeWindow,
-}
-
-#[derive(Clone, PartialEq)]
+/// Background colours are resolved by the app because the panel is cached: it
+/// only repaints when a new snapshot arrives, so wallpaper, window material, and
+/// content opacity must travel inside the snapshot to reach it.
+#[derive(Clone, Copy, PartialEq)]
 pub(in crate::features) struct SettingsChrome {
     pub palette: ThemePalette,
+    /// The page's single tinted layer, honouring content opacity.
+    pub surface: gpui::Rgba,
+    pub transparent_bg: gpui::Rgba,
+    pub transparent_surface: gpui::Rgba,
+    pub transparent_section_header: gpui::Rgba,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -70,7 +69,6 @@ pub(in crate::features) enum SettingsSectionPresentation {
 #[derive(Clone)]
 pub(in crate::features) struct SettingsSnapshot {
     pub chrome: SettingsChrome,
-    pub surface: SettingsSurface,
     pub active_tab: SettingsTab,
     pub settings: SettingsPresentation,
     pub ai: AiSettingsPresentation,
@@ -90,7 +88,6 @@ pub(in crate::features) struct SettingsSnapshot {
 impl PartialEq for SettingsSnapshot {
     fn eq(&self, other: &Self) -> bool {
         self.chrome == other.chrome
-            && self.surface == other.surface
             && self.active_tab == other.active_tab
             && self.draft_open == other.draft_open
             && self.draft_dirty == other.draft_dirty
@@ -155,7 +152,6 @@ pub(in crate::features) struct SettingsPresentation {
     pub(in crate::features) snapshot_password_prompt_active: bool,
     pub(in crate::features) config_path_prompt_active: bool,
     pub(in crate::features) terminal_theme_is_dark: bool,
-    pub(in crate::features) panel_multi_open: bool,
 }
 
 impl SettingsPresentation {
@@ -169,7 +165,6 @@ impl SettingsPresentation {
             search_engine_presentation: SearchEnginePresentationState {
                 expanded_index: None,
                 icon_picker_index: None,
-                actions_index: None,
             },
             keyword_highlight_presentation: KeywordHighlightPresentationState {
                 expanded_id: None,
@@ -191,7 +186,6 @@ impl SettingsPresentation {
             snapshot_password_prompt_active: false,
             config_path_prompt_active: false,
             terminal_theme_is_dark: true,
-            panel_multi_open: false,
         }
     }
 }
@@ -311,10 +305,6 @@ impl SettingsPresentation {
     pub(in crate::features) fn terminal_theme_is_dark(&self) -> bool {
         self.terminal_theme_is_dark
     }
-
-    pub(in crate::features) fn panel_multi_open(&self) -> bool {
-        self.panel_multi_open
-    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -353,6 +343,7 @@ impl AiSettingsPresentation {
 
 #[derive(Clone, PartialEq)]
 pub(in crate::features) struct CloudSyncPresentation {
+    pub(in crate::features) v4_preview: Option<crate::features::sync::V4PreviewSummary>,
     pub(in crate::features) settings: Arc<CloudSyncSettings>,
     pub(in crate::features) state: CloudSyncState,
     pub(in crate::features) history: Vec<CloudSyncHistoryEntry>,
@@ -368,6 +359,7 @@ pub(in crate::features) struct CloudSyncPresentation {
 impl Default for CloudSyncPresentation {
     fn default() -> Self {
         Self {
+            v4_preview: None,
             settings: Arc::new(CloudSyncSettings::default()),
             state: CloudSyncState::default(),
             history: Vec::new(),
@@ -440,13 +432,14 @@ impl TranslationPresentation {
 
 #[derive(Clone, Default, PartialEq)]
 pub(in crate::features) struct TransferSettingsPresentation {
-    pub(in crate::features) duplicate_policy: zzclawterm_transport::SftpDuplicatePolicy,
+    pub(in crate::features) duplicate_policy:
+        zzclawterm_files::sftp_transfer_types::SftpDuplicatePolicy,
 }
 
 impl TransferSettingsPresentation {
     pub(in crate::features) fn duplicate_policy(
         &self,
-    ) -> zzclawterm_transport::SftpDuplicatePolicy {
+    ) -> zzclawterm_files::sftp_transfer_types::SftpDuplicatePolicy {
         self.duplicate_policy
     }
 }
@@ -497,9 +490,9 @@ impl FontSelectOptionCache {
 
 pub(in crate::features) struct SettingsPanel {
     content_scroll_handles: HashMap<String, gpui::ScrollHandle>,
-    pub(in crate::features::pages::settings) viewport_width: f32,
+    pub(in crate::features::pages::settings) pane_width: f32,
+    pub(in crate::features::pages::settings) content_width: f32,
     app: WeakEntity<ZzClawTermApp>,
-    surface: SettingsSurface,
     snapshot: Option<SettingsSnapshot>,
     pub(in crate::features) settings: SettingsPresentation,
     pub(in crate::features) ai: AiSettingsPresentation,
@@ -532,14 +525,6 @@ pub(in crate::features) struct SettingsPanel {
 
 impl SettingsPanel {
     pub(in crate::features) fn new(app: WeakEntity<ZzClawTermApp>, cx: &mut Context<Self>) -> Self {
-        Self::new_for_surface(app, SettingsSurface::MainPage, cx)
-    }
-
-    pub(in crate::features) fn new_for_surface(
-        app: WeakEntity<ZzClawTermApp>,
-        surface: SettingsSurface,
-        cx: &mut Context<Self>,
-    ) -> Self {
         if cfg!(windows) {
             cx.spawn(async move |this, cx| {
                 let mut last_status = zzclawterm_transport::managed_x11_status();
@@ -599,9 +584,9 @@ impl SettingsPanel {
         });
         Self {
             content_scroll_handles: HashMap::new(),
-            viewport_width: 800.,
+            pane_width: 0.,
+            content_width: 0.,
             app,
-            surface,
             snapshot: None,
             settings: SettingsPresentation::empty(cx),
             ai: AiSettingsPresentation::empty(cx),
@@ -634,11 +619,6 @@ impl SettingsPanel {
             #[cfg(test)]
             rebuild_count: 0,
         }
-    }
-
-    #[cfg(test)]
-    pub(in crate::features) fn surface(&self) -> SettingsSurface {
-        self.surface
     }
 
     #[cfg(test)]
@@ -697,7 +677,6 @@ impl SettingsPanel {
                     }
                 });
         }
-        self.surface = snapshot.surface;
         let window_opacity = snapshot.settings.summary.window_background_opacity;
         self.last_window_opacity = window_opacity;
         if self.window_opacity_slider.read(cx).value()
@@ -925,9 +904,13 @@ impl SettingsPanel {
     }
 
     pub(in crate::features) fn theme_palette(&self) -> ThemePalette {
+        self.settings_chrome().palette
+    }
+
+    pub(in crate::features::pages::settings) fn settings_chrome(&self) -> SettingsChrome {
         self.snapshot
             .as_ref()
-            .map(|snapshot| snapshot.chrome.palette)
+            .map(|snapshot| snapshot.chrome)
             .expect("settings panel render requires a snapshot")
     }
 
@@ -1126,8 +1109,7 @@ impl SettingsPanel {
 }
 
 impl Render for SettingsPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.viewport_width = f32::from(window.viewport_size().width);
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         {
             self.paint_count += 1;
@@ -1137,100 +1119,129 @@ impl Render for SettingsPanel {
             return div().size_full().into_any_element();
         };
 
+        let panel = cx.weak_entity();
+        let measurement = canvas(
+            move |bounds, _, cx| {
+                let width = f32::from(bounds.size.width);
+                let Some(panel) = panel.upgrade() else { return };
+                if panel.read(cx).pane_width == width {
+                    return;
+                }
+                cx.defer(move |cx| {
+                    panel.update(cx, |panel, cx| {
+                        if panel.pane_width != width {
+                            panel.pane_width = width;
+                            cx.notify();
+                        }
+                    });
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
+
+        let root = div()
+            .relative()
+            .min_w_0()
+            .min_h_0()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(measurement);
         if snapshot.settings.theme_designer.open {
-            return self.theme_designer_section(cx);
+            return root
+                .child(self.theme_designer_section(cx))
+                .into_any_element();
         }
 
-        let palette = snapshot.chrome.palette;
+        let chrome = snapshot.chrome;
+        let palette = chrome.palette;
         let settings_title = t!("settings.title");
         let active_group = t!(snapshot.active_tab.group_i18n_key());
         let active_label = t!(snapshot.active_tab.i18n_key());
         let back_label = t!("common.close");
-        let native_window = snapshot.surface == SettingsSurface::NativeWindow;
 
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(rgb(palette.bg))
-            .when(!native_window, |this| {
-                this.child(
-                    div()
-                        .h(px(36.))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .px_3()
-                        .border_b_1()
-                        .border_color(rgb(palette.border))
-                        .bg(rgb(palette.section_header))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_size(px(12.))
-                                        .font_weight(FontWeight(700.))
-                                        .text_color(rgb(palette.text))
-                                        .child(settings_title),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .text_color(rgb(palette.text_dimmed))
-                                        .child("·"),
-                                )
-                                .when(
-                                    snapshot.active_tab.expandable_group_id().is_some(),
-                                    |this| {
-                                        this.child(
-                                            div()
-                                                .text_size(px(11.))
-                                                .text_color(rgb(palette.text_muted))
-                                                .child(active_group),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(11.))
-                                                .text_color(rgb(palette.text_dimmed))
-                                                .child("/"),
-                                        )
-                                    },
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(11.))
-                                        .font_weight(FontWeight(600.))
-                                        .text_color(rgb(palette.text))
-                                        .child(active_label.clone()),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from("settings-close"))
-                                .h(px(26.))
-                                .px_2()
-                                .flex()
-                                .items_center()
-                                .rounded_md()
-                                .text_size(px(11.))
-                                .text_color(rgb(palette.text_muted))
-                                .cursor_pointer()
-                                .hover(move |this| {
-                                    this.bg(rgb(palette.surface_elevated))
-                                        .text_color(rgb(palette.text))
-                                })
-                                .child(back_label)
-                                .on_click(cx.listener(|panel, _, _, cx| {
-                                    panel.with_app(cx, |app, cx| app.close_settings(cx));
-                                })),
-                        ),
-                )
-            })
-            .child(self.settings_layout(&snapshot, window, cx))
+        root.bg(chrome.surface)
+            .child(
+                div()
+                    .h(px(36.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(rgb(palette.border))
+                    .bg(chrome.transparent_section_header)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .font_weight(FontWeight(700.))
+                                    .text_color(rgb(palette.text))
+                                    .child(settings_title),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(palette.text_dimmed))
+                                    .child("·"),
+                            )
+                            .when(
+                                snapshot.active_tab.expandable_group_id().is_some(),
+                                |this| {
+                                    this.child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(rgb(palette.text_muted))
+                                            .child(active_group),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .text_color(rgb(palette.text_dimmed))
+                                            .child("/"),
+                                    )
+                                },
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .font_weight(FontWeight(600.))
+                                    .text_color(rgb(palette.text))
+                                    .child(active_label.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from("settings-close"))
+                            .debug_selector(|| "settings-close".into())
+                            .h(px(26.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .rounded_md()
+                            .text_size(px(11.))
+                            .text_color(rgb(palette.text_muted))
+                            .cursor_pointer()
+                            .hover(move |this| {
+                                this.bg(rgb(palette.surface_elevated))
+                                    .text_color(rgb(palette.text))
+                            })
+                            .child(back_label)
+                            .on_click(cx.listener(|panel, _, window, cx| {
+                                panel.with_app(cx, |app, cx| {
+                                    app.request_settings_tab_close(window, cx)
+                                });
+                            })),
+                    ),
+            )
+            .child(self.settings_layout(&snapshot, cx))
             .child(self.settings_action_footer(&snapshot, cx))
             .into_any_element()
     }
@@ -1240,10 +1251,8 @@ impl SettingsPanel {
     fn settings_layout(
         &mut self,
         snapshot: &SettingsSnapshot,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let viewport_width = f32::from(window.viewport_size().width);
         let active_item_id = settings_tab_nav_id(snapshot.active_tab);
         let active_label = t!(snapshot.active_tab.i18n_key());
         let scroll_handle = self
@@ -1254,6 +1263,7 @@ impl SettingsPanel {
         let content = self.settings_tab_content(snapshot, cx);
         let panel = cx.entity();
         let toggle_panel = panel.clone();
+        let measured_panel = panel.downgrade();
 
         ZzClawSettingsLayout::new(
             "settings-layout",
@@ -1262,10 +1272,19 @@ impl SettingsPanel {
             content,
         )
         .palette(snapshot.chrome.palette)
+        .content_background(snapshot.chrome.transparent_bg)
         .active_title(active_label)
         .sidebar_title(t!("settings.title"))
         .content_scroll_handle(scroll_handle)
-        .viewport_width(viewport_width)
+        .viewport_width(self.pane_width)
+        .on_content_width_changed(move |width, _, cx| {
+            let _ = measured_panel.update(cx, |panel, cx| {
+                if panel.content_width != width {
+                    panel.content_width = width;
+                    cx.notify();
+                }
+            });
+        })
         .compact_breakpoint(640.)
         .wide_breakpoint(1024.)
         .on_select(move |item_id, _, cx| {
@@ -1376,8 +1395,9 @@ impl SettingsPanel {
         let palette = snapshot.chrome.palette;
         let dirty = snapshot.draft_dirty || snapshot.settings.theme_designer.dirty();
         let validation_error = snapshot.validation_error.clone();
-        let apply_disabled = !dirty || validation_error.is_some();
-        let confirm_disabled = validation_error.is_some();
+        // Keep save actions reachable while the status below explains validation
+        // errors. The runtime rejects invalid drafts and keeps settings open.
+        let apply_disabled = !dirty;
         let status = validation_error.clone().unwrap_or_else(|| {
             if dirty {
                 t!("settings.unappliedChanges").to_string()
@@ -1400,7 +1420,7 @@ impl SettingsPanel {
             .py_3()
             .border_t_1()
             .border_color(rgb(palette.border))
-            .bg(rgb(palette.section_header))
+            .bg(snapshot.chrome.transparent_section_header)
             .child(
                 div()
                     .min_w_0()
@@ -1441,6 +1461,7 @@ impl SettingsPanel {
                     .child(
                         div()
                             .id("settings-apply")
+                            .debug_selector(|| "settings-apply".into())
                             .h(px(28.))
                             .min_w(px(64.))
                             .px_4()
@@ -1470,6 +1491,7 @@ impl SettingsPanel {
                     .child(
                         div()
                             .id("settings-confirm")
+                            .debug_selector(|| "settings-confirm".into())
                             .h(px(28.))
                             .min_w(px(64.))
                             .px_4()
@@ -1477,26 +1499,16 @@ impl SettingsPanel {
                             .items_center()
                             .justify_center()
                             .rounded_md()
-                            .bg(if confirm_disabled {
-                                rgb(palette.surface_elevated)
-                            } else {
-                                rgb(palette.link)
-                            })
+                            .bg(rgb(palette.link))
                             .text_size(px(11.))
                             .font_weight(FontWeight(600.))
-                            .text_color(if confirm_disabled {
-                                rgb(palette.text_dimmed)
-                            } else {
-                                rgb(0xffffff)
-                            })
-                            .when(!confirm_disabled, |this| {
-                                this.cursor_pointer()
-                                    .on_click(cx.listener(|panel, _, _, cx| {
-                                        panel.with_app(cx, |app, cx| {
-                                            app.confirm_settings_draft(cx);
-                                        });
-                                    }))
-                            })
+                            .text_color(rgb(palette.text_on_fill(palette.link)))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|panel, _, _, cx| {
+                                panel.with_app(cx, |app, cx| {
+                                    app.confirm_settings_draft(cx);
+                                });
+                            }))
                             .child(confirm_label),
                     ),
             )
@@ -2051,7 +2063,6 @@ forward_app_action!(
     toggle_minimize_to_tray,
     toggle_multi_line_paste_dialog,
     toggle_osc52_clipboard_write,
-    toggle_panel_multi_open,
     toggle_paste_image_as_path,
     toggle_recording_auto_start,
     toggle_recording_binary_transfer_payloads,
@@ -2063,14 +2074,17 @@ forward_app_action!(
     toggle_startup_lock_enabled,
     toggle_idle_lock_enabled,
     toggle_settings_master_password,
+    toggle_remote_stats_show_users,
     toggle_startup_restore,
     toggle_startup_restore_window_layout,
     toggle_terminal_action_links,
     toggle_terminal_line_numbers,
+    toggle_terminal_wrap_markers,
     toggle_terminal_reconnect_restore_cwd,
     toggle_terminal_timestamps,
     toggle_terminal_workspace_padding,
     toggle_terminal_zebra_stripes,
+    toggle_terminal_zebra_stripes_by_row,
     toggle_terminal_zoom_enabled,
     toggle_file_manager_auto_collapse,
     toggle_transfer_ask_save_location,
@@ -2085,21 +2099,18 @@ forward_app_action!(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
-    use gpui::{
-        AppContext as _, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-        TestAppContext, VisualTestContext, div, prelude::FluentBuilder as _, px,
-    };
-    use zzclawterm_core::{AppRuntime, RuntimeMode};
-
+    use super::{FontSelectOptionCache, SettingsPanel};
     use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
     use crate::features::pages::settings::inputs::ALL_SETTINGS_TABS;
     use crate::features::{FontCatalogLoadState, ZzClawTermApp};
     use crate::models::{AiActionEditorField, AiActionListKind, NavItem, SettingsTab};
     use crate::test_support::TestConfigDir;
-
-    use super::{FontSelectOptionCache, SettingsPanel, SettingsSurface};
+    use gpui::{
+        AppContext as _, Entity, IntoElement, Modifiers, ParentElement as _, Render, Styled as _,
+        TestAppContext, VisualTestContext, div, prelude::FluentBuilder as _, px,
+    };
+    use std::path::Path;
+    use zzclawterm_core::{AppRuntime, RuntimeMode};
 
     #[test]
     fn font_select_option_cache_rebuilds_after_catalog_load() {
@@ -2159,41 +2170,192 @@ mod tests {
         }
     }
 
-    struct DualHost {
-        main: Entity<SettingsPanel>,
-        native: Entity<SettingsPanel>,
+    struct PanelHost {
+        panel: Entity<SettingsPanel>,
     }
 
-    impl Render for DualHost {
+    struct ResizablePanelHost {
+        app: Entity<ZzClawTermApp>,
+        width: f32,
+    }
+
+    struct SettingsBodyHost {
+        panel: Entity<SettingsPanel>,
+        width: f32,
+    }
+
+    impl Render for SettingsBodyHost {
         fn render(
             &mut self,
-            _window: &mut gpui::Window,
-            _cx: &mut gpui::Context<Self>,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
-            div()
-                .w(px(760.))
-                .h(px(720.))
-                .flex()
-                .gap_2()
-                .child(
-                    div().flex_1().min_w_0().child(
-                        self.main
-                            .clone()
-                            .cached(crate::features::layout::cached_panel_style()),
-                    ),
-                )
-                .child(
-                    div().flex_1().min_w_0().child(
-                        self.native
-                            .clone()
-                            .cached(crate::features::layout::cached_panel_style()),
-                    ),
-                )
+            let body = self.panel.update(cx, |panel, cx| {
+                panel.content_width = self.width;
+                // Exercise provider cards without opening the credential editor.
+                panel.ai.providers.selected_id = None;
+                let snapshot = panel.snapshot.clone().unwrap();
+                panel.settings_tab_content(&snapshot, cx)
+            });
+            div().w(px(self.width)).child(body)
         }
     }
 
-    struct PanelHost {
-        panel: Entity<SettingsPanel>,
+    #[test]
+    fn ai_settings_grids_follow_body_width_in_a_large_window() {
+        let dir = TestConfigDir::new("zzclawterm-settings-grid-width");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx, dir.path());
+        cx.update_entity(&app, |app, cx| {
+            app.sync_component_theme(cx);
+            app.open_page(NavItem::Settings, cx);
+            for _ in 0..3 {
+                app.add_ai_provider_preset(zzclawterm_core::AiProviderKind::OpenaiCompatible, cx);
+            }
+            app.focus_settings_tab(SettingsTab::AiModels, cx);
+            app.flush_settings_panel_snapshots(cx);
+        });
+        let panel = cx.update_entity(&app, |app, _| app.settings_panel.clone());
+        let provider_selectors: Vec<&'static str> = panel.read_with(&cx, |panel, _| {
+            panel
+                .ai
+                .config
+                .provider_credentials
+                .iter()
+                .map(|credential| {
+                    &*Box::leak(format!("ai-provider-card-{}", credential.id).into_boxed_str())
+                })
+                .collect()
+        });
+        let (host, vcx) = cx.add_window_view(|_, _| SettingsBodyHost {
+            panel: panel.clone(),
+            width: 519.,
+        });
+        vcx.simulate_resize(gpui::size(px(1420.), px(960.)));
+        for (width, columns) in [(519., 1), (520., 2), (799., 2), (800., 3)] {
+            host.update(vcx, |host, cx| {
+                host.width = width;
+                cx.notify();
+            });
+            vcx.update(|window, cx| {
+                _ = window.draw(cx);
+            });
+            vcx.run_until_parked();
+            let first = vcx.debug_bounds(provider_selectors[0]).unwrap();
+            let second = vcx.debug_bounds(provider_selectors[1]).unwrap();
+            let third = vcx.debug_bounds(provider_selectors[2]).unwrap();
+            assert_eq!(first.top() == second.top(), columns >= 2);
+            assert_eq!(first.top() == third.top(), columns == 3);
+            assert!(third.right() <= px(width));
+        }
+        for (tab, first, second) in [
+            (
+                SettingsTab::AiGeneral,
+                "ai-general-context-field",
+                "ai-general-timeout-field",
+            ),
+            (
+                SettingsTab::AiAgents,
+                "ai-agent-thread-field",
+                "ai-agent-model-field",
+            ),
+        ] {
+            vcx.update(|_, cx| {
+                app.update(cx, |app, cx| {
+                    app.focus_settings_tab(tab, cx);
+                    app.flush_settings_panel_snapshots(cx);
+                });
+            });
+            for width in [1023., 1024., 519.] {
+                host.update(vcx, |host, cx| {
+                    host.width = width;
+                    cx.notify();
+                });
+                vcx.update(|window, cx| {
+                    _ = window.draw(cx);
+                });
+                vcx.run_until_parked();
+                let first = vcx.debug_bounds(first).unwrap();
+                let second = vcx.debug_bounds(second).unwrap();
+                assert_eq!(
+                    first.top() == second.top(),
+                    width >= 1024.,
+                    "{tab:?} at {width}"
+                );
+                assert!(second.right() <= px(width));
+            }
+        }
+    }
+
+    impl Render for ResizablePanelHost {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            div().w(px(self.width)).h(px(720.)).flex().child(
+                self.app
+                    .read(cx)
+                    .settings_panel
+                    .clone()
+                    .cached(crate::features::layout::cached_panel_style()),
+            )
+        }
+    }
+
+    #[test]
+    fn cached_settings_responds_to_pane_resize_without_window_resize() {
+        let dir = TestConfigDir::new("zzclawterm-settings-pane-resize");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx, dir.path());
+        cx.update_entity(&app, |app, cx| {
+            app.sync_component_theme(cx);
+            app.open_page(NavItem::Settings, cx);
+            app.flush_settings_panel_snapshots(cx);
+        });
+        let (host, vcx) = cx.add_window_view(|_, _| ResizablePanelHost {
+            app: app.clone(),
+            width: 395.,
+        });
+        for (window_width, window_height) in [(1271., 877.), (1289., 919.), (1420., 960.)] {
+            vcx.simulate_resize(gpui::size(px(window_width), px(window_height)));
+            for (width, sidebar, padding) in [
+                (395., 56., 32.),
+                (639., 56., 32.),
+                (640., 192., 48.),
+                (1023., 192., 48.),
+                (1024., 224., 64.),
+                (395., 56., 32.),
+            ] {
+                host.update(vcx, |host, cx| {
+                    host.width = width;
+                    cx.notify();
+                });
+                for _ in 0..4 {
+                    draw(&app, vcx);
+                }
+                assert_eq!(
+                    vcx.debug_bounds("settings-sidebar").unwrap().size.width,
+                    px(sidebar)
+                );
+                vcx.update(|_, cx| {
+                    let panel = app.read(cx).settings_panel.read(cx);
+                    assert_eq!(panel.pane_width, width);
+                    assert_eq!(panel.content_width, width - sidebar - padding);
+                });
+                let before = vcx.update(|_, cx| paints(&app, cx));
+                for _ in 0..3 {
+                    draw(&app, vcx);
+                }
+                assert_eq!(
+                    vcx.update(|_, cx| paints(&app, cx)),
+                    before,
+                    "stable measurements must not repaint the cached panel"
+                );
+            }
+        }
     }
 
     impl Render for PanelHost {
@@ -2249,6 +2411,137 @@ mod tests {
         panel.read(cx).rebuild_count
     }
 
+    fn click_footer(
+        app: &Entity<ZzClawTermApp>,
+        vcx: &mut VisualTestContext,
+        selector: &'static str,
+    ) {
+        draw(app, vcx);
+        let bounds = vcx
+            .debug_bounds(selector)
+            .expect("settings footer button is drawn");
+        vcx.simulate_click(bounds.center(), Modifiers::default());
+        draw(app, vcx);
+    }
+
+    #[test]
+    fn invalid_draft_footer_buttons_report_validation_and_keep_settings_open() {
+        let dir = TestConfigDir::new("zzclawterm-settings-footer-invalid");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted(&mut cx, dir.path());
+        let error = vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.settings
+                    .toggle_master_password(false)
+                    .expect("stage enabled");
+                app.request_settings_panel_refresh(cx);
+                app.pending_settings_validation_error().unwrap()
+            })
+        });
+        for selector in ["settings-apply", "settings-confirm"] {
+            vcx.update(|_, cx| app.update(cx, |app, _| app.shell.set_status("before click")));
+            click_footer(&app, vcx, selector);
+            vcx.update(|_, cx| {
+                let app = app.read(cx);
+                assert!(
+                    app.shell.status().contains(&error),
+                    "{selector} must invoke validation"
+                );
+                assert_eq!(app.settings.store_status().message, error);
+                assert!(app.settings_tab_is_open());
+                assert!(app.shell.has_settings_draft());
+                assert!(app.settings_draft_dirty());
+                assert!(app.settings.master_password().enabled);
+                assert_eq!(
+                    app.settings_panel
+                        .read(cx)
+                        .snapshot()
+                        .unwrap()
+                        .validation_error,
+                    Some(error.clone()),
+                    "the footer must retain its validation message"
+                );
+                let saved = app
+                    .store_blocking_client()
+                    .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                        store.load_app_settings_summary()
+                    })
+                    .expect("read stored settings");
+                assert!(!saved.has_master_password);
+            });
+        }
+    }
+
+    #[test]
+    fn row_stripes_subswitch_follows_main_switch_and_keeps_its_preference() {
+        let dir = TestConfigDir::new("zzclawterm-settings-row-stripes");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted(&mut cx, dir.path());
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.focus_settings_tab(SettingsTab::TerminalGeneral, cx);
+                app.toggle_terminal_zebra_stripes_by_row(cx);
+            })
+        });
+        draw(&app, vcx);
+        assert!(vcx.debug_bounds("terminal-row-stripes-setting").is_some());
+        vcx.update(|_, cx| app.update(cx, |app, cx| app.toggle_terminal_zebra_stripes(cx)));
+        draw(&app, vcx);
+        assert!(vcx.debug_bounds("terminal-row-stripes-setting").is_none());
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                assert!(app.settings.summary().terminal_zebra_stripes_by_row);
+                app.toggle_terminal_zebra_stripes(cx);
+            })
+        });
+        draw(&app, vcx);
+        assert!(vcx.debug_bounds("terminal-row-stripes-setting").is_some());
+    }
+
+    #[test]
+    fn clean_footer_disables_apply_and_allows_confirm_even_with_a_validation_error() {
+        for invalid_baseline in [false, true] {
+            let dir = TestConfigDir::new("zzclawterm-settings-footer-clean");
+            let mut cx = TestAppContext::single();
+            let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let (app, vcx) = hosted(&mut cx, dir.path());
+            vcx.update(|_, cx| {
+                app.update(cx, |app, cx| {
+                    if invalid_baseline {
+                        app.cloud_sync.toggle_enabled();
+                        app.rebase_open_settings_draft(cx);
+                    }
+                    assert!(!app.settings_draft_dirty());
+                    assert_eq!(
+                        app.pending_settings_validation_error().is_some(),
+                        invalid_baseline
+                    );
+                    app.shell.set_status("disabled apply must not run");
+                    app.settings
+                        .set_store_message("disabled apply must not run");
+                })
+            });
+            click_footer(&app, vcx, "settings-apply");
+            vcx.update(|_, cx| {
+                let app = app.read(cx);
+                assert_eq!(app.shell.status(), "disabled apply must not run");
+                assert_eq!(
+                    app.settings.store_status().message,
+                    "disabled apply must not run"
+                );
+                assert!(app.settings_tab_is_open());
+            });
+            click_footer(&app, vcx, "settings-confirm");
+            vcx.update(|_, cx| {
+                let app = app.read(cx);
+                assert!(!app.settings_tab_is_open());
+                assert!(!app.shell.has_settings_draft());
+            });
+        }
+    }
+
     #[test]
     fn theme_manager_can_render_browsing_editing_and_unsaved_navigation() {
         use crate::features::settings::theme_designer::ThemeIntent;
@@ -2256,9 +2549,6 @@ mod tests {
         let mut cx = TestAppContext::single();
         let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
         let app = app(&mut cx, dir.path());
-        // Paint one surface: open_page also opens a native settings window.
-        // Painting the same input entities in both hosts makes their geometry
-        // notifications alternate forever between the two window sizes.
         cx.update_entity(&app, |app, cx| {
             app.sync_component_theme(cx);
             app.begin_settings_draft(cx);
@@ -2277,19 +2567,36 @@ mod tests {
             })
         });
         draw(&app, vcx);
-        vcx.update(|window, _| window.resize(gpui::size(px(640.), px(480.))));
-        draw(&app, vcx);
-        vcx.update(|window, _| window.resize(gpui::size(px(1000.), px(720.))));
-        draw(&app, vcx);
+        assert_theme_manager_stays_side_by_side(&app, vcx);
         vcx.update(|_, cx| {
             app.update(cx, |app, cx| {
                 assert!(!app.settings.theme_designer().editable());
                 app.theme_designer_action(ThemeIntent::Copy("dracula".into()), cx);
+                app.edit_theme_designer(
+                    "name",
+                    "A long custom theme name that must not displace the editor".into(),
+                    cx,
+                );
             })
         });
         draw(&app, vcx);
-        vcx.update(|window, _| window.resize(gpui::size(px(640.), px(480.))));
-        draw(&app, vcx);
+        let name_input = vcx.update(|_, cx| {
+            app.read(cx)
+                .existing_text_input("theme.designer.name")
+                .unwrap()
+                .entity_id()
+        });
+        assert_theme_manager_stays_side_by_side(&app, vcx);
+        vcx.update(|_, cx| {
+            assert_eq!(
+                app.read(cx)
+                    .existing_text_input("theme.designer.name")
+                    .unwrap()
+                    .entity_id(),
+                name_input,
+            );
+            assert!(app.read(cx).settings.theme_designer().dirty());
+        });
         vcx.update(|_, cx| {
             app.update(cx, |app, cx| {
                 assert!(app.existing_text_input("theme.designer.name").is_some());
@@ -2307,6 +2614,65 @@ mod tests {
         });
         draw(&app, vcx);
         vcx.update(|_, cx| assert!(!app.read(cx).settings.theme_designer().open));
+    }
+
+    fn assert_theme_manager_stays_side_by_side(
+        app: &Entity<ZzClawTermApp>,
+        vcx: &mut VisualTestContext,
+    ) {
+        for width in [640., 849., 850., 1000., 640.] {
+            vcx.simulate_resize(gpui::size(px(width), px(480.)));
+            draw(app, vcx);
+            let list = vcx.debug_bounds("theme-designer-list").unwrap();
+            let editor = vcx.debug_bounds("theme-designer-editor").unwrap();
+            assert_eq!(list.size.width, px(if width < 850. { 192. } else { 248. }));
+            assert_eq!(list.top(), editor.top());
+            assert_eq!(list.size.height, editor.size.height);
+            assert!(list.right() <= editor.left());
+            assert!(editor.size.width > px(0.));
+            assert!(editor.right() <= px(width));
+            assert!(editor.bottom() <= px(480.));
+        }
+    }
+
+    #[test]
+    fn window_material_and_content_opacity_reach_the_cached_settings_panel() {
+        use zzclawterm_core::models::window_material::WindowMaterial;
+        let dir = TestConfigDir::new("zzclawterm-settings-panel-background");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx, dir.path());
+        cx.update_entity(&app, |app, cx| {
+            app.open_page(NavItem::Settings, cx);
+            app.begin_settings_draft(cx);
+        });
+        for material in [
+            WindowMaterial::Blurred,
+            WindowMaterial::Transparent,
+            WindowMaterial::Opaque,
+        ] {
+            cx.update_entity(&app, |app, cx| {
+                app.set_window_material(material, cx);
+                app.set_background_content_opacity(45, cx);
+            });
+            cx.run_until_parked();
+            cx.read_entity(&app, |app, cx| {
+                let native = app.shell_background().native_transparent;
+                let chrome = app.settings_panel.read(cx).snapshot().unwrap().chrome;
+                assert_eq!(chrome.surface, app.shell_surface_color(chrome.palette.bg));
+                assert_eq!(chrome.transparent_bg.a, if native { 0. } else { 1. });
+                assert_eq!(
+                    chrome.transparent_section_header.a,
+                    if native { 0. } else { 1. }
+                );
+                if native {
+                    assert!((chrome.surface.a - 0.45).abs() < 0.002);
+                } else {
+                    assert_eq!(chrome.surface.a, 1.);
+                }
+            });
+        }
+        cx.update_entity(&app, |app, cx| app.cancel_settings(cx));
     }
 
     #[test]
@@ -2476,77 +2842,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn main_and_native_surfaces_receive_updates_independently() {
-        let test_dir = TestConfigDir::new("zzclawterm-settings-panel");
-        let mut cx = TestAppContext::single();
-        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
-        let app = app(&mut cx, test_dir.path());
-        let native = cx.new(|cx| {
-            SettingsPanel::new_for_surface(app.downgrade(), SettingsSurface::NativeWindow, cx)
-        });
-        cx.update_entity(&app, |app, cx| {
-            app.sync_component_theme(cx);
-            app.open_page(NavItem::Settings, cx);
-            app.register_native_settings_panel(&native, cx);
-            app.flush_settings_panel_snapshots(cx);
-        });
-        let main = cx.update_entity(&app, |app, _| app.settings_panel.clone());
-        let host_main = main.clone();
-        let host_native = native.clone();
-        let (_, vcx) = cx.add_window_view(move |_, _| DualHost {
-            main: host_main.clone(),
-            native: host_native.clone(),
-        });
-        let vcx: &mut VisualTestContext = vcx;
-        vcx.run_until_parked();
-        vcx.update(|window, cx| {
-            _ = window.draw(cx);
-        });
-        vcx.run_until_parked();
-        vcx.update(|_, cx| {
-            app.update(cx, |app, cx| {
-                app.register_native_settings_panel(&native, cx);
-                app.flush_settings_panel_snapshots(cx);
-            });
-        });
-        vcx.run_until_parked();
-
-        let (main_before, native_before) =
-            vcx.update(|_, cx| (rebuilds(&main, cx), rebuilds(&native, cx)));
-        vcx.update(|_, cx| {
-            app.update(cx, |app, cx| {
-                app.toggle_startup_restore(cx);
-                app.request_settings_panel_refresh(cx);
-            });
-        });
-        vcx.run_until_parked();
-
-        vcx.update(|_, cx| {
-            let main_panel = main.read(cx);
-            let native_panel = native.read(cx);
-            assert_eq!(main_panel.surface(), SettingsSurface::MainPage);
-            assert_eq!(native_panel.surface(), SettingsSurface::NativeWindow);
-            assert_eq!(main_panel.rebuild_count, main_before + 1);
-            assert_eq!(native_panel.rebuild_count, native_before + 1);
-            assert_eq!(
-                main_panel
-                    .snapshot()
-                    .expect("main snapshot")
-                    .settings
-                    .summary()
-                    .startup_restore,
-                native_panel
-                    .snapshot()
-                    .expect("native snapshot")
-                    .settings
-                    .summary()
-                    .startup_restore,
-                "both surfaces must receive the same authoritative state through separate panels"
-            );
-        });
-    }
-
     fn activate(app: &Entity<ZzClawTermApp>, vcx: &mut VisualTestContext, tab: SettingsTab) {
         vcx.update(|_, cx| {
             app.update(cx, |app, cx| app.focus_settings_tab(tab, cx));
@@ -2594,13 +2889,12 @@ mod tests {
     /// window's effect flush. It reproduces with the snapshot's input-map comparison
     /// reverted, so it is not that; the cause has not been identified. Note that those
     /// same sections do render without spinning in
-    /// `inputs::tests::reveal_boundaries_build_the_inputs_their_rows_draw`, because
-    /// `open_page` opens the native settings window and that surface paints them -- so
-    /// the problem is something about this host, not the inputs themselves.
+    /// `inputs::tests::reveal_boundaries_build_the_inputs_their_rows_draw`, so the
+    /// problem is something about this host, not the inputs themselves.
     ///
     /// The boundary coverage this was written for lives in that `inputs.rs` test
     /// instead: it asserts the published snapshot carries every id a revealed row looks
-    /// up, and the native settings window renders those rows, so a miss still trips the
+    /// up, and the settings tab renders those rows, so a miss still trips the
     /// `debug_assert!` in `existing_text_input_box`.
     #[test]
     #[ignore = "this fixture never parks once a tab with a registry input is active; cause unknown"]

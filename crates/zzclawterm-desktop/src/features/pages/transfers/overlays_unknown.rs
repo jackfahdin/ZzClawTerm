@@ -1,13 +1,10 @@
-use rust_i18n::t;
-
-use gpui::{Context, ParentElement as _, Styled as _, Window, div, rgb};
-use zzclawterm_transport::{SftpFileEntry, SftpFileType};
-use zzclawterm_ui::{ZzClawButton, ZzClawButtonVariant, ZzClawDialogWindowExt};
-
+use super::{remote_file_name, transfer_dialog_width};
 use crate::features::ZzClawTermApp;
 use crate::models::TransferUnknownFileState;
-
-use super::{remote_file_name, transfer_dialog_width};
+use gpui::{Context, ParentElement as _, Styled as _, Window, div, rgb};
+use rust_i18n::t;
+use zzclawterm_files::sftp::{SftpFileEntry, SftpFileType};
+use zzclawterm_ui::{ZzClawButton, ZzClawButtonVariant, ZzClawDialogWindowExt};
 
 impl ZzClawTermApp {
     pub(in crate::features) fn open_transfer_unknown_file_component_dialog(

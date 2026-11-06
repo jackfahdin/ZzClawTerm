@@ -27,20 +27,6 @@
 //! child view of the app is repainted by the app's own paint and a
 //! `cx.observe(&app, ..)` would buy nothing but coupling.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use gpui::{
-    Context, Entity, IntoElement, ListAlignment, ListOffset, ListState, Render, Rgba,
-    ScrollStrategy, Task, UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px,
-};
-use rust_i18n::t;
-use zzclawterm_transport::{RemoteGpuProcess, RemoteNpuProcess, RemoteProcess};
-use zzclawterm_ui::{
-    ZzClawInputState, ZzClawNumberInputOptions, ZzClawNumberInputState, ZzClawSelectOption,
-    ZzClawSelectState,
-};
-
 use super::docker_view::docker_panel;
 use super::process::{process_display_mode, process_row_height_px};
 use super::process_view::processes_panel;
@@ -53,6 +39,20 @@ use crate::features::remote::{
 use crate::features::text_inputs::TextInputSetup;
 use crate::models::{DockerTab, NavItem};
 use crate::theme::ThemePalette;
+use gpui::{
+    Context, Entity, IntoElement, ListAlignment, ListOffset, ListState, Render, Rgba,
+    ScrollStrategy, Task, UniformListScrollHandle, WeakEntity, Window, div, prelude::*, px,
+};
+use rust_i18n::t;
+use std::sync::Arc;
+use std::time::Duration;
+use zzclawterm_remote_ops::ascend_npu::RemoteNpuProcess;
+use zzclawterm_remote_ops::gpu::RemoteGpuProcess;
+use zzclawterm_remote_ops::remote_process::RemoteProcess;
+use zzclawterm_ui::{
+    ZzClawInputState, ZzClawNumberInputOptions, ZzClawNumberInputState, ZzClawSelectOption,
+    ZzClawSelectState,
+};
 
 /// How often a polling panel asks whether its own interval has come due.
 ///
@@ -142,6 +142,8 @@ struct RemoteMonitorKey {
     /// Right-panel width, which decides the process table's columns and row heights.
     /// Zero for the panes that do not depend on it.
     panel_width: f32,
+    /// Whether the Stats pane lists logged-in users. Always false for the other panes.
+    show_users: bool,
 }
 
 pub(in crate::features) enum RemoteMonitorData {
@@ -312,10 +314,18 @@ impl RemoteMonitorPanel {
                             reset_to_top
                                 || previous_processes.len() != processes.len()
                                 || previous_selected_index != selected_index
-                                || previous_mode != mode,
+                                || previous_mode != mode
+                                || previous.key.panel_width != snapshot.key.panel_width
+                                || (selected_index.is_some()
+                                    && previous.key.revision != snapshot.key.revision),
                         )
                     });
-                if needs_reset {
+                if needs_reset && !reset_to_top && self.process_list.item_count() == processes.len()
+                {
+                    // Width and expanded content can change heights without changing row identities.
+                    // Keep the position inside the current row instead of jumping to its top.
+                    self.process_list.remeasure();
+                } else if needs_reset {
                     let previous_top = self.process_list.logical_scroll_top();
                     let row_height =
                         process_row_height_px(process_display_mode(snapshot.key.panel_width));
@@ -432,6 +442,7 @@ impl Render for RemoteMonitorPanel {
                 } => stats_panel(
                     chrome,
                     has_session,
+                    snapshot.key.show_users,
                     state.clone(),
                     network_select.clone(),
                     cx,
@@ -443,7 +454,15 @@ impl Render for RemoteMonitorPanel {
                 } => {
                     let (state, processes, search) =
                         (state.clone(), processes.clone(), search.clone());
-                    gpu_panel(chrome, has_session, state, processes, search, cx)
+                    gpu_panel(
+                        chrome,
+                        has_session,
+                        state,
+                        processes,
+                        search,
+                        panel_width,
+                        cx,
+                    )
                 }
                 RemoteMonitorData::Npu {
                     state,
@@ -452,7 +471,15 @@ impl Render for RemoteMonitorPanel {
                 } => {
                     let (state, processes, search) =
                         (state.clone(), processes.clone(), search.clone());
-                    npu_panel(chrome, has_session, state, processes, search, cx)
+                    npu_panel(
+                        chrome,
+                        has_session,
+                        state,
+                        processes,
+                        search,
+                        panel_width,
+                        cx,
+                    )
                 }
                 RemoteMonitorData::Processes {
                     state,
@@ -605,13 +632,15 @@ impl ZzClawTermApp {
             chrome: self.panel_chrome(),
             has_session: self.session.active_ssh_config().is_some(),
             panel_width: match kind {
-                // Both read the width: the process table for its columns and row heights,
-                // Docker for its compose layout.
-                RemoteMonitorKind::Processes | RemoteMonitorKind::Docker => {
-                    self.shell.right_panel_width()
-                }
+                // Width is a presentation input, including accelerator card layouts.
+                RemoteMonitorKind::Processes
+                | RemoteMonitorKind::Docker
+                | RemoteMonitorKind::Gpu
+                | RemoteMonitorKind::Npu => self.shell.right_panel_width(),
                 _ => 0.,
             },
+            show_users: kind == RemoteMonitorKind::Stats
+                && self.settings.summary().ui_remote_stats_show_users,
         }
     }
 
@@ -810,18 +839,17 @@ impl ZzClawTermApp {
 
 #[cfg(test)]
 mod tests {
+    use super::{RemoteMonitorData, RemoteMonitorKind, RemoteMonitorPanel};
+    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
     use crate::features::ZzClawTermApp;
-    use std::path::Path;
-
+    use crate::test_support::TestConfigDir;
     use gpui::{
         AppContext as _, Entity, IntoElement, ParentElement as _, Render, Styled as _,
         TestAppContext, VisualTestContext, div,
     };
     use zzclawterm_core::{AppRuntime, RuntimeMode};
 
-    use super::{RemoteMonitorData, RemoteMonitorKind, RemoteMonitorPanel};
-    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
-    use crate::test_support::TestConfigDir;
+    use std::path::Path;
 
     const ALL_KINDS: [RemoteMonitorKind; 5] = [
         RemoteMonitorKind::Stats,
@@ -921,7 +949,7 @@ mod tests {
     #[test]
     fn network_select_events_refresh_the_stats_snapshot_and_reconcile_removed_interfaces() {
         use crate::features::runtime_jobs::StatsJobResult;
-        use zzclawterm_transport::{NetworkInfo, NetworkSummaryInfo, RemoteStats};
+        use zzclawterm_remote_ops::stats::{NetworkInfo, NetworkSummaryInfo, RemoteStats};
         use zzclawterm_ui::ZzClawSelectEvent;
 
         fn stats(include_eth1: bool) -> RemoteStats {
@@ -968,6 +996,7 @@ mod tests {
                     .begin_stats_job("remote-panel-test".to_string(), false);
                 app.remote_ops.apply_stats_event(
                     StatsJobResult {
+                        users_revision: 0,
                         job_id: ticket.job_id,
                         session_id: "remote-panel-test".to_string(),
                         result: Ok(stats(true)),
@@ -1020,6 +1049,7 @@ mod tests {
                     .begin_stats_job("remote-panel-test".to_string(), false);
                 app.remote_ops.apply_stats_event(
                     StatsJobResult {
+                        users_revision: 0,
                         job_id: ticket.job_id,
                         session_id: "remote-panel-test".to_string(),
                         result: Ok(stats(false)),
@@ -1256,9 +1286,11 @@ mod tests {
             app.toggle_left_sidebar(cx);
             app.ensure_panel_in_stack(NavItem::GpuMonitor, cx);
             assert!(app.panel_is_rendered(NavItem::GpuMonitor));
-            app.shell.show_page(NavItem::Settings);
-            assert!(!app.panel_is_rendered(NavItem::GpuMonitor));
-            app.shell.show_workspace();
+            app.open_page(NavItem::Settings, cx);
+            assert!(
+                app.panel_is_rendered(NavItem::GpuMonitor),
+                "settings is a tab now and must not hide the side panels"
+            );
             if !cfg!(target_os = "macos") {
                 app.shell.set_viewport_size_for_test((600., 800.));
                 app.shell.close_mobile_panels();
@@ -1442,26 +1474,25 @@ mod tests {
 #[cfg(test)]
 mod isolation_tests {
 
-    use std::path::Path;
-
-    use gpui::{
-        AppContext as _, IntoElement, ParentElement as _, Render, Styled as _, TestAppContext,
-        VisualTestContext, div,
-    };
-    use zzclawterm_core::{AiExecutionProfile, AppRuntime, RuntimeMode};
-    use zzclawterm_transport::{
-        LocalSessionConfig, RemoteGpuOverview, RemoteStats, SshSessionConfig,
-    };
-    use zzclawterm_ui::ZzClawInputEvent;
-
-    use super::RemoteMonitorKind;
-    use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
-    use crate::features::ZzClawTermApp;
     use crate::features::runtime_jobs::DockerResource;
     use crate::models::{DockerTab, NavItem, SessionLaunchConfig, SessionRuntimeMetadata};
-    use crate::test_support::TestConfigDir;
 
+    use gpui::{AppContext as _, ParentElement as _, Styled as _};
+    use zzclawterm_core::AiExecutionProfile;
+    use zzclawterm_remote_ops::gpu::RemoteGpuOverview;
+    use zzclawterm_remote_ops::stats::RemoteStats;
+    use zzclawterm_transport::{LocalSessionConfig, SshSessionConfig};
+    use zzclawterm_ui::ZzClawInputEvent;
+
+    use crate::features::ZzClawTermApp;
+    use gpui::TestAppContext;
+    use std::path::Path;
     fn app(cx: &mut TestAppContext, root: &Path) -> gpui::Entity<ZzClawTermApp> {
+        use crate::entities::OverlayStore;
+        use crate::entities::StartupRestoreStore;
+        use crate::entities::UiStoreHandles;
+        use zzclawterm_core::AppRuntime;
+        use zzclawterm_core::RuntimeMode;
         // A uuid rather than a clock reading: these tests run in parallel and Windows'
         // ~15ms clock granularity lets a nanosecond timestamp repeat, which would share
         // one config dir and so one settings database.
@@ -1484,17 +1515,20 @@ mod isolation_tests {
         app: gpui::Entity<ZzClawTermApp>,
     }
 
+    use gpui::{IntoElement, Render};
     impl Render for AppHost {
         fn render(
             &mut self,
             _window: &mut gpui::Window,
             _cx: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
+            use gpui::div;
             div().size_full().child(self.app.clone())
         }
     }
 
     fn paints(app: &gpui::Entity<ZzClawTermApp>, cx: &gpui::App) -> [usize; 3] {
+        use super::RemoteMonitorKind;
         let count = |kind| {
             app.read(cx)
                 .remote_panels
@@ -1509,6 +1543,7 @@ mod isolation_tests {
         ]
     }
 
+    use gpui::VisualTestContext;
     /// Open the three panels on an SSH session and paint until things settle.
     fn hosted<'a>(
         cx: &'a mut TestAppContext,
@@ -1558,6 +1593,7 @@ mod isolation_tests {
     /// current parent sizing, content mask and text style, this fails.
     #[test]
     fn an_unrelated_app_notify_does_not_re_render_the_snapshot_panels() {
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -1593,6 +1629,8 @@ mod isolation_tests {
     /// freshness.
     #[test]
     fn a_stats_mutation_reaches_its_panel_without_an_extra_root_paint() {
+        use super::RemoteMonitorKind;
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -1625,6 +1663,8 @@ mod isolation_tests {
     /// A panel interaction must not flush while its own entity is leased by GPUI.
     #[test]
     fn a_panel_interaction_flushes_after_its_lease_is_released() {
+        use super::RemoteMonitorKind;
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -1662,6 +1702,7 @@ mod isolation_tests {
     /// A GPU mutation must not re-render Stats or NPU.
     #[test]
     fn a_gpu_mutation_does_not_re_render_stats_or_npu() {
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -1698,6 +1739,7 @@ mod isolation_tests {
     /// direction of coupling. No app render is involved.
     #[test]
     fn typing_in_the_gpu_search_invalidates_only_that_panel() {
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -1738,6 +1780,8 @@ mod isolation_tests {
     /// A remote search subscription must publish its panel snapshot after the input event.
     #[test]
     fn remote_search_input_reaches_its_snapshot_after_the_subscription_runs() {
+        use super::RemoteMonitorKind;
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -1831,6 +1875,7 @@ mod isolation_tests {
     }
 
     fn process_paints(app: &gpui::Entity<ZzClawTermApp>, cx: &gpui::App) -> usize {
+        use super::RemoteMonitorKind;
         app.read(cx)
             .remote_panels
             .entity(RemoteMonitorKind::Processes)
@@ -1838,8 +1883,8 @@ mod isolation_tests {
             .paint_count()
     }
 
-    fn process(pid: u32) -> zzclawterm_transport::RemoteProcess {
-        zzclawterm_transport::RemoteProcess {
+    fn process(pid: u32) -> zzclawterm_remote_ops::remote_process::RemoteProcess {
+        zzclawterm_remote_ops::remote_process::RemoteProcess {
             pid,
             ppid: 1,
             user: "user".to_string(),
@@ -1857,6 +1902,7 @@ mod isolation_tests {
     /// An `app.notify()` that changed nothing in the process pane must not re-render it.
     #[test]
     fn an_unrelated_app_notify_does_not_re_render_processes() {
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -1884,6 +1930,8 @@ mod isolation_tests {
     /// A process mutation reaches its panel before anything draws.
     #[test]
     fn a_process_mutation_reaches_its_panel_without_an_extra_root_paint() {
+        use super::RemoteMonitorKind;
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -1913,6 +1961,7 @@ mod isolation_tests {
     /// A sibling pane's data must not re-render Processes.
     #[test]
     fn a_stats_mutation_does_not_re_render_processes() {
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -1937,6 +1986,7 @@ mod isolation_tests {
     /// Search, sort and the nice field each re-render only the Processes panel.
     #[test]
     fn process_interactions_update_only_the_process_panel() {
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -1988,10 +2038,11 @@ mod isolation_tests {
         }
     }
 
-    /// Sorting by memory then narrowing the panel falls back to CPU immediately, and the
+    /// Sorting by memory then narrowing the panel preserves the selected ordering, and the
     /// snapshot follows -- the width is part of the key, so no pane revision has to move.
     #[test]
-    fn narrowing_the_panel_falls_back_to_cpu_sort_in_the_snapshot() {
+    fn narrowing_the_panel_preserves_memory_sort_in_the_snapshot() {
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -2001,7 +2052,6 @@ mod isolation_tests {
                 app.remote_ops
                     .apply_processes((0..4).map(process).collect());
                 app.shell.set_right_panel_width_for_test(700.);
-                app.reconcile_remote_process_sort_columns();
                 app.remote_ops
                     .toggle_process_sort(crate::models::RemoteProcessSortKey::Memory);
                 app.flush_remote_panel_snapshots(cx);
@@ -2017,12 +2067,11 @@ mod isolation_tests {
             app.update(cx, |app, cx| {
                 // What a resize drag does, one move at a time.
                 app.shell.set_right_panel_width_for_test(360.);
-                app.reconcile_remote_process_sort_columns();
                 app.flush_remote_panel_snapshots(cx);
                 assert_eq!(
                     app.remote_ops.process_presentation().sort_key,
-                    crate::models::RemoteProcessSortKey::Cpu,
-                    "a narrow panel cannot sort by memory"
+                    crate::models::RemoteProcessSortKey::Memory,
+                    "sorting remains available in the narrow layout"
                 );
             });
             _ = window.draw(cx);
@@ -2034,10 +2083,77 @@ mod isolation_tests {
         );
     }
 
+    #[test]
+    fn accelerator_snapshots_track_width_without_data_changes() {
+        use super::RemoteMonitorKind;
+        use crate::test_support::TestConfigDir;
+        let test_dir = TestConfigDir::new("zzclawterm-accelerator-width");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx, test_dir.path());
+        cx.update_entity(&app, |app, cx| {
+            for width in [200., 359., 360., 519., 520., 720.] {
+                app.shell.set_right_panel_width_for_test(width);
+                app.flush_remote_panel_snapshots(cx);
+                for kind in [RemoteMonitorKind::Gpu, RemoteMonitorKind::Npu] {
+                    let panel = app.remote_panels.entity(kind).read(cx);
+                    assert_eq!(
+                        panel.snapshot.as_ref().expect("snapshot").key.panel_width,
+                        width
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn expanded_process_height_is_remeasured_within_the_same_width_mode() {
+        use super::RemoteMonitorKind;
+        use crate::test_support::TestConfigDir;
+        let test_dir = TestConfigDir::new("zzclawterm-process-wrap");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted_processes(&mut cx, test_dir.path());
+        let mut heights = Vec::new();
+        for width in [720., 600.] {
+            vcx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    if app.remote_ops.process_presentation().selected_pid.is_none() {
+                        let mut row = process(1);
+                        row.command_line = "long-command-without-spaces/".repeat(100);
+                        app.remote_ops.apply_processes(vec![row]);
+                        app.remote_ops.toggle_process_selection(1);
+                    }
+                    app.shell.set_right_panel_width_for_test(width);
+                    app.flush_remote_panel_snapshots(cx);
+                });
+                _ = window.draw(cx);
+            });
+            vcx.run_until_parked();
+            heights.push(vcx.update(|_, cx| {
+                app.read(cx)
+                    .remote_panels
+                    .entity(RemoteMonitorKind::Processes)
+                    .read(cx)
+                    .process_list
+                    .bounds_for_item(0)
+                    .expect("expanded row")
+                    .size
+                    .height
+            }));
+        }
+        assert!(
+            heights[1] > heights[0],
+            "a narrower command must wrap to more lines: {heights:?}"
+        );
+    }
+
     /// The process panel owns a variable-height GPUI list and keeps its item count in
     /// step with snapshots without routing scroll state through `RemoteOpsFeatureState`.
     #[test]
     fn process_list_state_tracks_snapshots_and_clamps_a_shorter_list() {
+        use super::RemoteMonitorKind;
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -2127,12 +2243,12 @@ mod isolation_tests {
         (app, vcx)
     }
 
-    fn docker_overview(containers: usize) -> zzclawterm_transport::RemoteDockerOverview {
-        zzclawterm_transport::RemoteDockerOverview {
+    fn docker_overview(containers: usize) -> zzclawterm_remote_ops::docker::RemoteDockerOverview {
+        zzclawterm_remote_ops::docker::RemoteDockerOverview {
             available: true,
             compose_available: true,
             containers: (0..containers)
-                .map(|index| zzclawterm_transport::DockerContainer {
+                .map(|index| zzclawterm_remote_ops::docker::DockerContainer {
                     id: format!("c{index}"),
                     name: format!("name{index}"),
                     image: "image".to_string(),
@@ -2145,7 +2261,7 @@ mod isolation_tests {
                 })
                 .collect(),
             images: (0..30)
-                .map(|index| zzclawterm_transport::DockerImage {
+                .map(|index| zzclawterm_remote_ops::docker::DockerImage {
                     id: format!("i{index}"),
                     repository: "repo".to_string(),
                     tag: "latest".to_string(),
@@ -2158,6 +2274,7 @@ mod isolation_tests {
     }
 
     fn docker_paints(app: &gpui::Entity<ZzClawTermApp>, cx: &gpui::App) -> usize {
+        use super::RemoteMonitorKind;
         app.read(cx)
             .remote_panels
             .entity(RemoteMonitorKind::Docker)
@@ -2168,6 +2285,7 @@ mod isolation_tests {
     /// An `app.notify()` that changed nothing in the Docker pane must not re-render it.
     #[test]
     fn an_unrelated_app_notify_does_not_re_render_docker() {
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -2195,6 +2313,8 @@ mod isolation_tests {
     /// A Docker mutation reaches its panel before anything draws.
     #[test]
     fn a_docker_mutation_reaches_its_panel_without_an_extra_root_paint() {
+        use super::RemoteMonitorKind;
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -2223,6 +2343,7 @@ mod isolation_tests {
     /// A sibling pane's data must not re-render Docker.
     #[test]
     fn a_stats_mutation_does_not_re_render_docker() {
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -2247,6 +2368,7 @@ mod isolation_tests {
     /// Search, tab, menus and compose expansion each re-render only Docker.
     #[test]
     fn docker_interactions_update_only_the_docker_panel() {
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -2296,6 +2418,7 @@ mod isolation_tests {
 
     #[test]
     fn duplicate_docker_image_ids_keep_accessibility_nodes_unique() {
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-docker-image-a11y");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -2321,6 +2444,7 @@ mod isolation_tests {
     /// support shows Containers even with Compose stored as the tab.
     #[test]
     fn the_compose_tab_falls_back_in_the_snapshot() {
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -2354,6 +2478,8 @@ mod isolation_tests {
     /// handle becomes non-scrollable again when refreshed data fits the viewport.
     #[test]
     fn docker_resource_list_uses_a_native_scroll_handle() {
+        use super::RemoteMonitorKind;
+        use crate::test_support::TestConfigDir;
         let test_dir = TestConfigDir::new("zzclawterm-panel-isolation");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -2364,7 +2490,7 @@ mod isolation_tests {
                 app.remote_ops.apply_docker_overview(docker_overview(2));
                 app.remote_ops.apply_docker_resource(DockerResource::Images(
                     (0..100)
-                        .map(|index| zzclawterm_transport::DockerImage {
+                        .map(|index| zzclawterm_remote_ops::docker::DockerImage {
                             id: format!("image-{index}"),
                             repository: format!("repo-{index}"),
                             tag: "latest".to_string(),
@@ -2419,7 +2545,7 @@ mod isolation_tests {
             app.update(cx, |app, cx| {
                 app.remote_ops
                     .apply_docker_resource(DockerResource::Images(vec![
-                        zzclawterm_transport::DockerImage {
+                        zzclawterm_remote_ops::docker::DockerImage {
                             id: "image-0".to_string(),
                             repository: "repo-0".to_string(),
                             tag: "latest".to_string(),
