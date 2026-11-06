@@ -48,6 +48,7 @@ impl FileIdentity {
     pub(crate) fn from_path(path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {
+            use std::os::unix::fs::MetadataExt as _;
             let metadata = fs::symlink_metadata(path)?;
             if metadata.file_type().is_symlink() {
                 return Err(io::Error::other("download target is a symbolic link"));

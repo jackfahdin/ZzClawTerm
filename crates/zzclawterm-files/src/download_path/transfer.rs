@@ -50,6 +50,7 @@ impl TransferDownload {
         let temporary = builder.tempfile_in(super::root_for_target(target))?;
         #[cfg(unix)]
         if matches!(access, DownloadTargetAccess::ReplaceKnownTarget(_, _)) {
+            use std::os::unix::fs::PermissionsExt as _;
             // umask applies to new files; an existing file's ordinary mode is preserved.
 
             temporary

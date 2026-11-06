@@ -8,6 +8,8 @@ use crate::sftp::{
 };
 use anyhow::{Context as _, anyhow, bail};
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Component, Path};
 use std::time::UNIX_EPOCH;
 

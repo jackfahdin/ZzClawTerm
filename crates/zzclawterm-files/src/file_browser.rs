@@ -8,6 +8,8 @@ use crate::sftp::{
     SftpRemoteTextFile,
 };
 use anyhow::bail;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zzclawterm_transport::local_shell::LocalShellPathStyle;
