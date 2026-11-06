@@ -23,7 +23,7 @@ const changelogReleasesEn: ChangelogRelease[] = [
         title: 'Fixed',
         items: [
           '**desktop:** Fix duplicate command history entries caused by dual-channel recording.',
-          '**build:** Fix ConPTY packaging and portable update verification.',
+          '**build:** Fix ConPTY packaging and portable update verification; move all build-time forks to Jackfahdin GitHub repositories to fix missing pinned revisions in CI.',
         ],
       },
     ],
@@ -189,7 +189,7 @@ const changelogReleasesZhCN: ChangelogRelease[] = [
         title: '修复',
         items: [
           '**desktop:** 修复命令历史通过双通道重复记录的问题。',
-          '**build:** 修复 ConPTY 打包与便携版更新校验问题。',
+          '**build:** 修复 ConPTY 打包与便携版更新校验；编译期 fork 依赖统一迁移到 Jackfahdin 的 GitHub 仓库，修复镜像缺少锁定提交导致的 CI 失败。',
         ],
       },
     ],
