@@ -43,8 +43,10 @@ use std::fs;
 use std::io::ErrorKind;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(windows)]
+use std::path::Path;
 #[cfg(any(unix, windows))]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 #[cfg(any(unix, windows))]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
