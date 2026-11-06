@@ -573,6 +573,8 @@ pub fn target_key(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
+    #[cfg(unix)]
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
     use std::path::Path;
     use tokio::io::AsyncWriteExt as _;
 

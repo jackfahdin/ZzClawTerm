@@ -1,4 +1,4 @@
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use std::ffi::OsString;
 #[cfg(any(windows, target_os = "macos", test))]
 use std::path::Path;
