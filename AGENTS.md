@@ -67,15 +67,14 @@ must include explicit conversion logic and tests.
   rendering distinction when adding assets.
 * Third-party dependencies that ZzClawTerm patches are not vendored. Each is a
   patch series on a fork under <https://github.com/jackfahdin> on branch
-  `zzclawterm` (forked from the original series under
-  <https://github.com/nyakang>), mirrored to
-  <https://gitcode.com/JackfahdinImport> for faster access in mainland China
-  and consumed from there at a revision pinned in the root `Cargo.toml`:
-  `alacritty` (`alacritty_terminal`), `gpui-kit`, `IronRDP`
-  (`ironrdp-client`, `ironrdp-connector`), `russh`, `russh-sftp`, `sspi-rs`,
-  `vnc-rs`, `zed` (`gpui`, `gpui_platform`), and `zmodem2`. Each branch carries
-  a `ZZCLAWTERM.md` recording its base revision, its patches, and how they were
-  validated.
+  `nyaterm` (forked from the original series under
+  <https://github.com/nyakang>). All ten forks are consumed from GitHub at a
+  revision pinned in the root `Cargo.toml`: `alacritty` (`alacritty_terminal`),
+  `gpui-kit`, `IronRDP` (`ironrdp-client`, `ironrdp-connector`), `portable-pty`,
+  `russh`, `russh-sftp`, `sspi-rs`, `vnc-rs`, `zed` (`gpui`, `gpui_platform`),
+  and `zmodem2`. <https://gitcode.com/JackfahdinImport> is only a mirror for
+  faster access in mainland China. Each branch carries a `NYATERM.md` recording
+  its base revision, its patches, and how they were validated.
 * `temp/vendor/`: untracked, read-only copies of those sources, kept only so
   they can be read locally. Nothing under `temp/` is compiled. **Editing
   anything there has no effect on the build and produces no error** — change
@@ -235,7 +234,7 @@ buffers where practical.
 Patching a third-party dependency means committing to its fork branch, pushing,
 and bumping the pinned revision in the root `Cargo.toml`. Do not edit `temp/`.
 Record the reason for the change and the validation performed on the patch
-commit and in that branch's `ZZCLAWTERM.md`, and keep the patch series split by
+commit and in that branch's `NYATERM.md`, and keep the patch series split by
 concern rather than squashed. Prefer rebasing the series onto a newer upstream
 revision over accumulating snapshots.
 

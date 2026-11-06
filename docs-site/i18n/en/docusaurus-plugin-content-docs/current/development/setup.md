@@ -228,9 +228,9 @@ Note that the script compares heading counts, not translated wording.
 
 ## Changing third-party dependencies
 
-The third-party dependencies ZzClawTerm patches are **not vendored into this repository**. Each is a patch series on a fork under [github.com/jackfahdin](https://github.com/jackfahdin) on branch `zzclawterm` (forked from the original series under [github.com/nyakang](https://github.com/nyakang)), mirrored to [gitcode.com/JackfahdinImport](https://gitcode.com/JackfahdinImport) for faster access in mainland China and consumed from there at a revision pinned in the root `Cargo.toml`: `alacritty`, `gpui-kit`, `IronRDP`, `russh`, `russh-sftp`, `sspi-rs`, `vnc-rs`, `zed` (`gpui`), and `zmodem2`.
+The third-party dependencies ZzClawTerm patches are **not vendored into this repository**. All ten are patch series on forks under [github.com/jackfahdin](https://github.com/jackfahdin) on branch `nyaterm` (forked from the original series under [github.com/nyakang](https://github.com/nyakang)), consumed by Cargo from GitHub at revisions pinned in the root `Cargo.toml`: `alacritty`, `gpui-kit`, `IronRDP`, `portable-pty`, `russh`, `russh-sftp`, `sspi-rs`, `vnc-rs`, `zed` (`gpui`), and `zmodem2`. [gitcode.com/JackfahdinImport](https://gitcode.com/JackfahdinImport) is only a mirror for faster access in mainland China.
 
-The workflow is: commit to the fork branch, push, then bump the pinned revision in the root `Cargo.toml`. Keep the patch series split by concern rather than squashed, and record the reason and the validation performed on the patch commit and in that branch's `ZZCLAWTERM.md`. Prefer rebasing an existing series onto a newer upstream revision over accumulating snapshots.
+The workflow is: commit to the fork branch, push, then bump the pinned revision in the root `Cargo.toml`. Keep the patch series split by concern rather than squashed, and record the reason and the validation performed on the patch commit and in that branch's `NYATERM.md`. Prefer rebasing an existing series onto a newer upstream revision over accumulating snapshots.
 
 `temp/vendor/` holds read-only local copies of those sources, kept only so they can be read locally. **Nothing there is compiled — editing it has no effect on the build and produces no error.**
 

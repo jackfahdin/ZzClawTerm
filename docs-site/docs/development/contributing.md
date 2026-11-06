@@ -83,7 +83,7 @@ pnpm --dir docs-site build
 
 ## 修改第三方依赖
 
-打了补丁的第三方依赖不在仓库里，而是 [github.com/jackfahdin](https://github.com/jackfahdin) 名下 fork 的 `nyaterm` 分支上的补丁序列（fork 自 [github.com/nyakang](https://github.com/nyakang) 下的原始序列），并镜像到 [gitcode.com/JackfahdinImport](https://gitcode.com/JackfahdinImport)，Cargo 从 gitcode 拉取。改动流程见 [开发环境搭建 → 修改第三方依赖](./setup#修改第三方依赖)。
+打了补丁的第三方依赖都不在仓库里。全部 10 个都是 [github.com/jackfahdin](https://github.com/jackfahdin) 名下 fork 的 `nyaterm` 分支上的补丁序列（fork 自 [github.com/nyakang](https://github.com/nyakang) 下的原始序列），由 Cargo 从 GitHub 按根 `Cargo.toml` 固定的 revision 拉取；[gitcode.com/JackfahdinImport](https://gitcode.com/JackfahdinImport) 仅作镜像。改动流程见 [开发环境搭建 → 修改第三方依赖](./setup#修改第三方依赖)。
 
 要点：提交到 fork 分支并推送，再在根 `Cargo.toml` 里 bump revision；补丁按关注点拆分；在提交信息和该分支的 `NYATERM.md` 里记录原因和验证方式。PR 描述中需注明改动的 fork 分支和 revision。
 

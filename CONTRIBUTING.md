@@ -173,12 +173,13 @@ generated metadata out of the change.
 Keep pull requests focused and explain compatibility-sensitive decisions in the
 description. Patched third-party dependencies are not vendored: each is a patch
 series on a fork under <https://github.com/jackfahdin> on branch `nyaterm`
-(forked from the original series under <https://github.com/nyakang>), mirrored
-to <https://gitcode.com/JackfahdinImport> for faster access in mainland China,
-and pinned by revision in the root `Cargo.toml`. Change one by committing to its fork
-branch and bumping that revision, and identify the upstream project/version or
-commit, the reason for the modification, and the validation performed. `temp/vendor/`
-holds untracked read-only copies for reading only; nothing there is compiled.
+(forked from the original series under <https://github.com/nyakang>). Cargo
+consumes all ten forks from GitHub at revisions pinned in the root `Cargo.toml`;
+<https://gitcode.com/JackfahdinImport> is only a mirror for faster access in
+mainland China. Change one by committing to its fork branch and bumping that
+revision, and identify the upstream project/version or commit, the reason for
+the modification, and the validation performed. `temp/vendor/` holds untracked
+read-only copies for reading only; nothing there is compiled.
 
 ## Compatibility
 

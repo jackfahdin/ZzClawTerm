@@ -84,11 +84,12 @@ git clone https://github.com/jackfahdin/ZzClawTerm.git
 cd ZzClawTerm
 ```
 
-项目依赖 9 个打过补丁的第三方 fork：zed（gpui、gpui_platform）、gpui-kit
-（gpui-component 等）、alacritty、IronRDP、sspi-rs、russh、russh-sftp、
-vnc-rs、zmodem2。它们在根 `Cargo.toml` 中被锁定到
-[GitCode 镜像](https://gitcode.com/JackfahdinImport) 各仓库 `nyaterm` 分支的
-固定修订版本，`cargo build` 时自动拉取，**不需要手动克隆**。
+项目依赖 10 个打过补丁的第三方 fork，均在根 `Cargo.toml` 中被锁定到
+[GitHub 上的 jackfahdin fork](https://github.com/jackfahdin) 各仓库 `nyaterm`
+分支的固定修订版本：zed（gpui、gpui_platform）、gpui-kit（gpui-component 等）、
+alacritty、IronRDP、portable-pty、sspi-rs、russh、russh-sftp、vnc-rs、zmodem2。
+[GitCode](https://gitcode.com/JackfahdinImport) 仅作镜像，以方便中国大陆访问。
+这些依赖均由 `cargo build` 自动从 GitHub 拉取，**不需要手动克隆**。
 
 crates.io 默认走官方源。网络较慢时可配置镜像，在 `~/.cargo/config.toml`
 （Windows 为 `%USERPROFILE%\.cargo\config.toml`）中写入：

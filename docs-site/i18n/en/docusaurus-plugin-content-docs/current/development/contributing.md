@@ -83,7 +83,7 @@ pnpm --dir docs-site build
 
 ## Changing third-party dependencies
 
-The third-party dependencies ZzClawTerm patches are not in this repository. Each is a patch series on a fork under [github.com/jackfahdin](https://github.com/jackfahdin) on branch `nyaterm` (forked from the original series under [github.com/nyakang](https://github.com/nyakang)), mirrored to [gitcode.com/JackfahdinImport](https://gitcode.com/JackfahdinImport). The workflow is documented in [Development Setup → Changing third-party dependencies](./setup#changing-third-party-dependencies).
+The third-party dependencies ZzClawTerm patches are not in this repository. All ten are patch series on forks under [github.com/jackfahdin](https://github.com/jackfahdin) on branch `nyaterm` (forked from the original series under [github.com/nyakang](https://github.com/nyakang)), consumed by Cargo from GitHub at revisions pinned in the root `Cargo.toml`. [gitcode.com/JackfahdinImport](https://gitcode.com/JackfahdinImport) is only a mirror. The workflow is documented in [Development Setup → Changing third-party dependencies](./setup#changing-third-party-dependencies).
 
 In short: commit to the fork branch and push, then bump the pinned revision in the root `Cargo.toml`; keep the patch series split by concern; record the reason and the validation performed on the patch commit and in that branch's `NYATERM.md`. Note the fork branch and revision in your PR description.
 
