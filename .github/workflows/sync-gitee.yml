@@ -1,10 +1,7 @@
 name: Sync to Gitee
 
 on:
-  workflow_run:
-    workflows: ['Rust', 'Docs']
-    types: [completed]
-    branches: [master]
+  workflow_dispatch:
 
 permissions:
   actions: read
@@ -17,7 +14,6 @@ concurrency:
 jobs:
   sync:
     name: Mirror refs to Gitee
-    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     # 首次推送要携带全部历史（约百 MB 级跨境传输），给足余量；
     # 后续增量推送几十秒内完成。
@@ -26,7 +22,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -34,7 +30,7 @@ jobs:
         id: gate
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_SHA: ${{ github.sha }}
         run: >-
           python3 scripts/ci/gitcode_mirror_gate.py master
           --repo "${GITHUB_REPOSITORY}" --sha "${HEAD_SHA}"
@@ -46,7 +42,7 @@ jobs:
           GITEE_OWNER: ${{ vars.GITEE_OWNER }}
           GITEE_REPO: ${{ vars.GITEE_REPO }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           if [[ -z "${GITEE_OWNER:-}" || -z "${GITEE_REPO:-}" || -z "${GITEE_TOKEN:-}" ]]; then

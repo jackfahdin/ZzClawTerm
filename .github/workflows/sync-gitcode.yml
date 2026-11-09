@@ -1,10 +1,7 @@
 name: Sync to GitCode
 
 on:
-  workflow_run:
-    workflows: ['Rust', 'Docs']
-    types: [completed]
-    branches: [master]
+  workflow_dispatch:
 
 permissions:
   actions: read
@@ -17,14 +14,13 @@ concurrency:
 jobs:
   sync:
     name: Mirror refs to GitCode
-    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -32,7 +28,7 @@ jobs:
         id: gate
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_SHA: ${{ github.sha }}
         run: >-
           python3 scripts/ci/gitcode_mirror_gate.py master
           --repo "${GITHUB_REPOSITORY}" --sha "${HEAD_SHA}"
@@ -44,7 +40,7 @@ jobs:
           GITCODE_OWNER: ${{ vars.GITCODE_OWNER }}
           GITCODE_REPO: ${{ vars.GITCODE_REPO }}
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           if [[ -z "${GITCODE_OWNER:-}" || -z "${GITCODE_REPO:-}" || -z "${GITCODE_TOKEN:-}" ]]; then
