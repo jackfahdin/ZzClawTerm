@@ -51,6 +51,7 @@ fn encrypted_auto_login_matches_independent_vectors_and_preserves_password_white
             &path,
             SessionImportOptions {
                 windterm_master_password: master,
+                ..SessionImportOptions::default()
             },
         )
         .unwrap();
@@ -79,6 +80,7 @@ fn enabled_master_password_requires_a_typed_challenge_and_can_be_resubmitted() {
         &path,
         SessionImportOptions {
             windterm_master_password: Some(" master-secret "),
+            ..SessionImportOptions::default()
         },
     )
     .unwrap();
@@ -94,6 +96,7 @@ fn disabled_master_password_always_uses_empty_password_derivation() {
         &path,
         SessionImportOptions {
             windterm_master_password: Some("unused"),
+            ..SessionImportOptions::default()
         },
     )
     .unwrap();
@@ -117,6 +120,7 @@ fn wrong_master_password_keeps_connection_with_redacted_warning() {
         &path,
         SessionImportOptions {
             windterm_master_password: Some("wrong"),
+            ..SessionImportOptions::default()
         },
     )
     .unwrap();

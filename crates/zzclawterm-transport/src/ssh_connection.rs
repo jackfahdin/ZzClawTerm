@@ -13,12 +13,9 @@ use russh::{Disconnect, client};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc as tokio_mpsc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,11 +107,6 @@ pub(crate) type SshHandleChain = (
     Vec<client::Handle<SshClientHandler>>,
 );
 
-pub(crate) struct ProxyCommandStream {
-    pub(crate) stdout: tokio::process::ChildStdout,
-    pub(crate) stdin: tokio::process::ChildStdin,
-}
-
 pub(crate) struct SshClientHandler {
     pub(crate) host: String,
     pub(crate) port: u16,
@@ -175,6 +167,9 @@ impl std::fmt::Debug for SshMultiplexHandle {
 }
 
 impl SshMultiplexHandle {
+    pub fn same_connection(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
     /// Runtime for auxiliary tasks; the connection remains the authoritative owner.
     pub fn runtime_handle(&self) -> tokio::runtime::Handle {
         self.inner.runtime.handle().clone()
@@ -194,6 +189,11 @@ impl SshMultiplexHandle {
 
     pub fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::Relaxed)
+            || self
+                .inner
+                .target
+                .try_lock()
+                .is_ok_and(|handle| handle.is_closed())
     }
 
     pub fn matches_config(&self, config: &SshSessionConfig) -> bool {
@@ -688,25 +688,17 @@ pub(crate) async fn connect_ssh_transport(
             let mut stream = tokio::net::TcpStream::connect(&proxy_addr)
                 .await
                 .map_err(|error| anyhow::anyhow!("HTTP proxy connection failed: {error}"))?;
-            match (
-                proxy.username.as_deref().filter(|value| !value.is_empty()),
-                proxy.password.as_deref().filter(|value| !value.is_empty()),
-            ) {
-                (Some(username), Some(password)) => {
-                    async_http_proxy::http_connect_tokio_with_basic_auth(
-                        &mut stream,
-                        &config.host,
-                        config.port,
-                        username,
-                        password,
-                    )
-                    .await
-                }
-                _ => {
-                    async_http_proxy::http_connect_tokio(&mut stream, &config.host, config.port)
-                        .await
-                }
-            }
+            crate::http_proxy::connect(
+                &mut stream,
+                &config.host,
+                config.port,
+                proxy
+                    .username
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .zip(proxy.password.as_deref().filter(|value| !value.is_empty())),
+            )
+            .await
             .map_err(|error| anyhow::anyhow!("HTTP proxy tunnel failed: {error}"))?;
             client::connect_stream(ssh_client_config(config)?, stream, handler)
                 .await
@@ -728,81 +720,7 @@ pub(crate) async fn connect_ssh_transport(
     }
 }
 
-pub(crate) async fn open_proxy_command_stream(
-    template: Option<&str>,
-    host: &str,
-    port: u16,
-    username: &str,
-) -> anyhow::Result<ProxyCommandStream> {
-    let command = expand_proxy_command(template, host, port, username)?;
-    let mut process = system_shell_command(&command)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| anyhow::anyhow!("ProxyCommand failed to start: {error}"))?;
-
-    let stdin = process
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("ProxyCommand stdin unavailable"))?;
-    let stdout = process
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("ProxyCommand stdout unavailable"))?;
-
-    if let Some(mut stderr) = process.stderr.take() {
-        tokio::spawn(async move {
-            let mut buffer = [0_u8; 1024];
-            loop {
-                match stderr.read(&mut buffer).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                }
-            }
-        });
-    }
-
-    tokio::spawn(async move {
-        let _ = process.wait().await;
-    });
-
-    Ok(ProxyCommandStream { stdout, stdin })
-}
-
-impl AsyncRead for ProxyCommandStream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        Pin::new(&mut self.stdout).poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for ProxyCommandStream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.stdin).poll_write(cx, buf)
-    }
-
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        Pin::new(&mut self.stdin).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        Pin::new(&mut self.stdin).poll_shutdown(cx)
-    }
-}
+pub(crate) use crate::proxy_command::open_proxy_command_stream;
 
 pub(crate) fn expand_proxy_command(
     template: Option<&str>,

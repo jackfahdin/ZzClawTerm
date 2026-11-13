@@ -13,9 +13,12 @@ use zzclawterm_core::models::window_material::{WindowMaterial, default_window_ba
 
 use super::{
     ConnectionStore, LEGACY_TEXT_MASTER_KEY, META_MASTER_KEY, META_TABLE, SETTINGS_DEFAULT,
-    SETTINGS_TABLE, StorageError, TEXT_DOCS_TABLE, json_bool, json_path, json_string_vec,
-    set_nested_json_value, write_json_in_txn,
+    SETTINGS_DEVICE_WINDOW_MANIFEST, SETTINGS_MAIN_WINDOW_STATE, SETTINGS_TABLE, StorageError,
+    TEXT_DOCS_TABLE, json_bool, json_path, json_string_vec, set_nested_json_value,
+    write_json_in_txn,
 };
+
+use zzclawterm_core::models::workspace_manifest::DeviceWindowManifest;
 use zzclawterm_core::{
     AppSettingsSummary, CredentialCrypto, DEFAULT_RECORDING_PATH_TEMPLATE,
     DEFAULT_TERMINAL_TIMESTAMP_FORMAT, ExistingFileBehavior, FileManagerUiSettings,
@@ -24,6 +27,13 @@ use zzclawterm_core::{
     WorkspaceRestoreState, WorkspaceSessionState, WorkspaceUiState, default_panel_open_mode,
     default_search_engines, normalize_panel_open_mode,
 };
+
+/// Read-only provenance for startup; never serialized into user settings.
+#[derive(Debug, Clone)]
+pub struct WorkspaceStartupRestore {
+    pub manifest: WorkspaceRestoreManifest,
+    pub is_default_workspace: bool,
+}
 
 // Reject malformed known fields before an unrelated save can replace their data.
 fn read_window_appearance(
@@ -186,6 +196,7 @@ impl ConnectionStore {
                 &["appearance", "bold_default_foreground"],
                 false,
             ),
+            android_adb_path: json_string(&value, &["android", "adb_path"], ""),
             x11_display: json_string(&value, &["terminal", "x11_display"], ""),
             x11_server_autostart: json_bool(&value, &["terminal", "x11_server_autostart"], true),
             // Retired key, folded into x11_server_autostart. Loaded and written
@@ -364,6 +375,7 @@ impl ConnectionStore {
                 &["ui", "file_explorer_auto_sync_cwd_connection_ids"],
                 256,
             ),
+            ui_highlight_line_roles: json_bool(&value, &["ui", "highlight_line_roles"], true),
             ui_file_explorer_favorite_dirs_by_connection_id: json_string_vec_map(
                 &value,
                 &["ui", "file_explorer_favorite_dirs_by_connection_id"],
@@ -1188,6 +1200,16 @@ impl ConnectionStore {
     ) -> Result<AppSettingsSummary, StorageError> {
         let mut value = self.load_settings_value()?;
         read_window_appearance(&value)?;
+        // Preserve a newer representation when the safe default is unchanged.
+        let unsupported_line_roles =
+            json_path(&value, &["ui", "highlight_line_roles"]).is_some_and(|raw| !raw.is_boolean());
+        if !unsupported_line_roles || !settings.ui_highlight_line_roles {
+            set_nested_json_value(
+                &mut value,
+                &["ui", "highlight_line_roles"],
+                serde_json::Value::Bool(settings.ui_highlight_line_roles),
+            );
+        }
         set_nested_json_string(
             &mut value,
             &["appearance", "window_decorations"],
@@ -1683,6 +1705,11 @@ impl ConnectionStore {
         settings: &AppSettingsSummary,
     ) -> Result<AppSettingsSummary, StorageError> {
         let mut value = self.load_settings_value()?;
+        set_nested_json_string(
+            &mut value,
+            &["android", "adb_path"],
+            settings.android_adb_path.clone(),
+        );
         set_nested_json_value(
             &mut value,
             &["general", "startup_restore"],
@@ -1885,6 +1912,45 @@ impl ConnectionStore {
             extra: Default::default(),
         };
         Ok(WorkspaceRestoreManifest::single(workspace))
+    }
+
+    pub fn load_workspace_startup_restore(&self) -> Result<WorkspaceStartupRestore, StorageError> {
+        let manifest = self.load_workspace_restore_manifest()?;
+        let value = self.load_settings_value()?;
+        // Presence matters: an intentionally saved empty workspace is still a
+        // workspace. Legacy layouts and window-only saves also count as history.
+        let saved_restore = [
+            "workspaces",
+            "open_tabs",
+            "terminal_window_layout",
+            "workspace_pane_layout",
+        ]
+        .into_iter()
+        .any(|key| json_path(&value, &["ui", key]).is_some_and(|raw| !raw.is_null()));
+        let saved_window = self
+            .read_json_table::<serde_json::Value>(SETTINGS_TABLE, SETTINGS_MAIN_WINDOW_STATE)?
+            .is_some_and(|raw| !raw.is_null())
+            || self
+                .read_json_table::<serde_json::Value>(
+                    SETTINGS_TABLE,
+                    SETTINGS_DEVICE_WINDOW_MANIFEST,
+                )?
+                .is_some_and(|raw| {
+                    if raw.is_null() {
+                        return false;
+                    }
+                    // An empty device manifest has no historical windows. Treat
+                    // unrecognized data conservatively as saved history.
+                    serde_json::from_value::<DeviceWindowManifest>(raw).map_or(true, |manifest| {
+                        manifest.validate().is_err()
+                            || !manifest.windows.is_empty()
+                            || !manifest.window_order.is_empty()
+                    })
+                });
+        Ok(WorkspaceStartupRestore {
+            manifest,
+            is_default_workspace: !saved_restore && !saved_window,
+        })
     }
 
     pub fn save_workspace_restore_manifest(

@@ -1,5 +1,7 @@
 mod approvals;
+mod composer_height;
 mod history_and_streaming;
+mod native_decisions;
 mod pickers;
 mod text_selection;
 use std::path::Path;
@@ -260,11 +262,13 @@ fn ai_header_running_transition_notifies_root() {
 
         let idle = app.ai_header_presentation();
         assert!(!idle.running);
+        assert_eq!(idle.conversation_title, rust_i18n::t!("ai.newChat"));
         let launch = app
             .ai
             .begin_chat_request("inspect".to_string(), AiMode::Ask, None);
         let running = app.ai_header_presentation();
         assert!(running.running);
+        assert_eq!(running.conversation_title, "inspect");
         assert_ne!(idle, running, "idle -> running should move the header");
 
         assert!(app.ai.apply_chat_delta(launch.job_id, "hello", None));
@@ -280,7 +284,7 @@ fn ai_header_running_transition_notifies_root() {
                 launch.session_id,
                 Ok(AiChatJobOutput {
                     metadata: None,
-                    native_call: None,
+                    native_decision: None,
                     mode: AiMode::Ask,
                     text: "done".to_string(),
                     reasoning: None,
@@ -299,6 +303,7 @@ fn ai_header_running_transition_notifies_root() {
             .begin_chat_request("cancel me".to_string(), AiMode::Ask, None);
         let cancel_running = app.ai_header_presentation();
         assert!(cancel_running.running);
+        assert_eq!(cancel_running.conversation_title, "inspect");
         app.ai.cancel_chat_and_agent();
         assert!(
             cancel_launch
@@ -367,6 +372,12 @@ fn ai_header_running_transition_notifies_root() {
         let agent = app.ai_header_presentation();
         assert_ne!(ask.mode_label, agent.mode_label);
         assert!(agent.mode_label.contains("ZzClawTerm"));
+        assert_eq!(agent.conversation_title, "inspect");
+        let before_new = app.ai_header_presentation();
+        app.start_new_ai_chat(cx);
+        let new_chat = app.ai_header_presentation();
+        assert_eq!(new_chat.conversation_title, rust_i18n::t!("ai.newChat"));
+        assert!(app.notify_root_if_ai_header_changed(before_new, cx));
     });
 }
 
@@ -636,6 +647,25 @@ fn ai_prompt_grows_with_its_lines_up_to_six_rows() {
     );
     assert!(three < four && four < six, "{three:?} {four:?} {six:?}");
     assert_eq!(six, many, "the prompt stops growing at six rows");
+}
+
+#[test]
+fn ai_composer_min_height_raises_the_prompt_box() {
+    let root = TestConfigDir::new("zzclawterm-ai-composer-floor");
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let (app, vcx) = compact_host(&mut cx, root.path());
+    let natural = vcx.debug_bounds("ai-prompt").unwrap().size.height;
+    let floor = natural + px(120.);
+
+    edit_panel_snapshot(&app, vcx, |snapshot| {
+        snapshot.composer_min_height = f32::from(floor);
+    });
+    let raised = vcx.debug_bounds("ai-prompt").unwrap().size.height;
+    assert_eq!(
+        raised, floor,
+        "a dragged composer height pins the prompt box exactly"
+    );
 }
 
 fn assert_inside(outer: Bounds<Pixels>, inner: Bounds<Pixels>, what: &str) {
@@ -1441,7 +1471,7 @@ fn execution_disclosures_accept_keyboard_and_mouse_without_following_a_long_scri
                     launch.session_id,
                     Ok(AiChatJobOutput {
                         metadata: None,
-                        native_call: None,
+                        native_decision: None,
                         mode: AiMode::Agent,
                         text: "Inspect resources".into(),
                         reasoning: None,

@@ -109,8 +109,13 @@ impl ZzClawTermApp {
                         return;
                     }
                 }
-                // The settings surface owns its own focus targets.
-                crate::models::WorkspaceTabId::Settings => return,
+                crate::models::WorkspaceTabId::Settings => {
+                    let focus = self.settings_panel.read(cx).focus_handle(cx);
+                    if !focus.contains_focused(window, cx) {
+                        window.focus(&focus, cx);
+                    }
+                    return;
+                }
                 crate::models::WorkspaceTabId::Session(_) => {}
             }
         }
@@ -153,7 +158,11 @@ impl ZzClawTermApp {
                         SessionLaunchConfig::Telnet(config) => Some((&config.host, config.port)),
                         SessionLaunchConfig::Rdp(config) => Some((&config.host, config.port)),
                         SessionLaunchConfig::Vnc(config) => Some((&config.host, config.port)),
-                        SessionLaunchConfig::Local(_) | SessionLaunchConfig::Serial(_) => None,
+                        SessionLaunchConfig::AdbShell(_)
+                        | SessionLaunchConfig::AdbFiles(_)
+                        | SessionLaunchConfig::AdbScreen(_)
+                        | SessionLaunchConfig::Local(_)
+                        | SessionLaunchConfig::Serial(_) => None,
                     }
                     .map(|(host, port)| (host.clone(), port))
                 }),

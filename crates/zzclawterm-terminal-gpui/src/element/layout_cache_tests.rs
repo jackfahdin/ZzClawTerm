@@ -29,7 +29,6 @@ use crate::contrast::{TerminalContrastCache, TerminalContrastOverlays, contrast_
 use crate::glyphs::CellGlyph;
 use crate::keywords::{
     TerminalKeywordHighlightLookup, compile_terminal_keyword_highlighter,
-    precompute_terminal_input_highlights, precompute_terminal_input_highlights_reusing,
     precompute_terminal_keyword_highlights, terminal_keyword_row_reuse_keys,
     terminal_keyword_rules_key,
 };
@@ -51,8 +50,13 @@ fn edit_snapshot_row(
 #[test]
 fn current_keyword_layout_key_changes_when_osc133_changes_identical_text() {
     let palette = zzclawterm_ui::theme_palette("github-dark");
-    let highlighter =
-        compile_terminal_keyword_highlighter(&zzclawterm_core::get_builtin_keyword_rules(true));
+    let highlighter = compile_terminal_keyword_highlighter(
+        &zzclawterm_core::get_builtin_keyword_rules(true),
+        crate::keywords::TerminalKeywordHighlightConfig {
+            line_roles: true,
+            ansi: zzclawterm_ui::theme_palette("github-dark").terminal_ansi,
+        },
+    );
     let mut screen = TerminalScreen::new(30, 2);
     screen.advance(b"ERROR");
     let output = screen.snapshot();
@@ -1553,7 +1557,13 @@ fn precomputed_keyword_match_does_not_reuse_plain_pending_row() {
         color: "#ff0000".to_string(),
         enabled: true,
     }];
-    let highlighter = compile_terminal_keyword_highlighter(&rules);
+    let highlighter = compile_terminal_keyword_highlighter(
+        &rules,
+        crate::keywords::TerminalKeywordHighlightConfig {
+            line_roles: true,
+            ansi: zzclawterm_ui::theme_palette("github-dark").terminal_ansi,
+        },
+    );
     let palette = zzclawterm_ui::theme_palette("github-dark");
     let highlights = Arc::new(precompute_terminal_keyword_highlights(
         &snapshot,
@@ -1602,7 +1612,13 @@ fn stale_keyword_prefix_is_painted_and_not_reused_as_the_final_parse() {
         color: "#ff2244".into(),
         enabled: true,
     }];
-    let highlighter = compile_terminal_keyword_highlighter(&rules);
+    let highlighter = compile_terminal_keyword_highlighter(
+        &rules,
+        crate::keywords::TerminalKeywordHighlightConfig {
+            line_roles: true,
+            ansi: zzclawterm_ui::theme_palette("github-dark").terminal_ansi,
+        },
+    );
     let palette = zzclawterm_ui::theme_palette("github-dark");
     let old = Arc::new(precompute_terminal_keyword_highlights(
         &original,
@@ -1667,108 +1683,6 @@ fn stale_keyword_prefix_is_painted_and_not_reused_as_the_final_parse() {
 }
 
 #[test]
-fn no_wrap_keeps_output_colors_and_layout_while_input_batch_is_pending() {
-    let palette = zzclawterm_ui::theme_palette("github-dark");
-    let rules = vec![ResolvedKeywordHighlightRule {
-        id: "errors".into(),
-        name: "Errors".into(),
-        patterns: vec!["ERROR".into()],
-        color: "#ff2244".into(),
-        enabled: true,
-    }];
-    let highlighter = compile_terminal_keyword_highlighter(&rules);
-    let mut screen = TerminalScreen::new(8, 6);
-    screen.set_logical_line_snapshots(true);
-    screen.advance(b"ERROR ERROR ERROR ERROR\r\nOK\r\n$ ");
-    let original = screen.snapshot();
-    let old = Arc::new(precompute_terminal_keyword_highlights(
-        &original,
-        &highlighter,
-        palette,
-        None,
-    ));
-    let mut previous_input = None;
-    for echo in [b"l".as_slice(), b"s", b" --color=auto", b"\x08 \x08"] {
-        screen.advance(echo);
-        let snapshot = Arc::new(screen.snapshot());
-        assert!(!Arc::ptr_eq(&original.row_data, &snapshot.row_data));
-        let input = Arc::new(
-            precompute_terminal_input_highlights_reusing(
-                &snapshot,
-                &highlighter,
-                previous_input.as_deref(),
-            )
-            .unwrap(),
-        );
-        previous_input = Some(input.clone());
-        let current = Arc::new(precompute_terminal_keyword_highlights(
-            &snapshot,
-            &highlighter,
-            palette,
-            Some(&old),
-        ));
-        for horizontal_offset in [0.0, 8.5] {
-            let layout = Arc::new(
-                crate::unwrapped::TerminalUnwrappedLayout::new(&snapshot, 0, 6, horizontal_offset)
-                    .unwrap(),
-            );
-            assert!(layout.width_cols > layout.viewport_cols);
-            let make_element = || {
-                ZzClawTerminalElement::new(
-                    snapshot.clone(),
-                    Arc::new(Vec::new()),
-                    Vec::new(),
-                    false,
-                    "block",
-                    8.0,
-                    16.0,
-                    palette,
-                    "monospace".into(),
-                    14.0,
-                    400.0,
-                    700.0,
-                )
-                .with_unwrapped_layout(Some(layout.clone()))
-            };
-            let pending = make_element()
-                .with_keyword_highlights(old.clone())
-                .with_input_keyword_highlights(input.clone());
-            let batch_only = make_element().with_keyword_highlights(old.clone());
-            let parsed = make_element().with_keyword_highlights(current.clone());
-            let style_key = pending.paint_style_key(pending.keyword_rules_key());
-            let empty_key = pending.paint_style_key(0);
-            for segment in layout
-                .segments
-                .iter()
-                .filter(|segment| segment.display_row == 0)
-            {
-                let row = segment.source_row;
-                // No-wrap painting deliberately supplies no per-history-row
-                // key. The same unchanged output must retain its parsed colors.
-                assert_eq!(
-                    pending
-                        .keyword_highlight_lookup(row, None)
-                        .unwrap()
-                        .ranges(),
-                    parsed.keyword_highlight_lookup(row, None).unwrap().ranges(),
-                );
-                assert_eq!(
-                    pending.row_layout_cache_keys(row, style_key, empty_key, None),
-                    parsed.row_layout_cache_keys(row, style_key, empty_key, None),
-                );
-                assert_eq!(
-                    batch_only
-                        .keyword_highlight_lookup(row, None)
-                        .unwrap()
-                        .ranges(),
-                    parsed.keyword_highlight_lookup(row, None).unwrap().ranges(),
-                );
-            }
-        }
-    }
-}
-
-#[test]
 fn no_wrap_does_not_reuse_output_colors_after_its_wrapped_context_changes() {
     let palette = zzclawterm_ui::theme_palette("github-dark");
     let rules = vec![ResolvedKeywordHighlightRule {
@@ -1778,7 +1692,13 @@ fn no_wrap_does_not_reuse_output_colors_after_its_wrapped_context_changes() {
         color: "#ff2244".into(),
         enabled: true,
     }];
-    let highlighter = compile_terminal_keyword_highlighter(&rules);
+    let highlighter = compile_terminal_keyword_highlighter(
+        &rules,
+        crate::keywords::TerminalKeywordHighlightConfig {
+            line_roles: false,
+            ansi: zzclawterm_ui::theme_palette("github-dark").terminal_ansi,
+        },
+    );
     let mut screen = TerminalScreen::new(8, 4);
     screen.set_logical_line_snapshots(true);
     screen.advance(b"ERROR       ");
@@ -1812,135 +1732,6 @@ fn no_wrap_does_not_reuse_output_colors_after_its_wrapped_context_changes() {
     )
     .with_keyword_highlights(old);
     assert!(element.keyword_highlight_lookup(0, None).is_none());
-}
-
-#[test]
-fn paired_input_colors_override_late_batches_and_reuse_the_final_layout() {
-    let rules = zzclawterm_core::keyword_highlight_presets::get_builtin_keyword_rules(true);
-    let highlighter = compile_terminal_keyword_highlighter(&rules);
-    let palette = zzclawterm_ui::theme_palette("github-dark");
-    let mut screen = TerminalScreen::new(40, 3);
-    screen.advance(b"$ l");
-    let old = Arc::new(precompute_terminal_keyword_highlights(
-        &screen.snapshot(),
-        &highlighter,
-        palette,
-        None,
-    ));
-    let mut previous_input = None;
-    for echo in [
-        b"s".as_slice(),
-        b"\x08 \x08",
-        b"\x08 \x08",
-        b"\r\n$ ",
-        b"\r\n$ ",
-        b"\r\n$ ",
-        b"\r\n$ ",
-    ] {
-        screen.advance(echo);
-        let snapshot = Arc::new(screen.viewport_snapshot(0));
-        let input = Arc::new(
-            precompute_terminal_input_highlights_reusing(
-                &snapshot,
-                &highlighter,
-                previous_input.as_deref(),
-            )
-            .unwrap(),
-        );
-        previous_input = Some(input.clone());
-        let final_batch = Arc::new(precompute_terminal_keyword_highlights(
-            &snapshot,
-            &highlighter,
-            palette,
-            None,
-        ));
-        let make_element = || {
-            ZzClawTerminalElement::new(
-                snapshot.clone(),
-                Arc::new(Vec::new()),
-                Vec::new(),
-                false,
-                "block",
-                8.0,
-                16.0,
-                palette,
-                "monospace".into(),
-                14.0,
-                400.0,
-                700.0,
-            )
-        };
-        let pending = make_element()
-            .with_keyword_highlights(old.clone())
-            .with_input_keyword_highlights(input);
-        let complete = make_element().with_keyword_highlights(final_batch);
-        let style_key = pending.paint_style_key(pending.keyword_rules_key());
-        let empty_key = pending.paint_style_key(0);
-        for (row, reuse_key) in terminal_keyword_row_reuse_keys(&snapshot)
-            .into_iter()
-            .enumerate()
-        {
-            if !snapshot.row(row).unwrap().text.starts_with('$') {
-                continue;
-            }
-            assert_eq!(
-                pending
-                    .keyword_highlight_lookup(row, reuse_key)
-                    .unwrap()
-                    .ranges(),
-                complete
-                    .keyword_highlight_lookup(row, reuse_key)
-                    .unwrap()
-                    .ranges()
-            );
-            assert_eq!(
-                pending.row_layout_cache_keys(row, style_key, empty_key, reuse_key),
-                complete.row_layout_cache_keys(row, style_key, empty_key, reuse_key)
-            );
-        }
-    }
-}
-
-#[test]
-fn known_empty_input_result_suppresses_stale_command_colors() {
-    let rules = zzclawterm_core::keyword_highlight_presets::get_builtin_keyword_rules(true)
-        .into_iter()
-        .filter(|rule| rule.id == "builtin-command")
-        .collect::<Vec<_>>();
-    let highlighter = compile_terminal_keyword_highlighter(&rules);
-    let palette = zzclawterm_ui::theme_palette("github-dark");
-    let mut screen = TerminalScreen::new(40, 3);
-    screen.advance(b"$ l");
-    let old = Arc::new(precompute_terminal_keyword_highlights(
-        &screen.snapshot(),
-        &highlighter,
-        palette,
-        None,
-    ));
-    screen.advance(b"\x08 \x08");
-    let snapshot = Arc::new(screen.snapshot());
-    let input = Arc::new(precompute_terminal_input_highlights(&snapshot, &highlighter).unwrap());
-    let element = ZzClawTerminalElement::new(
-        snapshot.clone(),
-        Arc::new(Vec::new()),
-        Vec::new(),
-        false,
-        "block",
-        8.0,
-        16.0,
-        palette,
-        "monospace".into(),
-        14.0,
-        400.0,
-        700.0,
-    )
-    .with_keyword_highlights(old)
-    .with_input_keyword_highlights(input);
-    let lookup = element
-        .keyword_highlight_lookup(0, terminal_keyword_row_reuse_keys(&snapshot)[0])
-        .unwrap();
-    assert!(lookup.is_known_empty());
-    assert!(!lookup.is_stale());
 }
 
 #[test]
@@ -2221,6 +2012,39 @@ fn grid_selection_handles_empty_and_all_buffer_ranges() {
         terminal_selection_cols_for_snapshot_row(&snapshot, 0, Some(all)),
         None
     );
+}
+
+#[test]
+fn block_highlights_blank_tails_and_expands_wide_glyphs_per_row() {
+    let mut screen = TerminalScreen::new(8, 4);
+    screen.advance("a界z\r\nabc\r\n\r\na😀z".as_bytes());
+    let snapshot = screen.snapshot();
+    let mut selection = TerminalSelection::with_anchor_and_mode(
+        TerminalBufferCellPos::new(0, 2),
+        zzclawterm_terminal::selection::TerminalSelectionMode::Block,
+    );
+    selection.head = TerminalBufferCellPos::new(3, 4).into();
+    for selection in [
+        selection,
+        TerminalSelection {
+            anchor: selection.head,
+            head: selection.anchor,
+            ..selection
+        },
+    ] {
+        let grid = TerminalGridSelection::from_selection(selection);
+        assert_eq!(grid.mode, selection.mode);
+        for (row, expected) in [(0, (1, 4)), (1, (2, 4)), (2, (2, 4)), (3, (1, 4))] {
+            assert_eq!(
+                terminal_selection_cols_for_snapshot_row(&snapshot, row, Some(grid)),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            screen.text_for_selection(selection).unwrap().as_deref(),
+            Some("界z\nc \n  \n😀z")
+        );
+    }
 }
 
 #[test]
@@ -2547,6 +2371,7 @@ fn half_cell_grid_selection_paints_the_same_cells_that_are_copied() {
                 anchor,
                 head,
                 all_buffer: false,
+                mode: zzclawterm_terminal::selection::TerminalSelectionMode::Linear,
             };
             let grid = TerminalGridSelection::from_selection(selection);
             assert_eq!(
@@ -2924,4 +2749,60 @@ fn contrast_corrects_trailing_decorations_and_conceals_hidden_trailing_cells() {
             .iter()
             .any(|range| range.start == 3 && range.color == palette.terminal_selection)
     );
+}
+
+#[test]
+fn navigation_background_moves_without_selection_or_zebra_stripes() {
+    use crate::element::push_command_navigation_highlight;
+    use zzclawterm_terminal::command_navigation::CommandNavigationAction;
+    let mut terminal = TerminalScreen::new(40, 10);
+    for _ in 0..3 {
+        terminal.advance(
+            b"\x1b]133;A\x07$ \x1b]133;B\x07echo\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07",
+        );
+    }
+    let geometry = TerminalPaintGeometry {
+        bounds: Bounds::new(point(px(10.0), px(20.0)), size(px(400.0), px(200.0))),
+        cell_width: 10.0,
+        cell_height: 20.0,
+        visual_y_offset: 0.0,
+    };
+    let palette = zzclawterm_ui::theme_palette("github-dark");
+    let mut previous_top = None;
+    for _ in 0..3 {
+        terminal
+            .navigate_command(CommandNavigationAction::Previous)
+            .unwrap();
+        let snapshot = terminal.snapshot();
+        let mut quads = Vec::new();
+        for row in 0..snapshot.row_count() {
+            push_command_navigation_highlight(
+                &snapshot,
+                row,
+                snapshot.command_navigation_target,
+                palette,
+                geometry,
+                &mut quads,
+            );
+        }
+        assert_eq!(quads.len(), 1);
+        assert_ne!(previous_top, Some(quads[0].bounds.top()));
+        assert_eq!(quads[0].bounds.size.width, px(400.0));
+        assert!(snapshot.selection.is_none());
+        previous_top = Some(quads[0].bounds.top());
+    }
+    terminal.reset_command_navigation();
+    let snapshot = terminal.snapshot();
+    let mut quads = Vec::new();
+    for row in 0..snapshot.row_count() {
+        push_command_navigation_highlight(
+            &snapshot,
+            row,
+            snapshot.command_navigation_target,
+            palette,
+            geometry,
+            &mut quads,
+        );
+    }
+    assert!(quads.is_empty());
 }

@@ -42,7 +42,7 @@ fn start_tab_cancellation_retains_metadata_and_discards_the_old_worker_result() 
     );
     let mut request = starts.take_failed_for_retry("old").unwrap().pending;
     request.attempt = Default::default();
-    starts.begin_retry_preparation("new".into(), request);
+    starts.begin_preparation("new".into(), request);
     assert!(matches!(
         starts.take_event_request("old"),
         SessionStartEventRequest::Cancelled
@@ -58,20 +58,22 @@ fn start_tab_cancellation_releases_only_its_own_preparation_and_invalidates_call
         let mut starts = SessionStartFeatureState::new();
         let placement = starts.allocate_tab_placement(0);
         let other = starts.allocate_tab_placement(1);
-        starts.reserve_saved_connection_start(
-            "saved",
-            if owns_reservation { placement } else { other },
-        );
+        if !owns_reservation {
+            let mut sibling = pending("sibling");
+            sibling.source_connection_id = Some("saved".into());
+            sibling.tab_placement = Some(other);
+            starts.begin_preparation("sibling".into(), sibling);
+        }
         let mut request = pending("connection");
         request.tab_placement = Some(placement);
         request.source_connection_id = Some("saved".into());
-        starts.begin_retry_preparation("preparing".into(), request);
+        starts.begin_preparation("preparing".into(), request);
         let options = SavedConnectionStartOptions {
-            retry_request_id: Some("preparing".into()),
+            request_id: Some("preparing".into()),
             ..Default::default()
         };
         assert!(starts.cancel_pending("preparing", "cancelled".into()));
-        assert!(!starts.retry_is_pending(&options));
+        assert!(!starts.request_can_start(&options));
         assert_eq!(
             starts.saved_connection_is_preparing("saved"),
             !owns_reservation
@@ -104,9 +106,7 @@ fn start_tab_cancelled_worker_failure_cannot_replace_a_fresh_retry() {
             .unwrap()
             .pending;
         request.attempt = Default::default();
-        app.session
-            .start
-            .begin_retry_preparation("new".into(), request);
+        app.session.start.begin_preparation("new".into(), request);
         let now = Instant::now();
         app.apply_session_start_event(
             SessionStartResult {
@@ -203,10 +203,10 @@ fn start_tab_rename_follows_retry_and_success_without_changing_the_active_other_
             let failed = app.session.start.take_failed_for_retry("failed").unwrap();
             app.session
                 .start
-                .begin_retry_preparation("retry".into(), failed.pending);
+                .begin_preparation("retry".into(), failed.pending);
             let options = SavedConnectionStartOptions {
                 custom_name: Some("stale snapshot".into()),
-                retry_request_id: Some("retry".into()),
+                request_id: Some("retry".into()),
                 ..Default::default()
             };
             app.session
@@ -280,7 +280,7 @@ fn start_tab_actions_follow_state_and_configuration_and_never_fall_back_to_anoth
             let failed = app.session.start.take_failed_for_retry("failed").unwrap();
             app.session
                 .start
-                .begin_retry_preparation("retry".into(), failed.pending);
+                .begin_preparation("retry".into(), failed.pending);
             let expected = [false, true, true, false, false, false, false, true, true];
             for (action, enabled) in TAB_MOUSE_ACTIONS.iter().zip(expected) {
                 assert_eq!(
@@ -290,8 +290,8 @@ fn start_tab_actions_follow_state_and_configuration_and_never_fall_back_to_anoth
                 );
             }
             // A submitted worker can race with cancellation; preparation callbacks
-            // are covered separately by retry_is_pending.
-            app.session.start.finish_retry_preparation("retry");
+            // are covered separately by request_can_start.
+            app.session.start.pending.get_mut("retry").unwrap().preparing = false;
             app.run_tab_target_action(target.clone(), "disconnect_session", window, cx);
             assert!(app.session.start_request_cancelled("retry"));
             assert!(app.quick_switch_items().iter().any(|item| matches!(item,
@@ -406,7 +406,7 @@ fn start_tab_mouse_buttons_open_and_dismiss_menus_and_middle_click_can_close() {
         let failed = app.session.start.take_failed_for_retry("failed").unwrap();
         app.session
             .start
-            .begin_retry_preparation("retry".into(), failed.pending);
+            .begin_preparation("retry".into(), failed.pending);
         cx.notify();
     });
     cx.run_until_parked();
@@ -427,7 +427,7 @@ fn start_tab_mouse_buttons_open_and_dismiss_menus_and_middle_click_can_close() {
 }
 
 #[test]
-fn start_tab_duplicate_keeps_the_source_in_its_group_and_obeys_saved_connection_busy_guards() {
+fn start_tab_duplicate_and_retry_keep_the_source_group_while_a_sibling_is_connecting() {
     let root = TestConfigDir::new("zzclawterm-start-tab-duplicate");
     let mut cx = TestAppContext::single();
     let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -471,12 +471,23 @@ fn start_tab_duplicate_keeps_the_source_in_its_group_and_obeys_saved_connection_
             assert!(!app.session.start.failed(duplicate).unwrap().pending.locked);
             let source = app.session.start.failed.get_mut("failed").unwrap();
             source.pending.source_connection_id = Some("saved".into());
+            let saved = serde_json::from_value(serde_json::json!({
+                "id":"saved", "name":"saved local", "type":"local_terminal", "encoding":"invalid-test-encoding"
+            })).unwrap();
+            app.connection_state.replace_loaded(vec![saved], Vec::new());
             let mut other = pending("another");
             other.source_connection_id = Some("saved".into());
             app.session.start.register_pending("busy".into(), other);
-            assert!(!app.tab_target_action_enabled(&target, "duplicate_session"));
-            assert!(!app.tab_target_action_enabled(&target, "reconnect_session"));
-            app.run_tab_target_action(target, "duplicate_session", window, cx);
+            assert!(app.tab_target_action_enabled(&target, "duplicate_session"));
+            assert!(app.tab_target_action_enabled(&target, "reconnect_session"));
+            let before = app.session_strip_tabs(&None).len();
+            app.run_tab_target_action(target.clone(), "duplicate_session", window, cx);
+            assert_eq!(app.session_strip_tabs(&None).len(), before + 1);
+            assert_eq!(app.session.start.pending_count(), 1);
+            app.run_tab_target_action(target.clone(), "reconnect_session", window, cx);
+            assert_eq!(app.session_strip_tabs(&None).len(), before + 1);
+            assert!(app.session.start_action_request(&target).unwrap().2.is_some());
+            assert!(app.session.start.attempt("busy").check().is_ok());
             assert_eq!(app.session.start.pending_count(), 1);
         })
     });
@@ -501,7 +512,7 @@ fn start_tab_double_click_respects_settings_and_close_buttons_stop_propagation()
                 let failed = app.session.start.take_failed_for_retry("target").unwrap();
                 app.session
                     .start
-                    .begin_retry_preparation("target".into(), failed.pending);
+                    .begin_preparation("target".into(), failed.pending);
             }
             app.settings.set_tab_double_click_action(action.into());
             app.sync_component_theme(cx);
@@ -550,6 +561,175 @@ fn start_tab_double_click_respects_settings_and_close_buttons_stop_propagation()
             }
         });
     }
+}
+
+#[test]
+fn tab_rename_dialog_focuses_and_selects_all_once_when_opened_from_the_context_menu() {
+    use zzclawterm_ui::ZzClawDialogWindowExt as _;
+
+    let root = TestConfigDir::new("zzclawterm-tab-rename-focus");
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "target");
+    app.update(&mut cx, |app, cx| {
+        app.settings.set_tab_right_click_action("none".into());
+        app.sync_component_theme(cx);
+    });
+    let fixture_app = app.clone();
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let content = cx.new(move |cx| {
+            cx.observe(&fixture_app, |_, _, cx| cx.notify()).detach();
+            StartTabActionsHost { app: fixture_app }
+        });
+        zzclawterm_ui::zzclaw_root(content, window, cx)
+    });
+    let target = TabActionTarget::Session("target".into());
+    for name in ["172.16.0.100", "服务器标签"] {
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                assert!(app.session.rename_tab_target(&target, name.into()));
+                window.focus(app.terminal.input_focus(), cx);
+                cx.notify();
+            });
+            let _ = window.draw(cx);
+        });
+        let tab = cx.debug_bounds("session-tab-target").unwrap();
+        cx.simulate_mouse_down(tab.center(), MouseButton::Right, Default::default());
+        cx.simulate_mouse_up(tab.center(), MouseButton::Right, Default::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let rename = cx.debug_bounds("tab-ctx-rename").unwrap();
+        cx.simulate_click(rename.center(), Default::default());
+        cx.run_until_parked();
+        let input = cx.update(|window, cx| {
+            let _ = window.draw(cx);
+            let input = app.read(cx).existing_text_input("session.rename").unwrap();
+            assert!(input.read(cx).component_focus_handle(cx).is_focused(window));
+            let component = input.read(cx).component_state().unwrap();
+            assert_eq!(component.read(cx).selected_range(), 0..name.len());
+            input
+        });
+        cx.simulate_input("新名称");
+        cx.run_until_parked();
+        cx.simulate_keystrokes("home");
+        cx.update(|window, cx| {
+            assert_eq!(input.read(cx).value(cx), "新名称");
+            assert_eq!(app.read(cx).session.dialogs.rename_draft(), "新名称");
+            app.update(cx, |_, cx| cx.notify());
+            let _ = window.draw(cx);
+            let component = input.read(cx).component_state().unwrap();
+            assert_eq!(component.read(cx).selected_range(), 0..0);
+        });
+        cx.simulate_keystrokes("tab");
+        cx.update(|window, cx| {
+            assert!(!input.read(cx).component_focus_handle(cx).is_focused(window));
+        });
+        cx.simulate_keystrokes("shift-tab");
+        cx.update(|window, cx| {
+            assert!(input.read(cx).component_focus_handle(cx).is_focused(window));
+            let _ = window.draw(cx);
+        });
+        let save = cx.debug_bounds("nya-dialog-action-button").unwrap();
+        cx.simulate_click(save.center(), Default::default());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert_eq!(app.read(cx).session.custom_name("target"), Some("新名称"));
+            assert!(!window.has_active_nya_dialog(cx));
+            app.update(cx, |app, cx| {
+                app.open_rename_tab_target(target.clone(), window, cx);
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+            let reopened = app.read(cx).existing_text_input("session.rename").unwrap();
+            assert_ne!(input, reopened);
+            assert!(
+                reopened
+                    .read(cx)
+                    .component_focus_handle(cx)
+                    .is_focused(window)
+            );
+            let component = reopened.read(cx).component_state().unwrap();
+            assert_eq!(component.read(cx).selected_range(), 0.."新名称".len());
+        });
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            assert!(!window.has_active_nya_dialog(cx));
+            assert!(app.read(cx).existing_text_input("session.rename").is_none());
+            assert_eq!(app.read(cx).session.custom_name("target"), Some("新名称"));
+        });
+    }
+}
+
+#[test]
+fn tab_rename_deferred_focus_skips_closed_inputs_and_dialogs_covered_by_another_modal() {
+    use gpui::IntoElement as _;
+    use zzclawterm_ui::ZzClawDialogWindowExt as _;
+
+    let root = TestConfigDir::new("zzclawterm-tab-rename-deferred-focus");
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "target");
+    app.update(&mut cx, |app, cx| app.sync_component_theme(cx));
+    let fixture_app = app.clone();
+    let (_, cx) = cx.add_window_view(move |window, cx| {
+        let content = cx.new(move |cx| {
+            cx.observe(&fixture_app, |_, _, cx| cx.notify()).detach();
+            StartTabActionsHost { app: fixture_app }
+        });
+        zzclawterm_ui::zzclaw_root(content, window, cx)
+    });
+    let closed_input = cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.open_rename_session("target".into(), window, cx);
+            let input = app.existing_text_input("session.rename").unwrap();
+            app.close_rename_session(cx);
+            window.close_nya_dialog(cx);
+            app.open_rename_session("target".into(), window, cx);
+            input
+        })
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        assert!(closed_input.read(cx).component_state().is_none());
+        let input = app.read(cx).existing_text_input("session.rename").unwrap();
+        assert_ne!(closed_input, input);
+        assert!(input.read(cx).component_focus_handle(cx).is_focused(window));
+        app.update(cx, |app, cx| {
+            app.close_rename_session(cx);
+            window.close_nya_dialog(cx);
+        });
+    });
+    let covered_input = cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.open_rename_session("target".into(), window, cx);
+            let input = app.existing_text_input("session.rename").unwrap();
+            app.open_content_dialog(
+                "Another dialog".into(),
+                320.,
+                |_, _, _| gpui::div().into_any_element(),
+                |_, _| {},
+                window,
+                cx,
+            );
+            input
+        })
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        assert!(
+            !covered_input
+                .read(cx)
+                .component_focus_handle(cx)
+                .is_focused(window)
+        );
+        app.update(cx, |app, cx| app.close_rename_session(cx));
+        window.close_all_nya_dialogs(cx);
+    });
 }
 
 #[test]

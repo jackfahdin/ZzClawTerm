@@ -1,37 +1,46 @@
-use super::{
-    FindSearchJob, SELECTED_OCCURRENCE_SEARCH_CHUNK_ROWS, SelectedOccurrenceSearchJob,
-    TERMINAL_FRAME_COMMAND_QUEUE_CAP, TERMINAL_FRAME_EVENT_WAKE_ALL,
-    TERMINAL_FRAME_EVENT_WAKE_OUTPUT, TERMINAL_FRAME_EVENT_WAKE_SEARCH,
-    TERMINAL_FRAME_EVENT_WAKE_SNAPSHOT, TERMINAL_FRAME_OUTPUT_BURST_BYTE_LIMIT,
-    TERMINAL_FRAME_OUTPUT_CHUNK_SIZE, TERMINAL_FRAME_OUTPUT_COALESCE_BYTE_LIMIT,
-    TERMINAL_FRAME_VISIBLE_TEXT_TAIL_CAP, TERMINAL_OUTPUT_VISIBLE_BACKLOG_CAP,
-    TERMINAL_PERFORMANCE_RECOVERY_NOTICE, TERMINAL_RENDER_DEGRADATION_RECOVERY_CALM,
-    TERMINAL_SCROLLBACK_SNAPSHOT_CACHE_LIMIT, TERMINAL_UI_OUTPUT_TAIL_CAP, TerminalDecorationCache,
-    TerminalFrameActionLinks, TerminalFrameCommand, TerminalFrameEvent, TerminalFrameEventQueue,
-    TerminalFrameEventQueuePushOutcome, TerminalFrameOutputBatch, TerminalFrameOutputEvent,
-    TerminalFrameOutputSubmission, TerminalFrameParts, TerminalFramePipeline,
-    TerminalFrameSearchEvent, TerminalFrameSearchKey, TerminalFrameSearchPurpose,
-    TerminalFrameSearchResult, TerminalFrameSession, TerminalFrameSnapshotEvent,
-    TerminalFrameSnapshotPurpose, TerminalPerformanceMode, TerminalPerformanceOverlay,
-    TerminalPresentation, TerminalProtocolState, TerminalRenderCache, TerminalViewState,
-    TerminalWorkPolicy, append_terminal_ui_output_tail, coalesce_terminal_frame_output_command,
+use super::frame_commands::{
+    TERMINAL_FRAME_COMMAND_QUEUE_CAP, TERMINAL_FRAME_OUTPUT_CHUNK_SIZE, TerminalFrameCommand,
     compact_stale_terminal_frame_commands, compact_terminal_frame_command_queue,
-    next_terminal_frame_command, prepare_terminal_frame_action_links,
-    prepare_terminal_frame_action_links_reusing, process_next_find_search_chunk,
-    process_next_selected_occurrence_search_chunk, process_terminal_frame_output_burst,
-    protect_terminal_output_burst, replace_selected_occurrence_search_job,
-    terminal_expensive_interactions_enabled, terminal_frame_command_channel,
-    terminal_frame_output_commands, terminal_frame_scroll_window_extra_rows,
-    terminal_frame_search_result_is_current, terminal_frame_snapshot_with_scroll_window,
-    terminal_line_decorations_estimated_bytes, terminal_snapshot_matches_grid_geometry,
+    terminal_frame_command_channel,
+};
+use super::frame_events::{
+    TERMINAL_FRAME_EVENT_WAKE_ALL, TERMINAL_FRAME_EVENT_WAKE_OUTPUT,
+    TERMINAL_FRAME_EVENT_WAKE_SEARCH, TERMINAL_FRAME_EVENT_WAKE_SNAPSHOT, TerminalFrameEvent,
+    TerminalFrameEventQueue, TerminalFrameEventQueuePushOutcome, TerminalFrameOutputEvent,
+    TerminalFrameSearchEvent, TerminalFrameSnapshotEvent, TerminalFrameSnapshotPurpose,
+};
+use super::frame_pipeline::{
+    TerminalFrameOutputSubmission, TerminalFramePipeline, terminal_frame_output_commands,
+};
+use super::frame_search::{
+    FindSearchJob, SELECTED_OCCURRENCE_SEARCH_CHUNK_ROWS, SelectedOccurrenceSearchJob,
+    TerminalFrameSearchKey, TerminalFrameSearchPurpose, TerminalFrameSearchResult,
+    process_next_find_search_chunk, process_next_selected_occurrence_search_chunk,
+    replace_selected_occurrence_search_job, terminal_frame_search_result_is_current,
+};
+use super::frame_worker::{
+    TERMINAL_FRAME_OUTPUT_BURST_BYTE_LIMIT, TERMINAL_FRAME_OUTPUT_COALESCE_BYTE_LIMIT,
+    TerminalFrameOutputBatch, TerminalFrameSession, coalesce_terminal_frame_output_command,
+    next_terminal_frame_command, process_terminal_frame_output_burst,
     try_next_terminal_frame_command,
 };
+use super::{
+    TERMINAL_FRAME_VISIBLE_TEXT_TAIL_CAP, TERMINAL_OUTPUT_VISIBLE_BACKLOG_CAP,
+    TERMINAL_PERFORMANCE_RECOVERY_NOTICE, TERMINAL_RENDER_DEGRADATION_RECOVERY_CALM,
+    TERMINAL_SCROLLBACK_SNAPSHOT_CACHE_LIMIT, TERMINAL_UI_OUTPUT_TAIL_CAP,
+    TerminalFrameActionLinks, TerminalFrameParts, TerminalPerformanceMode,
+    TerminalPerformanceOverlay, TerminalPresentation, TerminalProtocolState, TerminalViewState,
+    TerminalWorkPolicy, append_terminal_ui_output_tail, protect_terminal_output_burst,
+    terminal_expensive_interactions_enabled, terminal_frame_scroll_window_extra_rows,
+    terminal_frame_snapshot_with_scroll_window, terminal_snapshot_matches_grid_geometry,
+};
 use crate::models::recording::RecordingWritePipeline;
-use crate::terminal::{TerminalLineDecorations, terminal_screen_from_output};
+use crate::terminal::terminal_screen_from_output;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zzclawterm_core::ActionLinksMatcherSettings;
+use zzclawterm_terminal::action_links::prepare_terminal_frame_action_links;
 use zzclawterm_terminal::{
     TerminalEffects, TerminalOutputDecoder, TerminalScreen, TerminalSearchDirection,
     TerminalSearchQuery, TerminalSnapshot,
@@ -58,104 +67,6 @@ fn frame_worker_wrap_preference_applies_to_created_seeded_and_transferred_sessio
         assert!(session.screen.snapshot().logical_lines.is_none());
         assert_eq!((session.screen.cols(), session.screen.rows()), geometry);
     }
-}
-
-#[test]
-fn frame_worker_publishes_input_colors_with_each_echo_and_obeys_rule_changes() {
-    let mut recording = RecordingWritePipeline::spawn(4096);
-    let mut pipeline = TerminalFramePipeline::spawn(recording.writer());
-    let rules =
-        Arc::new(zzclawterm_core::keyword_highlight_presets::get_builtin_keyword_rules(true));
-    pipeline.set_keyword_rules(rules.clone());
-    for echo in [b"$ l".as_slice(), b"s", b"\x08 \x08"] {
-        pipeline.submit_outputs(vec![TerminalFrameOutputSubmission {
-            session_id: "s1".into(),
-            data: echo.to_vec(),
-            encoding: "UTF-8".into(),
-            scrollback_limit: 100,
-            raw_already_captured: true,
-        }]);
-        pipeline.finish_pending_output().unwrap();
-        let mut events = VecDeque::new();
-        pipeline.drain_events_into(&mut events, usize::MAX);
-        let TerminalFrameEvent::Output(frame) = events.pop_front().unwrap() else {
-            panic!("output frame");
-        };
-        assert!(frame.snapshot.is_some());
-        let input = frame.input_highlights.unwrap();
-        assert_eq!(
-            input.rules_key(),
-            zzclawterm_terminal_gpui::terminal_keyword_rules_key(&rules)
-        );
-        assert_eq!(input.known_row_count(), 1);
-        assert!(input.range_count() > 0);
-    }
-    pipeline.set_keyword_rules(Arc::new(Vec::new()));
-    pipeline.submit_outputs(vec![TerminalFrameOutputSubmission {
-        session_id: "s1".into(),
-        data: b"s".to_vec(),
-        encoding: "UTF-8".into(),
-        scrollback_limit: 100,
-        raw_already_captured: true,
-    }]);
-    pipeline.finish_pending_output().unwrap();
-    let mut events = VecDeque::new();
-    pipeline.drain_events_into(&mut events, usize::MAX);
-    let TerminalFrameEvent::Output(frame) = events.pop_front().unwrap() else {
-        panic!("output frame");
-    };
-    assert!(frame.input_highlights.is_none());
-    pipeline.shutdown();
-    recording.shutdown();
-}
-
-#[test]
-fn frame_worker_keeps_prior_prompt_colors_when_returns_arrive_before_keyword_batches() {
-    let mut recording = RecordingWritePipeline::spawn(4096);
-    let mut pipeline = TerminalFramePipeline::spawn(recording.writer());
-    let rules = zzclawterm_core::keyword_highlight_presets::get_builtin_keyword_rules(true)
-        .into_iter()
-        .filter(|rule| rule.id == "builtin-prompt")
-        .collect();
-    pipeline.set_keyword_rules(Arc::new(rules));
-    for echo in [
-        "[root@host dir]# ",
-        "\r",
-        "\n",
-        "[root@host dir]# ",
-        "\r\n[root@host dir]# ",
-        "\r\n[root@host dir]# ",
-    ] {
-        pipeline.submit_outputs(vec![TerminalFrameOutputSubmission {
-            session_id: "s1".into(),
-            data: echo.as_bytes().to_vec(),
-            encoding: "UTF-8".into(),
-            scrollback_limit: 100,
-            raw_already_captured: true,
-        }]);
-        pipeline.finish_pending_output().unwrap();
-        let mut events = VecDeque::new();
-        pipeline.drain_events_into(&mut events, usize::MAX);
-        let TerminalFrameEvent::Output(frame) = events.pop_front().unwrap() else {
-            panic!("output frame");
-        };
-        let snapshot = frame.snapshot.unwrap();
-        let input = frame.input_highlights.unwrap();
-        let mut prompts = 0;
-        for (row, source) in snapshot.rows().iter().enumerate() {
-            if source.text.starts_with("[root@host dir]#") {
-                assert!(input.matches_snapshot_rows(
-                    &snapshot,
-                    zzclawterm_ui::theme_palette("github-dark"),
-                    row..row + 1,
-                ));
-                prompts += 1;
-            }
-        }
-        assert_eq!(input.range_count(), prompts);
-    }
-    pipeline.shutdown();
-    recording.shutdown();
 }
 
 #[test]
@@ -296,61 +207,11 @@ fn terminal_presentation_work_policy_is_total_and_distinguishes_visible_inactive
     );
 }
 
-#[test]
-fn terminal_decoration_cache_reuses_shared_lines() {
-    let cache = TerminalRenderCache::default();
-    let first = cache.line_decorations(7, || {
-        vec![TerminalLineDecorations {
-            link_ranges: vec![(1, 3)],
-            ..TerminalLineDecorations::default()
-        }]
-    });
-    let second = cache.line_decorations(7, || panic!("cache hit should not rebuild"));
-
-    assert!(Arc::ptr_eq(&first, &second));
-    assert_eq!(cache.decoration_stats(), (1, 1));
-}
-
-#[test]
-fn terminal_decoration_cache_evicts_incrementally_by_lru() {
-    let mut cache = TerminalDecorationCache::default();
-    let build = || vec![TerminalLineDecorations::default()];
-
-    cache.line_decorations_with_limits(1, build, 2, usize::MAX);
-    cache.line_decorations_with_limits(2, build, 2, usize::MAX);
-    cache.line_decorations_with_limits(1, build, 2, usize::MAX);
-    cache.line_decorations_with_limits(3, build, 2, usize::MAX);
-
-    assert!(cache.decoration_lines.contains_key(&1));
-    assert!(!cache.decoration_lines.contains_key(&2));
-    assert!(cache.decoration_lines.contains_key(&3));
-    assert_eq!(cache.decoration_lines.len(), 2);
-}
-
-#[test]
-fn terminal_decoration_cache_respects_estimated_byte_budget() {
-    let sample = vec![TerminalLineDecorations {
-        search_ranges: vec![(1, 2); 8],
-        ..TerminalLineDecorations::default()
-    }];
-    let entry_bytes = terminal_line_decorations_estimated_bytes(&sample);
-    let mut cache = TerminalDecorationCache::default();
-
-    for key in 1..=3 {
-        cache.line_decorations_with_limits(key, || sample.clone(), 10, entry_bytes * 2);
-    }
-
-    assert!(cache.estimated_bytes <= entry_bytes * 2);
-    assert_eq!(cache.decoration_lines.len(), 2);
-    assert!(!cache.decoration_lines.contains_key(&1));
-}
-
 fn output_frame_with_sizes(
     accepted_bytes: usize,
     skipped_output_bytes: usize,
 ) -> TerminalFrameOutputEvent {
     TerminalFrameOutputEvent {
-        input_highlights: None,
         session_id: "s1".to_string(),
         visible_text: "x".to_string(),
         recording_text_bytes: 1,
@@ -596,48 +457,48 @@ fn terminal_view_unprotected_bytes_live_snapshot_keeps_scroll_window() {
 
 #[test]
 fn terminal_view_append_anchors_scrollback_when_output_adds_history() {
-    let mut view = TerminalViewState::from_output(terminal_output_lines(40));
+    let mut view = TerminalViewState::from_output(terminal_output_lines(120));
     let old_len = view.scrollback_len_for_ui();
-    assert!(old_len > 3);
-    view.scroll_offset = 3;
+    assert!(old_len > 32);
+    view.scroll_offset = 32;
     view.scrollback_snapshots
-        .insert(3, Arc::new(view.screen.viewport_snapshot(3)));
+        .insert(32, Arc::new(view.screen.viewport_snapshot(32)));
     view.scrollback_action_links
-        .insert(3, TerminalFrameActionLinks::default());
-    view.pending_snapshot_offsets.insert(3);
-    view.priority_pending_snapshot_offsets.insert(3);
+        .insert(32, TerminalFrameActionLinks::default());
+    view.pending_snapshot_offsets.insert(32);
+    view.priority_pending_snapshot_offsets.insert(32);
 
     view.append_text("new anchored line\n");
 
     let new_len = view.scrollback_len_for_ui();
     let delta = new_len.saturating_sub(old_len);
     assert!(delta > 0);
-    assert_eq!(view.scroll_offset, 3 + delta);
+    assert_eq!(view.scroll_offset, 32 + delta);
     assert!(view.has_new_while_scrolled);
-    assert!(!view.scrollback_snapshots.contains_key(&3));
+    assert!(!view.scrollback_snapshots.contains_key(&32));
     let remapped = view
         .scrollback_snapshots
-        .get(&(3 + delta))
+        .get(&(32 + delta))
         .expect("cached scrolled snapshot should be rekeyed");
-    assert_eq!(remapped.display_offset, 3 + delta);
+    assert_eq!(remapped.display_offset, 32 + delta);
     assert_eq!(remapped.scrollback_len, new_len);
-    assert!(view.scrollback_action_links.contains_key(&(3 + delta)));
+    assert!(view.scrollback_action_links.contains_key(&(32 + delta)));
     assert!(view.pending_snapshot_offsets.is_empty());
     assert!(view.priority_pending_snapshot_offsets.is_empty());
 }
 
 #[test]
 fn terminal_view_frame_apply_anchors_scrolled_offset() {
-    let old_screen = screen_from_line_count(40);
+    let old_screen = screen_from_line_count(120);
     let mut view = TerminalViewState::new();
     view.frame_snapshot = Some(Arc::new(old_screen.viewport_snapshot(0)));
     let old_len = view.scrollback_len_for_ui();
-    assert!(old_len > 4);
-    view.scroll_offset = 4;
+    assert!(old_len > 32);
+    view.scroll_offset = 32;
     view.scrollback_snapshots
-        .insert(4, Arc::new(old_screen.viewport_snapshot(4)));
+        .insert(32, Arc::new(old_screen.viewport_snapshot(32)));
 
-    let new_screen = screen_from_line_count(43);
+    let new_screen = screen_from_line_count(123);
     view.apply_terminal_frame_parts(TerminalFrameParts {
         visible_text: "",
         snapshot: Arc::new(new_screen.viewport_snapshot(0)),
@@ -651,33 +512,33 @@ fn terminal_view_frame_apply_anchors_scrolled_offset() {
     let new_len = view.scrollback_len_for_ui();
     let delta = new_len.saturating_sub(old_len);
     assert!(delta > 0);
-    assert_eq!(view.scroll_offset, 4 + delta);
-    assert!(view.scrollback_snapshots.contains_key(&(4 + delta)));
+    assert_eq!(view.scroll_offset, 32 + delta);
+    assert!(view.scrollback_snapshots.contains_key(&(32 + delta)));
 }
 
 #[test]
 fn terminal_view_live_snapshot_preserves_scrolled_cache() {
-    let old_screen = screen_from_line_count(40);
+    let old_screen = screen_from_line_count(120);
     let mut view = TerminalViewState::new();
     view.frame_snapshot = Some(Arc::new(old_screen.viewport_snapshot(0)));
     let old_len = view.scrollback_len_for_ui();
-    assert!(old_len > 4);
-    view.scroll_offset = 4;
+    assert!(old_len > 32);
+    view.scroll_offset = 32;
     view.scrollback_snapshots
-        .insert(4, Arc::new(old_screen.viewport_snapshot(4)));
-    view.pending_snapshot_offsets.insert(4);
-    view.priority_pending_snapshot_offsets.insert(4);
+        .insert(32, Arc::new(old_screen.viewport_snapshot(32)));
+    view.pending_snapshot_offsets.insert(32);
+    view.priority_pending_snapshot_offsets.insert(32);
 
-    let new_screen = screen_from_line_count(43);
+    let new_screen = screen_from_line_count(123);
     view.apply_terminal_live_snapshot_frame(Arc::new(new_screen.viewport_snapshot(0)), None, 2);
 
     let new_len = view.scrollback_len_for_ui();
     let delta = new_len.saturating_sub(old_len);
     assert!(delta > 0);
-    assert_eq!(view.scroll_offset, 4 + delta);
+    assert_eq!(view.scroll_offset, 32 + delta);
     assert!(view.has_new_while_scrolled);
-    assert!(!view.scrollback_snapshots.contains_key(&4));
-    assert!(view.scrollback_snapshots.contains_key(&(4 + delta)));
+    assert!(!view.scrollback_snapshots.contains_key(&32));
+    assert!(view.scrollback_snapshots.contains_key(&(32 + delta)));
     assert!(view.pending_snapshot_offsets.is_empty());
     assert!(view.priority_pending_snapshot_offsets.is_empty());
 }
@@ -811,16 +672,6 @@ fn terminal_priority_snapshot_event_covers_predictive_user_scroll_runs() {
         offset + fast_delta,
         viewport_rows
     ));
-}
-
-#[test]
-fn terminal_frame_scroll_window_extra_rows_covers_fast_scroll_runs() {
-    assert_eq!(terminal_frame_scroll_window_extra_rows(12, false), 32);
-    assert_eq!(terminal_frame_scroll_window_extra_rows(40, false), 80);
-    assert_eq!(terminal_frame_scroll_window_extra_rows(120, false), 192);
-    assert_eq!(terminal_frame_scroll_window_extra_rows(12, true), 64);
-    assert_eq!(terminal_frame_scroll_window_extra_rows(40, true), 120);
-    assert_eq!(terminal_frame_scroll_window_extra_rows(160, true), 256);
 }
 
 #[test]
@@ -1656,52 +1507,6 @@ fn terminal_view_backend_resize_detects_pixel_only_changes() {
 }
 
 #[test]
-fn terminal_protocol_state_encodes_sgr_mouse_report() {
-    let protocol = TerminalProtocolState {
-        mouse_reporting: true,
-        mouse_sgr: true,
-        ..TerminalProtocolState::default()
-    };
-
-    assert_eq!(
-        protocol.encode_mouse_report(0, 1, 2, true, false, false, false, false),
-        b"\x1b[<0;2;3M".to_vec()
-    );
-    assert_eq!(
-        protocol.encode_mouse_report(0, 1, 2, false, false, false, false, false),
-        b"\x1b[<0;2;3m".to_vec()
-    );
-}
-
-#[test]
-fn terminal_protocol_state_blocks_alternate_scroll_when_mouse_reporting() {
-    let protocol = TerminalProtocolState {
-        alternate_screen: true,
-        alternate_scroll: true,
-        mouse_reporting: true,
-        application_cursor_keys: true,
-        ..TerminalProtocolState::default()
-    };
-
-    assert_eq!(protocol.alternate_scroll_payload(1), None);
-}
-
-#[test]
-fn terminal_protocol_state_emits_alternate_scroll_payload() {
-    let protocol = TerminalProtocolState {
-        alternate_screen: true,
-        alternate_scroll: true,
-        application_cursor_keys: true,
-        ..TerminalProtocolState::default()
-    };
-
-    assert_eq!(
-        protocol.alternate_scroll_payload(1),
-        Some(b"\x1bOA".to_vec())
-    );
-}
-
-#[test]
 fn terminal_frame_event_queue_coalesces_pure_output_to_latest() {
     let queue = TerminalFrameEventQueue::new(8);
     let mut first = output_frame_with_sizes(1, 0);
@@ -1978,7 +1783,6 @@ fn the_drain_tasks_frame_interest_mask_covers_every_reply_kind() {
 
     let screen = TerminalScreen::default();
     queue.push(TerminalFrameEvent::Snapshot(TerminalFrameSnapshotEvent {
-        input_highlights: None,
         session_id: "s1".to_string(),
         offset: 1,
         snapshot: Arc::new(screen.snapshot()),
@@ -2007,7 +1811,6 @@ fn terminal_frame_event_queue_keeps_snapshot_wake_armed_across_output() {
 
     let screen = TerminalScreen::default();
     queue.push(TerminalFrameEvent::Snapshot(TerminalFrameSnapshotEvent {
-        input_highlights: None,
         session_id: "s1".to_string(),
         offset: 1,
         snapshot: Arc::new(screen.snapshot()),
@@ -2185,7 +1988,6 @@ fn terminal_frame_event_queue_delivers_snapshot_reply_after_critical_pressure() 
         let screen = TerminalScreen::default();
         let outcome =
             producer_queue.push(TerminalFrameEvent::Snapshot(TerminalFrameSnapshotEvent {
-                input_highlights: None,
                 session_id: "s1".to_string(),
                 offset: 0,
                 snapshot: Arc::new(screen.snapshot()),
@@ -2333,125 +2135,6 @@ fn terminal_frame_event_queue_drains_batch_with_limit() {
         Some(TerminalFrameEvent::Output(frame)) if frame.revision == 3
     ));
     assert_eq!(queue.len(), 0);
-}
-
-#[test]
-fn terminal_frame_action_links_align_with_snapshot_lines() {
-    let mut screen = TerminalScreen::default();
-    screen.advance_decoded_text("visit http://example.com\nping 10.0.0.1");
-    let snapshot = screen.viewport_snapshot(0);
-    let matchers = ActionLinksMatcherSettings::default();
-
-    let links = prepare_terminal_frame_action_links(&snapshot, true, &matchers).unwrap();
-    let absolute_end_row = snapshot.total_rows.saturating_sub(snapshot.display_offset);
-    let absolute_start_row = absolute_end_row.saturating_sub(snapshot.row_count());
-
-    assert_eq!(links.absolute_start_row, absolute_start_row);
-    assert_eq!(links.absolute_end_row, absolute_end_row);
-    assert_eq!(links.matches_by_line.len(), snapshot.row_count());
-    assert_eq!(links.cell_ranges_by_line.len(), snapshot.row_count());
-    assert!(
-        links
-            .matches_by_line
-            .iter()
-            .flatten()
-            .any(|item| item.value == "http://example.com")
-    );
-    assert!(
-        links
-            .cell_ranges_by_line
-            .iter()
-            .flatten()
-            .any(|range| *range == (6, 24))
-    );
-    assert!(
-        links
-            .matches_by_line
-            .iter()
-            .flatten()
-            .any(|item| item.value == "10.0.0.1")
-    );
-
-    let disabled = prepare_terminal_frame_action_links(&snapshot, false, &matchers).unwrap();
-    assert!(disabled.matches_by_line.iter().all(Vec::is_empty));
-    assert!(disabled.cell_ranges_by_line.iter().all(Vec::is_empty));
-    assert_ne!(links.matcher_key, disabled.matcher_key);
-}
-
-#[test]
-fn mac_ranges_map_wide_text_and_invalidate_only_when_the_matcher_changes() {
-    let mut screen = TerminalScreen::new(80, 3);
-    screen.advance_decoded_text("设备 [905d.7c16.b6d9]");
-    let snapshot = screen.viewport_snapshot(0);
-    let mut matchers = ActionLinksMatcherSettings::default();
-    let links = prepare_terminal_frame_action_links(&snapshot, true, &matchers).unwrap();
-    assert_eq!(
-        links.matches_by_line[0][0].kind,
-        crate::action_links::ActionLinkKind::Mac
-    );
-    assert_eq!(links.cell_ranges_by_line[0], [(6, 20)]);
-    let (_, stats) =
-        prepare_terminal_frame_action_links_reusing(&snapshot, true, &matchers, Some(&links));
-    assert_eq!(stats.reused_rows, snapshot.row_count());
-    assert_eq!(stats.rebuilt_rows, 0);
-    matchers.mac = false;
-    let (disabled, stats) =
-        prepare_terminal_frame_action_links_reusing(&snapshot, true, &matchers, Some(&links));
-    let disabled = disabled.unwrap();
-    assert_ne!(links.matcher_key, disabled.matcher_key);
-    assert_eq!(stats.reused_rows, 0);
-    assert_eq!(stats.rebuilt_rows, snapshot.row_count());
-    assert!(disabled.matches_by_line.iter().all(Vec::is_empty));
-    assert!(disabled.cell_ranges_by_line.iter().all(Vec::is_empty));
-}
-
-#[test]
-fn terminal_frame_action_links_reuse_unchanged_rows() {
-    let mut screen = TerminalScreen::new(80, 8);
-    screen.advance_decoded_text("visit http://example.com");
-    let first_snapshot = screen.viewport_snapshot(0);
-    let matchers = ActionLinksMatcherSettings::default();
-    let first = prepare_terminal_frame_action_links(&first_snapshot, true, &matchers).unwrap();
-
-    let (_, unchanged_stats) =
-        prepare_terminal_frame_action_links_reusing(&first_snapshot, true, &matchers, Some(&first));
-    assert_eq!(unchanged_stats.reused_rows, first_snapshot.row_count());
-    assert_eq!(unchanged_stats.rebuilt_rows, 0);
-
-    screen.advance_decoded_text(" updated");
-    let changed_snapshot = screen.viewport_snapshot(0);
-    let (_, changed_stats) = prepare_terminal_frame_action_links_reusing(
-        &changed_snapshot,
-        true,
-        &matchers,
-        Some(&first),
-    );
-    assert!(changed_stats.reused_rows > 0);
-    assert!(changed_stats.rebuilt_rows > 0);
-    assert_eq!(
-        changed_stats.reused_rows + changed_stats.rebuilt_rows,
-        changed_snapshot.row_count()
-    );
-}
-
-#[test]
-fn terminal_frame_action_link_matcher_change_rebuilds_all_rows() {
-    let mut screen = TerminalScreen::new(80, 8);
-    screen.advance_decoded_text("visit http://example.com and 10.0.0.1");
-    let snapshot = screen.viewport_snapshot(0);
-    let matchers = ActionLinksMatcherSettings::default();
-    let first = prepare_terminal_frame_action_links(&snapshot, true, &matchers).unwrap();
-    let mut changed_matchers = matchers.clone();
-    changed_matchers.ipv4 = false;
-
-    let (_, stats) = prepare_terminal_frame_action_links_reusing(
-        &snapshot,
-        true,
-        &changed_matchers,
-        Some(&first),
-    );
-    assert_eq!(stats.reused_rows, 0);
-    assert_eq!(stats.rebuilt_rows, snapshot.row_count());
 }
 
 #[test]
@@ -3388,6 +3071,7 @@ fn terminal_frame_command_queue_keeps_resize_when_output_intervenes() {
 fn terminal_frame_command_queue_runs_output_before_idle_snapshot() {
     let (tx, rx) = terminal_frame_command_channel();
     assert!(tx.send(TerminalFrameCommand::RequestSnapshot {
+        source_history: None,
         session_id: "s1".to_string(),
         offset: 0,
         action_links_enabled: false,
@@ -3422,6 +3106,7 @@ fn terminal_frame_command_queue_caps_rebuildable_render_requests() {
     let (tx, rx) = terminal_frame_command_channel();
     for offset in 0..TERMINAL_FRAME_COMMAND_QUEUE_CAP + 32 {
         assert!(tx.send(TerminalFrameCommand::RequestSnapshot {
+            source_history: None,
             session_id: format!("s{offset}"),
             offset,
             action_links_enabled: false,
@@ -3465,6 +3150,7 @@ fn terminal_frame_command_queue_prioritizes_user_scroll_snapshot() {
         },
     }));
     assert!(tx.send(TerminalFrameCommand::RequestSnapshot {
+        source_history: None,
         session_id: "s1".to_string(),
         offset: 12,
         action_links_enabled: false,
@@ -3503,6 +3189,7 @@ fn terminal_frame_command_priority_work_does_not_cross_fence() {
     let (complete_tx, _complete_rx) = std::sync::mpsc::sync_channel(0);
     assert!(tx.send(TerminalFrameCommand::Fence { complete_tx }));
     assert!(tx.send(TerminalFrameCommand::RequestSnapshot {
+        source_history: None,
         session_id: "s1".to_string(),
         offset: 7,
         action_links_enabled: false,
@@ -3571,6 +3258,7 @@ fn terminal_frame_command_queue_keeps_latest_user_scroll_target_per_session() {
     let (tx, rx) = terminal_frame_command_channel();
     for offset in [12, 24, 48] {
         assert!(tx.send(TerminalFrameCommand::RequestSnapshot {
+            source_history: None,
             session_id: "s1".to_string(),
             offset,
             action_links_enabled: false,
@@ -3593,9 +3281,36 @@ fn terminal_frame_command_queue_keeps_latest_user_scroll_target_per_session() {
 }
 
 #[test]
+fn terminal_frame_command_queue_coalesces_history_recovery_to_latest_anchor() {
+    let (tx, rx) = terminal_frame_command_channel();
+    let mut source = TerminalScreen::new(16, 3).history_state();
+    source.scrollback_len = 5000;
+    for scrolled in 0..100 {
+        source.scroll_count = scrolled;
+        assert!(tx.send(TerminalFrameCommand::RequestSnapshot {
+            source_history: Some(source),
+            session_id: "s1".into(),
+            offset: 256 + scrolled as usize,
+            action_links_enabled: false,
+            action_link_matchers: ActionLinksMatcherSettings::default(),
+            priority: false,
+            purpose: TerminalFrameSnapshotPurpose::Paint,
+        }));
+    }
+    assert_eq!(tx.len(), 1);
+    assert!(
+        matches!(rx.try_recv(), Some(TerminalFrameCommand::RequestSnapshot {
+        source_history: Some(history), offset: 355, ..
+    }) if history.scroll_count == 99)
+    );
+    assert!(rx.try_recv().is_none());
+}
+
+#[test]
 fn terminal_frame_command_queue_keeps_priority_snapshot_under_cap() {
     let (tx, rx) = terminal_frame_command_channel();
     assert!(tx.send(TerminalFrameCommand::RequestSnapshot {
+        source_history: None,
         session_id: "active".to_string(),
         offset: 9,
         action_links_enabled: false,
@@ -3605,6 +3320,7 @@ fn terminal_frame_command_queue_keeps_priority_snapshot_under_cap() {
     }));
     for offset in 0..TERMINAL_FRAME_COMMAND_QUEUE_CAP + 32 {
         assert!(tx.send(TerminalFrameCommand::RequestSnapshot {
+            source_history: None,
             session_id: format!("s{offset}"),
             offset,
             action_links_enabled: false,
@@ -3882,7 +3598,7 @@ fn decoded_output_is_an_ordering_barrier_and_uses_utf8_in_a_gbk_session() {
         1000,
         &recording.writer(),
     );
-    let decoded = super::terminal_advance_decoded_result(
+    let decoded = super::frame_worker::terminal_advance_decoded_result(
         &mut session.screen,
         "s1",
         "\x1b[31m😀\x1b[0m",
@@ -4013,7 +3729,7 @@ fn synthetic_command_blocks_preserve_order_without_recording_or_output_observers
 }
 
 #[test]
-fn full_history_output_reanchors_reading_and_invalidates_query_caches() {
+fn full_history_output_reanchors_reading_and_reuses_retained_query_rows() {
     let mut view = TerminalViewState::new();
     view.screen = TerminalScreen::new(16, 3);
     view.screen.set_scrollback_limit(8);
@@ -4031,11 +3747,16 @@ fn full_history_output_reanchors_reading_and_invalidates_query_caches() {
         view.screen.viewport_snapshot(5).line(0),
         Some(reading.as_str())
     );
-    assert!(view.scrollback_snapshots.is_empty());
+    assert_eq!(view.scrollback_snapshots.len(), 1);
+    assert!(Arc::ptr_eq(
+        &view.scrollback_snapshots[&5].row_data,
+        &old_snapshot.row_data
+    ));
     assert!(view.pending_snapshot_offsets.is_empty());
     assert!(view.priority_pending_snapshot_offsets.is_empty());
     view.remember_scrollback_snapshot(3, old_snapshot);
-    assert!(view.scrollback_snapshots.is_empty());
+    assert_eq!(view.scrollback_snapshots.len(), 1);
+    assert!(view.scrollback_snapshots.contains_key(&5));
 }
 
 #[test]

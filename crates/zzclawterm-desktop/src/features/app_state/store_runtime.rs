@@ -146,6 +146,12 @@ impl ZzClawTermApp {
     }
 
     pub(crate) fn shutdown_blocking_jobs(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        self.stop_mcp_background_operations(cx);
+        let mcp_shutdown = self
+            .mcp
+            .capabilities
+            .terminal_executions
+            .take_background_shutdown();
         self.plugins.shutdown(cx);
         self.ai.invalidate_provider_jobs();
         self.ai.cancel_all_chats_and_agents();
@@ -154,11 +160,11 @@ impl ZzClawTermApp {
         let stop_transfers = self.transfer.begin_bulk_shutdown();
         let ssh_connections = self.session.ssh_connection_pool();
         self.remote_desktop.routes.clear();
-        self.remote_desktop.prepared_routes.clear();
         // Kill the VcXsrv we spawned before the sessions it serves disappear;
         // a no-op off Windows or when the server was reused, never spawned.
         zzclawterm_transport::shutdown_managed_x11_server();
         self.shutdown_remote_desktop_workers();
+        self.android.shutdown();
         #[cfg(windows)]
         let native_hosts = self.remote_desktop.take_native_hosts_for_shutdown();
         let session_shutdown = self.session.take_shutdown();
@@ -209,6 +215,7 @@ impl ZzClawTermApp {
                 if let Some(worker) = agent_worker {
                     let _ = worker.join();
                 }
+                mcp_shutdown();
                 stop_jobs();
                 stop_transfers();
                 ssh_connections.finish_disconnects();

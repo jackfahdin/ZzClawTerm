@@ -44,13 +44,14 @@ impl ZzClawTermApp {
         let terminal_available = session.supports_terminal_actions()
             && self.terminal.session_output(session_id).is_some();
 
-        Some(TabActionPolicy::from_input(TabActionPolicyInput {
+        let mut policy = TabActionPolicy::from_input(TabActionPolicyInput {
             session,
             has_copyable_ssh_host: self.session.ssh_host(session_id).is_some(),
             has_source_connection: self.tab_action_can_show_session_info(session_id),
             is_busy,
             is_disconnected,
-            reconnect_pending: self.session.start_reconnect_is_pending(session_id),
+            reconnect_pending: self.session.start_reconnect_is_pending(session_id)
+                || self.remote_desktop.start_is_pending(session_id),
             // Session registration creates a terminal frame for launch configs with an
             // encoding. Check the in-memory view so a transiently unavailable terminal keeps
             // the AI submenu visible while its actions remain disabled.
@@ -59,7 +60,17 @@ impl ZzClawTermApp {
             locked: self.tab_tree_is_locked(tab_root_id),
             tab_count: tab_sessions.len(),
             tab_index,
-        }))
+        });
+        policy.availability.android_screen &= self
+            .android_config_for_session(session_id)
+            .is_some_and(|config| {
+                !self.android.pending.contains_key(&config.device_key)
+                    && self
+                        .android
+                        .file_service(&config.device_key)
+                        .is_ok_and(|files| files.control.check_cancelled().is_ok())
+            });
+        Some(policy)
     }
 
     pub(in crate::features) fn tab_actions_overlay(

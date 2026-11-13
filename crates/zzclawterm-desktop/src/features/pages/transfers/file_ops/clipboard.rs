@@ -1,8 +1,6 @@
 use crate::features::ZzClawTermApp;
 use crate::features::transfers::TransferFileClipboard;
-#[cfg(test)]
-use crate::features::transfers::clipboard_copy::copied_tree_matches;
-use crate::features::transfers::clipboard_copy::{ClipboardCopyRequest, run_clipboard_copy};
+use crate::features::transfers::clipboard_copy::file_operation_output;
 use crate::features::transfers::transfer_jobs::TransferProgressEventSender;
 use crate::models::{
     TransferJobEvent, TransferJobKind, TransferJobResult, TransferJobState, TransferJobStatus,
@@ -14,6 +12,7 @@ use zzclawterm_files::file_browser::{
     FileBrowserBackendKind, FileBrowserService, file_browser_copy_destination_invalid,
     file_browser_join, file_browser_name, file_browser_path_is_root,
 };
+use zzclawterm_files::operations::{VerifiedCopyRequest, copy_verified};
 use zzclawterm_files::sftp::{RemoteFilePath, SftpFileEntry, SftpFileType, SftpTransferControl};
 use zzclawterm_files::sftp_transfer_types::{
     SftpDuplicatePolicy, SftpDuplicateResolver, SftpPathTransferOptions,
@@ -315,20 +314,35 @@ impl ZzClawTermApp {
                 self.transfer
                     .track_cut_job(id.clone(), clipboard.generation, entry.path.clone());
             }
-            let request = ClipboardCopyRequest {
+            let request = VerifiedCopyRequest {
                 source_service: source_service.clone(),
                 target_service: target_service.clone(),
                 source: entry.remote_path(),
                 target_path: RemoteFilePath::new(target_path),
-                target_session_id: target_session_id.clone(),
                 cut: clipboard.cut,
                 control,
                 options: options.clone(),
             };
             let tx = self.transfer.transfer_event_sender();
+            let output_target_session_id = target_session_id.clone();
             self.submit_bulk_transfer_job("file-clipboard", id.clone(), tx.clone(), move || {
                 let mut progress = TransferProgressEventSender::new(id.clone(), tx.clone());
-                let result = run_clipboard_copy(request, move |value| progress.send(value));
+                let android = matches!(request.source_service, FileBrowserService::Adb(_))
+                    || matches!(request.target_service, FileBrowserService::Adb(_));
+                let cancelled = request.control.clone();
+                let result = copy_verified(request, move |value| progress.send(value))
+                    .map(|result| file_operation_output(result, output_target_session_id))
+                    .map_err(|error| {
+                        if cancelled.is_cancelled() {
+                            zzclawterm_files::sftp::SFTP_TRANSFER_CANCELLED.into()
+                        } else if android {
+                            crate::features::android::labels::file_error_message(
+                                &error.context(zzclawterm_files::adb::AdbFileError),
+                            )
+                        } else {
+                            error.to_string()
+                        }
+                    });
                 let _ = tx.unbounded_send(TransferJobResult {
                     id,
                     event: TransferJobEvent::Finished(result),
@@ -345,20 +359,20 @@ impl ZzClawTermApp {
 #[cfg(test)]
 mod tests {
     use super::{
-        TransferFileClipboard, copied_tree_matches, invalid_copy_destination,
-        local_clipboard_entry, prefer_external_paths,
+        TransferFileClipboard, invalid_copy_destination, local_clipboard_entry,
+        prefer_external_paths,
     };
-    use std::collections::BTreeMap;
     use std::path::PathBuf;
     use zzclawterm_files::file_browser::FileBrowserBackendKind;
     use zzclawterm_files::sftp::SftpFileType;
 
     #[test]
     fn clipboard_copy_reports_partial_progress_before_the_finished_output() {
-        use super::{ClipboardCopyRequest, run_clipboard_copy};
-        use crate::models::TransferJobOutput;
         use std::sync::{Arc, Mutex};
         use zzclawterm_files::file_browser::FileBrowserService;
+        use zzclawterm_files::operations::{
+            FileOperationResult, FileOperationSummary, VerifiedCopyRequest, copy_verified,
+        };
         use zzclawterm_files::sftp::{RemoteFilePath, SftpTransferControl};
         use zzclawterm_files::sftp_transfer_types::SftpPathTransferOptions;
 
@@ -370,13 +384,12 @@ mod tests {
         std::fs::write(&source, &payload).unwrap();
         let values = Arc::new(Mutex::new(Vec::new()));
         let record = values.clone();
-        let output = run_clipboard_copy(
-            ClipboardCopyRequest {
+        let output = copy_verified(
+            VerifiedCopyRequest {
                 source_service: FileBrowserService::local(),
                 target_service: FileBrowserService::local(),
                 source: RemoteFilePath::new(source.to_string_lossy()),
                 target_path: RemoteFilePath::new(target.to_string_lossy()),
-                target_session_id: "target".into(),
                 cut: false,
                 control: SftpTransferControl::new(),
                 options: SftpPathTransferOptions::default(),
@@ -385,7 +398,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(output, TransferJobOutput::Sent { bytes, .. } if bytes == payload.len() as u64)
+            matches!(output, FileOperationResult::Completed(FileOperationSummary { bytes, .. }) if bytes == payload.len() as u64)
         );
         let values = values.lock().unwrap();
         assert!(
@@ -402,9 +415,8 @@ mod tests {
 
     #[test]
     fn local_cut_deletes_source_only_after_a_successful_copy() {
-        use crate::features::transfers::clipboard_copy::ClipboardCopyRequest;
-        use crate::features::transfers::clipboard_copy::run_clipboard_copy;
         use zzclawterm_files::file_browser::FileBrowserService;
+        use zzclawterm_files::operations::{VerifiedCopyRequest, copy_verified};
         use zzclawterm_files::sftp::RemoteFilePath;
         use zzclawterm_files::sftp::SftpTransferControl;
         use zzclawterm_files::sftp_transfer_types::SftpPathTransferOptions;
@@ -415,13 +427,12 @@ mod tests {
         let source = canonical_root.join("source.txt");
         let target = canonical_root.join("target.txt");
         std::fs::write(&source, b"payload").unwrap();
-        run_clipboard_copy(
-            ClipboardCopyRequest {
+        copy_verified(
+            VerifiedCopyRequest {
                 source_service: FileBrowserService::local(),
                 target_service: FileBrowserService::local(),
                 source: RemoteFilePath::new(source.to_string_lossy()),
                 target_path: RemoteFilePath::new(target.to_string_lossy()),
-                target_session_id: "local".into(),
                 cut: true,
                 control: SftpTransferControl::new(),
                 options: SftpPathTransferOptions::default(),
@@ -435,9 +446,8 @@ mod tests {
 
     #[test]
     fn cancelled_cut_keeps_the_source() {
-        use crate::features::transfers::clipboard_copy::ClipboardCopyRequest;
-        use crate::features::transfers::clipboard_copy::run_clipboard_copy;
         use zzclawterm_files::file_browser::FileBrowserService;
+        use zzclawterm_files::operations::{VerifiedCopyRequest, copy_verified};
         use zzclawterm_files::sftp::RemoteFilePath;
         use zzclawterm_files::sftp::SftpTransferControl;
         use zzclawterm_files::sftp_transfer_types::SftpPathTransferOptions;
@@ -451,13 +461,12 @@ mod tests {
         std::fs::write(&source, b"keep-me").unwrap();
         let control = SftpTransferControl::new();
         control.cancel();
-        let result = run_clipboard_copy(
-            ClipboardCopyRequest {
+        let result = copy_verified(
+            VerifiedCopyRequest {
                 source_service: FileBrowserService::local(),
                 target_service: FileBrowserService::local(),
                 source: RemoteFilePath::new(source.to_string_lossy()),
                 target_path: RemoteFilePath::new(target.to_string_lossy()),
-                target_session_id: "local".into(),
                 cut: true,
                 control,
                 options: SftpPathTransferOptions::default(),
@@ -495,18 +504,6 @@ mod tests {
             "/other/file",
             true
         ));
-    }
-
-    #[test]
-    fn cut_verification_checks_every_file_not_only_total_bytes() {
-        let before = BTreeMap::from([
-            (String::new(), (SftpFileType::Directory, None, None)),
-            ("/a".into(), (SftpFileType::File, Some(3), Some(1))),
-        ]);
-        let mut after = before.clone();
-        assert!(copied_tree_matches(&before, &after));
-        after.insert("/a".into(), (SftpFileType::File, Some(2), Some(1)));
-        assert!(!copied_tree_matches(&before, &after));
     }
 
     #[test]

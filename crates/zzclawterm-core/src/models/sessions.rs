@@ -52,6 +52,8 @@ pub struct SavedConnection {
     pub post_login: Option<ConnectionPostLogin>,
     pub recording: Option<ConnectionRecordingSettings>,
     pub ssh_algorithms: Option<SshAlgorithmPreferences>,
+    /// Disable optional remote resource probes without restricting SSH channels.
+    pub ssh_compatibility_mode: bool,
     pub ssh_profile: SshProfile,
     pub terminal_type: Option<SshTerminalType>,
     pub sftp: SftpSettings,
@@ -102,6 +104,8 @@ struct SavedConnectionKnown {
     pub recording: Option<ConnectionRecordingSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_algorithms: Option<SshAlgorithmPreferences>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ssh_compatibility_mode: bool,
     #[serde(default, skip_serializing_if = "is_standard_ssh_profile")]
     pub ssh_profile: SshProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,6 +128,10 @@ struct SavedConnectionKnown {
     pub extensions: ConnectionExtensions,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 impl SavedConnection {
     /// Whether the icon may be replaced by one inferred from the remote system.
     ///
@@ -137,6 +145,7 @@ impl SavedConnection {
 
     pub fn kind_label(&self) -> &'static str {
         match self.config {
+            ConnectionType::Adb { .. } => "ADB",
             ConnectionType::Ssh { .. } => "SSH",
             ConnectionType::LocalTerminal { .. } => "Local",
             ConnectionType::Telnet { .. } => "Telnet",
@@ -148,6 +157,7 @@ impl SavedConnection {
 
     pub fn endpoint(&self) -> String {
         match &self.config {
+            ConnectionType::Adb { device, .. } => device.serial(),
             ConnectionType::Ssh {
                 host,
                 port,
@@ -305,6 +315,14 @@ impl<'de> Deserialize<'de> for SavedConnection {
             // These input-only aliases are handled by the established agent migration.
             fields.remove("agent_endpoint");
             fields.remove("agent_forwarding");
+            // This Android-only flag was removed before release; never revive it as opaque data.
+            if matches!(connection.config, ConnectionType::Adb { .. })
+                && let Some(screen) = fields
+                    .get_mut("screen")
+                    .and_then(serde_json::Value::as_object_mut)
+            {
+                screen.remove("view_only");
+            }
         }
         connection.extensions = ConnectionExtensions(extensions);
         Ok(connection)
@@ -321,6 +339,7 @@ fn omitted_fields(path: &str) -> &'static [&'static str] {
             "recording",
             "ssh_algorithms",
             "ssh_profile",
+            "ssh_compatibility_mode",
             "terminal_type",
             "sftp",
             "asset",

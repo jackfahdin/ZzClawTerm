@@ -67,6 +67,7 @@ impl ZzClawTermApp {
             sync_operations,
         } = process_entities;
         let session_manager = session_hub.manager();
+        let android_devices = session_hub.android_devices();
         let ssh_connections = session_hub.ssh_connections();
         zzclawterm_core::warm_terminal_input_tracker();
         let ZzClawTermStoreClients {
@@ -154,6 +155,7 @@ impl ZzClawTermApp {
         let transfer_panel_height = settings.ui_transfer_height as f32;
         let quick_cmd_height = settings.ui_quick_cmd_height as f32;
         let serial_send_height = settings.ui_serial_send_height as f32;
+        ActivityBarLayoutState::complete_settings_layout(&mut settings);
         let mut activity_bar_layout = ActivityBarLayoutState {
             left_top: settings.ui_activity_bar_left_top.clone(),
             left_bottom: settings.ui_activity_bar_left_bottom.clone(),
@@ -164,6 +166,10 @@ impl ZzClawTermApp {
         };
         activity_bar_layout.ensure_plugin_entry();
         activity_bar_layout.ensure_remote_monitor_entries();
+        activity_bar_layout.ensure_host_tool_entries();
+        settings.ui_activity_bar_left_top = activity_bar_layout.left_top.clone();
+        settings.ui_activity_bar_right_bottom = activity_bar_layout.right_bottom.clone();
+        settings.ui_activity_bar_hidden_items = activity_bar_layout.hidden_items.clone();
         settings.ui_activity_bar_right_top = activity_bar_layout.right_top.clone();
         settings.ui_activity_bar_left_bottom = activity_bar_layout.left_bottom.clone();
         let mut active_left_panel = settings
@@ -256,6 +262,11 @@ impl ZzClawTermApp {
         crate::shortcuts::rebuild_keymap(&settings.keybindings, cx);
 
         let blocking_jobs = crate::blocking_jobs::BlockingJobScheduler::new();
+        let host_tool_panels = crate::features::remote::HostToolPanels::new(
+            app_entity.downgrade(),
+            blocking_jobs.clone(),
+            cx,
+        );
         let send_command = SendCommandFeatureState::new(cx);
         cx.observe(&send_command.presentation(cx).hex, |_, _, cx| cx.notify())
             .detach();
@@ -299,6 +310,7 @@ impl ZzClawTermApp {
                 selected_category: settings.ui_quick_cmd_selected_category.clone(),
                 focus: QuickCommandFeatureFocus {
                     editor: cx.focus_handle(),
+                    category_trigger: cx.focus_handle(),
                     details: cx.focus_handle(),
                     variable: cx.focus_handle(),
                 },
@@ -369,7 +381,9 @@ impl ZzClawTermApp {
             ),
             remote_ops: RemoteOpsFeatureState::new(RemoteOpsFeatureFocus {}),
             remote_panels,
+            host_tool_panels,
             remote_desktop: RemoteDesktopFeatureState::new(cx.focus_handle()),
+            android: crate::features::android::AndroidFeatureState::new(android_devices),
             translation: TranslationFeatureState::new(translation_settings),
             update,
             cloud_sync: {
@@ -447,6 +461,9 @@ impl ZzClawTermApp {
             _test_config_dir: None,
         };
         app.update_custom_icons(custom_icons, cx);
+        // The cached settings panel starts on General, even before navigation
+        // opens it. Build that tab's input before publishing its first snapshot.
+        app.ensure_settings_tab_inputs(crate::models::SettingsTab::General, cx);
         app.sync_quick_command_selected_category(cx);
         app
     }
@@ -472,6 +489,9 @@ impl ZzClawTermApp {
         stores: crate::entities::UiStoreHandles,
         cx: &mut Context<Self>,
     ) -> Self {
+        // Tests bypass main(), which preloads the catalog on a dedicated worker
+        // before any view translates on the smaller Windows UI thread stack.
+        crate::preload_i18n().expect("preload translations for test app");
         let test_config_dir =
             crate::test_support::TestConfigDir::from_path(runtime.data_dir().to_path_buf());
         let store_runtime = StoreRuntime::spawn(StoreConfig {

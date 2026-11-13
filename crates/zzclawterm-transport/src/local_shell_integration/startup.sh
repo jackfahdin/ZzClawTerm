@@ -133,6 +133,9 @@ if [[ $ZZCLAWTERM_LOCAL_USER_ZDOTDIR_SET = x ]]; then
 else
     unset ZDOTDIR
 fi
+if [[ -n $ZZCLAWTERM_LOCAL_DIR && $HISTFILE == "$ZZCLAWTERM_LOCAL_DIR/.zsh_history" ]]; then
+    HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history
+fi
 [[ ! -r "${ZDOTDIR:-$HOME}/.zshrc" ]] || source "${ZDOTDIR:-$HOME}/.zshrc"
 __ZZCLAWTERM_ZSH_FULL__
 __zzclawterm_install_prompt full || true

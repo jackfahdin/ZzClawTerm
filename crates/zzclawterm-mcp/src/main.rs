@@ -36,7 +36,7 @@ impl ServerHandler for ZzClawTermMcp {
                 "zzclawterm-mcp",
                 env!("CARGO_PKG_VERSION"),
             ))
-            .with_instructions("Discover saved terminal connections, open sessions in ZzClawTerm, and operate scoped sessions. ZzClawTerm enforces session scope and approvals.")
+            .with_instructions("Use connection_list to discover saved hosts. When target parameters are advertised, prefer terminal_start with a connection target for noninteractive SSH commands and SFTP tools with the same target for file operations. Open a session only for an interactive terminal. ZzClawTerm enforces permissions and approvals.")
     }
 
     async fn call_tool(
@@ -47,7 +47,17 @@ impl ServerHandler for ZzClawTermMcp {
         if !self.tools.iter().any(|item| item.name == request.name) {
             return Err(McpError::invalid_params("Unknown ZzClawTerm tool", None));
         }
+        if matches!(
+            request.name.as_ref(),
+            tool::TERMINAL_START | tool::TERMINAL_POLL | tool::TERMINAL_STOP
+        ) && !self.bridge.supports_lifecycle()
+        {
+            return Ok(CallToolResult::structured_error(json!({"code":"unsupported_capability","message":"The connected ZzClawTerm Host does not support terminal jobs."})).into());
+        }
         let arguments = Value::Object(request.arguments.unwrap_or_default());
+        if arguments.get("target").is_some() && !self.bridge.supports_connection_targets() {
+            return Ok(CallToolResult::structured_error(json!({"code":"unsupported_capability","message":"The connected ZzClawTerm Host does not support execution targets."})).into());
+        }
         validate_tool_arguments(&request.name, &arguments)
             .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
         let result = match self
@@ -77,13 +87,59 @@ impl ServerHandler for ZzClawTermMcp {
         // MCP 2026-07-28 requires `ttlMs` and `cacheScope` on list results, and strict
         // clients reject `tools/list` without them. The tool set is per bridge session,
         // so the result is private and not cached.
-        Ok(ListToolsResult::with_all_items(self.tools.as_ref().clone())
-            .with_ttl_ms(0)
-            .with_cache_scope(CacheScope::Private))
+        Ok(ListToolsResult::with_all_items(
+            self.tools
+                .iter()
+                .filter_map(|item| self.get_tool(&item.name))
+                .collect(),
+        )
+        .with_ttl_ms(0)
+        .with_cache_scope(CacheScope::Private))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        self.tools.iter().find(|item| item.name == name).cloned()
+        let mut item = self.tools.iter().find(|item| item.name == name)?.clone();
+        let targets = self.bridge.supports_connection_targets();
+        item.input_schema = Arc::new(
+            zzclawterm_mcp_protocol::tool_input_schema_for_features(name, targets)
+                .ok()?
+                .as_object()?
+                .clone(),
+        );
+        item.output_schema =
+            zzclawterm_mcp_protocol::terminal_job_result_schema_for_features(name, targets)
+                .and_then(|schema| schema.as_object().cloned())
+                .map(Arc::new);
+        if !targets && name == tool::TERMINAL_START {
+            item.description = Some("Start a job in an existing scoped terminal session. Defaults to inline_pty; ssh_exec uses an independent channel. Use an idempotencyKey for retries.".into());
+        }
+        if !self.bridge.supports_lifecycle() {
+            if matches!(
+                name,
+                tool::TERMINAL_START | tool::TERMINAL_POLL | tool::TERMINAL_STOP
+            ) {
+                return None;
+            }
+            let mut schema = (*item.input_schema).clone();
+            if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+                match name {
+                    tool::SESSION_OPEN => {
+                        properties.remove("mode");
+                        properties.remove("idempotencyKey");
+                        item.description = Some(
+                            "Open a saved terminal connection as a new ZzClawTerm session.".into(),
+                        );
+                    }
+                    tool::TERMINAL_EXECUTE => {
+                        properties.remove("returnJob");
+                        properties.remove("idempotencyKey");
+                    }
+                    _ => {}
+                }
+            }
+            item.input_schema = std::sync::Arc::new(schema);
+        }
+        Some(item)
     }
 
     async fn on_initialized(&self, context: rmcp::service::NotificationContext<RoleServer>) {
@@ -116,6 +172,10 @@ fn build_tools() -> Vec<Tool> {
                 .expect("registered tool schema");
             let object = schema.as_object().cloned().unwrap_or_else(Map::new);
             let mut item = Tool::new(definition.tool, definition.description, object);
+            item.output_schema =
+                zzclawterm_mcp_protocol::terminal_job_result_schema(definition.tool)
+                    .and_then(|schema| schema.as_object().cloned())
+                    .map(std::sync::Arc::new);
             item.annotations = Some(
                 ToolAnnotations::new()
                     .read_only(definition.read_only_hint)
@@ -149,6 +209,34 @@ mod tests {
 
     use super::{BridgeEndpoint, ZzClawTermMcp, build_tools, structured_content};
 
+    #[test]
+    fn old_host_omits_new_tools_and_parameters_from_individual_tool_schemas() {
+        use rmcp::ServerHandler as _;
+        let server = ZzClawTermMcp::new(BridgeEndpoint::for_test(1));
+        assert!(server.get_tool(tool::TERMINAL_START).is_none());
+        assert!(server.get_tool(tool::TERMINAL_POLL).is_none());
+        assert!(server.get_tool(tool::TERMINAL_STOP).is_none());
+        let open = server.get_tool(tool::SESSION_OPEN).unwrap();
+        let props = open.input_schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("connectionId"));
+        assert!(!props.contains_key("mode") && !props.contains_key("idempotencyKey"));
+        let description = open.description.as_deref().unwrap();
+        assert!(!description.contains("reuse") && !description.contains("idempotencyKey"));
+        let execute = server.get_tool(tool::TERMINAL_EXECUTE).unwrap();
+        let props = execute.input_schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("command"));
+        assert!(!props.contains_key("returnJob") && !props.contains_key("idempotencyKey"));
+        for name in [tool::SFTP_HOME, tool::SFTP_LIST, tool::SFTP_WRITE_TEXT] {
+            let item = server.get_tool(name).unwrap();
+            assert!(item.input_schema["properties"].get("target").is_none());
+            assert!(
+                item.input_schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("sessionId"))
+            );
+        }
+    }
     #[test]
     fn sftp_list_structured_content_is_an_object() {
         assert_eq!(
@@ -216,6 +304,22 @@ mod tests {
             "string"
         );
         assert_eq!(session_open["annotations"]["readOnlyHint"], false);
+
+        for name in [
+            tool::TERMINAL_START,
+            tool::TERMINAL_POLL,
+            tool::TERMINAL_STOP,
+        ] {
+            let tool = tools.iter().find(|item| item.name == name).unwrap();
+            let value = serde_json::to_value(tool).unwrap();
+            assert_eq!(value["outputSchema"]["type"], "object");
+            for variant in value["outputSchema"]["anyOf"].as_array().unwrap() {
+                assert!(variant["properties"].get("jobId").is_some());
+                if name != tool::TERMINAL_START {
+                    assert!(variant["properties"].get("processState").is_some());
+                }
+            }
+        }
     }
 
     async fn send_client_message(writer: &mut WriteHalf<tokio::io::DuplexStream>, raw: &str) {

@@ -14,6 +14,8 @@ use zzclawterm_transport::{LocalSessionConfig, SessionInfo};
 use crate::features::{ZzClawTermApp, session::SavedConnectionStartOptions};
 use crate::models::{SessionLaunchConfig, WorkspacePaneNode, WorkspaceSplitDirection};
 
+mod focus;
+
 impl ZzClawTermApp {
     fn mark_startup_restore_complete(&mut self) {
         self.session.mark_restore_complete();
@@ -208,6 +210,9 @@ impl ZzClawTermApp {
             Some(SessionLaunchConfig::Serial(_)) => "Serial",
             Some(SessionLaunchConfig::Rdp(_)) => "RDP",
             Some(SessionLaunchConfig::Vnc(_)) => "VNC",
+            Some(SessionLaunchConfig::AdbShell(_)) => "adb_shell",
+            Some(SessionLaunchConfig::AdbFiles(_)) => "adb_files",
+            Some(SessionLaunchConfig::AdbScreen(_)) => "adb_screen",
             Some(SessionLaunchConfig::Local(_)) | None => "Local",
         }
         .to_string();
@@ -344,15 +349,7 @@ impl ZzClawTermApp {
             return;
         }
         self.try_restore_open_tabs(window, cx);
-        let pending_session_start = self.session.start_has_pending();
-        let should_pump = !self.session.restore_is_complete()
-            && self
-                .stores
-                .startup_restore
-                .update(cx, |store, _| store.can_pump_queue(pending_session_start));
-        if should_pump {
-            self.pump_startup_restore_queue(window, cx);
-        }
+        self.pump_startup_restore_queue_if_ready(window, cx);
     }
 
     pub(in crate::features) fn try_restore_open_tabs(
@@ -443,6 +440,7 @@ impl ZzClawTermApp {
                 store.push_pending_active_pane_index(index);
             }
             store.set_queue(expanded);
+            store.request_focus_handoff();
         });
         self.shell
             .set_status(format!("restoring {} workspace tab(s)...", queue_len));
@@ -458,13 +456,16 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let pending_session_start =
-            self.session.start_has_pending() || self.remote_desktop.restore_pending.is_some();
+        let pending_session_start = self.session.start_has_pending()
+            || !self.android.pending.is_empty()
+            || self.remote_desktop.restore_pending.is_some();
+        let session_start_busy =
+            self.session.start_is_busy() || self.remote_desktop.restore_pending.is_some();
         let should_pump = !self.session.restore_is_complete()
-            && self
-                .stores
-                .startup_restore
-                .update(cx, |store, _| store.can_pump_queue(pending_session_start));
+            && self.stores.startup_restore.update(cx, |store, _| {
+                store.can_pump_queue(pending_session_start)
+                    || store.can_finish_restore(session_start_busy)
+            });
         if !should_pump {
             return false;
         }
@@ -480,7 +481,10 @@ impl ZzClawTermApp {
         if self.session.restore_is_complete() {
             return;
         }
-        if self.session.start_has_pending() || self.remote_desktop.restore_pending.is_some() {
+        if self.session.start_has_pending()
+            || !self.android.pending.is_empty()
+            || self.remote_desktop.restore_pending.is_some()
+        {
             return;
         }
         let Some(tab) = self
@@ -488,7 +492,9 @@ impl ZzClawTermApp {
             .startup_restore
             .update(cx, |store, _| store.pop_next_tab())
         else {
-            self.finish_startup_restore(cx);
+            if !self.session.start_is_busy() {
+                self.finish_startup_restore(cx);
+            }
             return;
         };
 
@@ -738,6 +744,10 @@ impl ZzClawTermApp {
                     custom_name,
                     tab_color,
                     locked: tab.locked,
+                    android_view:
+                        zzclawterm_core::models::android::AndroidViewKind::from_restore_type(
+                            &session_type,
+                        ),
                     ..Default::default()
                 },
                 cx,
@@ -757,6 +767,10 @@ impl ZzClawTermApp {
                     custom_name,
                     tab_color,
                     locked: tab.locked,
+                    android_view:
+                        zzclawterm_core::models::android::AndroidViewKind::from_restore_type(
+                            &session_type,
+                        ),
                     ..Default::default()
                 },
                 cx,
@@ -820,12 +834,167 @@ fn parse_restorable_tab_color(value: Option<&str>) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    use crate::features::ZzClawTermApp;
     use crate::features::test_support::{
-        app_with_visible_local_session, session_focus_test_window,
+        app_with_visible_local_session, app_with_visible_ssh_session, session_focus_test_window,
     };
+    use crate::models::{SessionLaunchConfig, SessionRuntimeMetadata, TabDockEdge, TabDockZone};
     use crate::test_support::{TestAppCleanup, TestConfigDir};
     use gpui::TestAppContext;
-    use zzclawterm_core::{RestorableOpenTab, SavedConnection};
+    use zzclawterm_core::{
+        AiExecutionProfile, RestorableOpenTab, RestorableTerminalWindowNode, SavedConnection,
+        WorkspaceRestoreManifest, WorkspaceRestoreState,
+    };
+    use zzclawterm_store::ConnectionStore;
+    use zzclawterm_transport::SshSessionConfig;
+
+    fn register_restored_ssh(app: &mut ZzClawTermApp, id: &str, connection_id: &str) {
+        let config = SshSessionConfig {
+            name: id.to_string(),
+            host: "example.test".to_string(),
+            username: "tester".to_string(),
+            ..SshSessionConfig::default()
+        };
+        app.register_session(
+            id,
+            SessionRuntimeMetadata {
+                ssh_config: Some(config.clone()),
+                ssh_multiplex_key: None,
+                source_connection_id: Some(connection_id.to_string()),
+                ai_execution_profile: AiExecutionProfile::Posix,
+                launch_config: SessionLaunchConfig::Ssh(Box::new(config)),
+                disconnected: true,
+            },
+        );
+    }
+
+    #[test]
+    fn last_ssh_restore_completion_restores_persisted_split_after_restart() {
+        let source_root = TestConfigDir::new("zzclawterm-ssh-split-before-close");
+        let restore_root = TestConfigDir::new("zzclawterm-ssh-split-after-restart");
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let source = app_with_visible_ssh_session(&mut cx, source_root.path(), "before-left");
+        let workspace = source.update(&mut cx, |app, cx| {
+            let mut settings = app.settings.summary().clone();
+            settings.startup_restore = true;
+            settings.startup_restore_window_layout = true;
+            app.settings.replace_summary(settings);
+            app.session.mark_restore_complete();
+            app.shell.set_workspace_pane_layout_restored(true);
+            app.shell.complete_terminal_windows_restore();
+            app.session
+                .metadata_mut("before-left")
+                .unwrap()
+                .source_connection_id = Some("saved-left".to_string());
+            register_restored_ssh(app, "before-right", "saved-right");
+            let group = app.shell.terminal_group_for_tab("before-left").unwrap();
+            app.dock_tab_on_terminal_window_leaf(
+                "before-right".to_string(),
+                group,
+                TabDockZone::Edge(TabDockEdge::Right),
+                cx,
+            );
+            assert!(app.shell.terminal_windows_is_multi_leaf());
+            let mut workspace = WorkspaceRestoreState::empty(app.workspace_id);
+            app.capture_workspace_close_snapshot()
+                .apply_to(&mut workspace);
+            assert_eq!(workspace.sessions.open_tabs.len(), 2);
+            assert!(matches!(
+                workspace.sessions.terminal_window_layout,
+                Some(RestorableTerminalWindowNode::Split { .. })
+            ));
+            workspace
+        });
+
+        let config_dir = restore_root.path().join("config");
+        {
+            let store = ConnectionStore::open(&config_dir).unwrap();
+            let mut settings = store.load_app_settings_summary().unwrap();
+            settings.startup_restore = true;
+            settings.startup_restore_window_layout = true;
+            store.save_general_settings(&settings).unwrap();
+            store
+                .save_workspace_restore_manifest(&WorkspaceRestoreManifest::single(workspace))
+                .unwrap();
+        }
+        let saved = {
+            let store = ConnectionStore::open(&config_dir).unwrap();
+            let manifest = store.load_workspace_restore_manifest().unwrap();
+            manifest.most_recent().unwrap().sessions.clone()
+        };
+        assert!(matches!(
+            saved.terminal_window_layout,
+            Some(RestorableTerminalWindowNode::Split { .. })
+        ));
+
+        let restored = app_with_visible_ssh_session(&mut cx, restore_root.path(), "after-left");
+        restored.update(&mut cx, |app, cx| {
+            app.session
+                .metadata_mut("after-left")
+                .unwrap()
+                .source_connection_id = Some("saved-left".to_string());
+            app.stores.startup_restore.update(cx, |store, _| {
+                store.mark_open_tabs_restored();
+                store.set_loaded_window_layouts(
+                    saved.terminal_window_layout,
+                    saved.workspace_pane_layout,
+                );
+                store.set_queue(saved.open_tabs);
+                store.request_focus_handoff();
+                assert_eq!(
+                    store.pop_next_tab().unwrap().connection_id.as_deref(),
+                    Some("saved-left")
+                );
+                assert_eq!(
+                    store.pop_next_tab().unwrap().connection_id.as_deref(),
+                    Some("saved-right")
+                );
+            });
+            // Inject the final reconnect completion at the session-registration boundary.
+            // SSH wire/authentication is independent of the persisted window layout.
+            register_restored_ssh(app, "after-right", "saved-right");
+            assert!(!app.session.restore_is_complete());
+            assert!(app.stores.startup_restore.read(cx).queue_empty());
+            assert!(!app.shell.terminal_windows_is_multi_leaf());
+        });
+        let cx = session_focus_test_window(&mut cx, &restored);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            restored.update(cx, |app, cx| {
+                let placement = app.session.start.allocate_tab_placement(2);
+                let preparing_id = app
+                    .session
+                    .simulate_saved_preparation("preparing", placement);
+                assert!(app.session.start_is_busy());
+                assert!(app.session.start_has_pending());
+                app.resume_startup_restore_if_unlocked(window, cx);
+                app.pump_startup_restore_queue(window, cx);
+                assert!(!app.pump_startup_restore_queue_if_ready(window, cx));
+                assert!(!app.session.restore_is_complete());
+                app.session.start.close_pending(&preparing_id);
+                app.remote_desktop.restore_pending = Some("pending-remote-desktop".to_string());
+                assert!(!app.pump_startup_restore_queue_if_ready(window, cx));
+                assert!(!app.session.restore_is_complete());
+                app.remote_desktop.restore_pending = None;
+                assert!(app.pump_startup_restore_queue_if_ready(window, cx));
+                assert!(app.session.restore_is_complete());
+                assert!(app.shell.terminal_windows_restore_is_complete());
+                app.reconcile_terminal_windows();
+                assert!(app.shell.terminal_windows_is_multi_leaf());
+                assert_ne!(
+                    app.shell.terminal_group_for_tab("after-left"),
+                    app.shell.terminal_group_for_tab("after-right")
+                );
+                assert!(!app.pump_startup_restore_queue_if_ready(window, cx));
+                app.ensure_startup_restore_focus_handoff(window, cx);
+            });
+            let _ = window.draw(cx);
+            window.simulate_next_frame(cx);
+            assert!(restored.read(cx).terminal.input_focus().is_focused(window));
+        });
+    }
 
     #[test]
     fn startup_restore_skips_a_connection_changed_to_mstsc_without_creating_a_tab() {

@@ -48,6 +48,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use zzclawterm_remote_ops::ascend_npu::RemoteNpuProcess;
 use zzclawterm_remote_ops::gpu::RemoteGpuProcess;
+use zzclawterm_remote_ops::process_control::ProcessControlCapabilities;
 use zzclawterm_remote_ops::remote_process::RemoteProcess;
 use zzclawterm_ui::{
     ZzClawInputState, ZzClawNumberInputOptions, ZzClawNumberInputState, ZzClawSelectOption,
@@ -134,11 +135,15 @@ pub(in crate::features) struct RemoteMonitorSnapshot {
 /// a stale panel -- which is why the freshness tests drive each one rather than trusting
 /// the key. The explicit boundary list stays the discipline; the key only stops a flush
 /// from concluding "nothing changed" when something outside the pane did.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct RemoteMonitorKey {
     revision: u64,
+    host_identity: crate::features::remote::remote_runtime::host_tools::HostInteractionIdentity,
+    process_control: ProcessControlCapabilities,
+    local_unsupported: bool,
     chrome: PanelChrome,
     has_session: bool,
+    ssh_compatibility_mode: bool,
     /// Right-panel width, which decides the process table's columns and row heights.
     /// Zero for the panes that do not depend on it.
     panel_width: f32,
@@ -256,7 +261,7 @@ impl RemoteMonitorPanel {
     }
 
     fn snapshot_key(&self) -> Option<RemoteMonitorKey> {
-        self.snapshot.as_ref().map(|snapshot| snapshot.key)
+        self.snapshot.as_ref().map(|snapshot| snapshot.key.clone())
     }
 
     fn set_snapshot(&mut self, snapshot: RemoteMonitorSnapshot, cx: &mut Context<Self>) {
@@ -433,6 +438,26 @@ impl Render for RemoteMonitorPanel {
                 return div().into_any_element();
             };
             let chrome = snapshot.key.chrome;
+            if snapshot.key.local_unsupported {
+                return div()
+                    .size_full()
+                    .bg(chrome.transparent_surface)
+                    .child(zzclawterm_ui::empty_panel(
+                        t!("hostTools.localWindowsUnsupported"),
+                        chrome.palette,
+                    ))
+                    .into_any_element();
+            }
+            if snapshot.key.ssh_compatibility_mode {
+                return div()
+                    .size_full()
+                    .bg(chrome.transparent_surface)
+                    .child(zzclawterm_ui::empty_panel(
+                        t!("panel.sshCompatibilityModeUnavailable"),
+                        chrome.palette,
+                    ))
+                    .into_any_element();
+            }
             let has_session = snapshot.key.has_session;
             let panel_width = snapshot.key.panel_width;
             return match &snapshot.data {
@@ -495,6 +520,8 @@ impl Render for RemoteMonitorPanel {
                     );
                     processes_panel(
                         chrome,
+                        snapshot.key.process_control,
+                        snapshot.key.host_identity.clone(),
                         has_session,
                         state,
                         processes,
@@ -595,9 +622,9 @@ impl ZzClawTermApp {
     /// Cheap when nothing changed: one `u64` compare per kind.
     pub(in crate::features) fn flush_remote_panel_snapshots(&mut self, cx: &mut Context<Self>) {
         for kind in RemoteMonitorPanel::SNAPSHOT_KINDS {
-            let key = self.remote_monitor_key(kind);
+            let key = self.remote_monitor_key(kind, cx);
             let panel = self.remote_panels.entity(kind).clone();
-            if panel.read(cx).snapshot_key() == Some(key) {
+            if panel.read(cx).snapshot_key() == Some(key.clone()) {
                 continue;
             }
             let snapshot = self.build_remote_monitor_snapshot(kind, key, cx);
@@ -613,13 +640,13 @@ impl ZzClawTermApp {
         for kind in RemoteMonitorPanel::SNAPSHOT_KINDS {
             debug_assert_eq!(
                 self.remote_panels.entity(kind).read(cx).snapshot_key(),
-                Some(self.remote_monitor_key(kind)),
+                Some(self.remote_monitor_key(kind, cx)),
                 "flush left a panel behind its pane"
             );
         }
     }
 
-    fn remote_monitor_key(&self, kind: RemoteMonitorKind) -> RemoteMonitorKey {
+    fn remote_monitor_key(&self, kind: RemoteMonitorKind, cx: &gpui::App) -> RemoteMonitorKey {
         let revision = match kind {
             RemoteMonitorKind::Stats => self.remote_ops.stats_revision(),
             RemoteMonitorKind::Gpu => self.remote_ops.gpu_revision(),
@@ -629,8 +656,20 @@ impl ZzClawTermApp {
         };
         RemoteMonitorKey {
             revision,
+            host_identity: self.host_interaction_identity(cx),
+            process_control: self.process_control_capabilities(),
+            local_unsupported: self.local_host_tools_unsupported()
+                && matches!(
+                    kind,
+                    RemoteMonitorKind::Gpu | RemoteMonitorKind::Npu | RemoteMonitorKind::Docker
+                ),
             chrome: self.panel_chrome(),
-            has_session: self.session.active_ssh_config().is_some(),
+            has_session: self.session.active_ssh_config().is_some()
+                || self.session.active_is_local_pty(),
+            ssh_compatibility_mode: self
+                .session
+                .active_ssh_config()
+                .is_some_and(|config| config.ssh_compatibility_mode),
             panel_width: match kind {
                 // Width is a presentation input, including accelerator card layouts.
                 RemoteMonitorKind::Processes
@@ -644,7 +683,7 @@ impl ZzClawTermApp {
         }
     }
 
-    fn panel_chrome(&self) -> PanelChrome {
+    pub(in crate::features) fn panel_chrome(&self) -> PanelChrome {
         let palette = self.theme_palette();
         PanelChrome {
             transparent_surface: self.shell_transparent_color(palette.surface),
@@ -732,14 +771,17 @@ impl ZzClawTermApp {
                 );
                 // Keyed per pid and only while something is selected, matching what the
                 // view used to build inline.
-                let nice = state.selected_pid.map(|pid| {
-                    self.number_input(
-                        format!("remote.process.{pid}.nice"),
-                        &state.nice_draft.clone(),
-                        ZzClawNumberInputOptions::default().range(-20.0, 19.0),
-                        cx,
-                    )
-                });
+                let nice = state
+                    .selected_pid
+                    .filter(|_| self.process_control_capabilities().supports_priority())
+                    .map(|pid| {
+                        self.number_input(
+                            format!("remote.process.{pid}.nice"),
+                            &state.nice_draft.clone(),
+                            ZzClawNumberInputOptions::default().range(-20.0, 19.0),
+                            cx,
+                        )
+                    });
                 RemoteMonitorData::Processes {
                     state,
                     processes,
@@ -814,14 +856,16 @@ impl ZzClawTermApp {
     }
 
     fn remote_monitor_session_active(&self) -> bool {
-        self.session
-            .active_ssh_config()
-            .is_some_and(|config| config.remote_stats_enabled())
-            && self
+        self.session.active_is_local_pty()
+            || self
                 .session
-                .active_id()
-                .and_then(|id| self.session.metadata(id))
-                .is_some_and(|metadata| !metadata.disconnected)
+                .active_ssh_config()
+                .is_some_and(|config| config.remote_stats_enabled())
+                && self
+                    .session
+                    .active_id()
+                    .and_then(|id| self.session.metadata(id))
+                    .is_some_and(|metadata| !metadata.disconnected)
     }
 
     /// Rendering reconciles all layout consumers; session activation and replies
@@ -834,6 +878,7 @@ impl ZzClawTermApp {
             let panel = self.remote_panels.entity(kind).clone();
             panel.update(cx, |panel, cx| panel.set_demand(demand, cx));
         }
+        self.sync_host_tools(cx);
     }
 }
 
@@ -1186,6 +1231,62 @@ mod tests {
         });
     }
 
+    #[test]
+    fn native_outside_press_refreshes_the_closed_docker_menu_snapshot() {
+        let test_dir = TestConfigDir::new("zzclawterm-remote-native-menu-snapshot");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx, test_dir.path());
+        activate_ssh_session(&app, &mut cx);
+        cx.update_entity(&app, |app, cx| {
+            app.sync_component_theme(cx);
+            app.remote_ops.toggle_docker_tab_menu();
+            app.flush_remote_panel_snapshots(cx);
+            let snapshot = app
+                .remote_panels
+                .entity(RemoteMonitorKind::Docker)
+                .read(cx)
+                .snapshot
+                .as_ref()
+                .unwrap();
+            let RemoteMonitorData::Docker(docker) = &snapshot.data else {
+                panic!("Docker snapshot")
+            };
+            assert!(docker.state.tab_menu_open);
+        });
+        let app_for_view = app.clone();
+        let (_, vcx) = cx.add_window_view(move |window, cx| {
+            zzclawterm_ui::zzclaw_root(app_for_view, window, cx)
+        });
+        vcx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.handle_native_overlay_outside_mouse_down(
+                    &gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left,
+                        position: gpui::point(gpui::px(600.), gpui::px(400.)),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+            })
+        });
+        vcx.run_until_parked();
+        vcx.read(|cx| {
+            let app = app.read(cx);
+            assert!(!app.remote_ops.docker_menus_open());
+            let panel = app.remote_panels.entity(RemoteMonitorKind::Docker).read(cx);
+            assert_eq!(
+                panel.snapshot_key(),
+                Some(app.remote_monitor_key(RemoteMonitorKind::Docker, cx))
+            );
+            let RemoteMonitorData::Docker(docker) = &panel.snapshot.as_ref().unwrap().data else {
+                panic!("Docker snapshot")
+            };
+            assert!(!docker.state.tab_menu_open);
+        });
+    }
+
     fn polling(app: &Entity<ZzClawTermApp>, cx: &mut TestAppContext) -> Vec<RemoteMonitorKind> {
         cx.update_entity(app, |app, cx| {
             RemoteMonitorKind::ALL
@@ -1469,13 +1570,76 @@ mod tests {
             "a paint arms only the visible GPU panel"
         );
     }
+    #[test]
+    fn ssh_compatibility_mode_blocks_panel_header_icon_and_manual_refresh_jobs() {
+        let test_dir = TestConfigDir::new("zzclawterm-ssh-compatibility-panels");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx, test_dir.path());
+        activate_ssh_session(&app, &mut cx);
+        cx.update_entity(&app, |app, cx| {
+            let connection: zzclawterm_core::SavedConnection = serde_json::from_value(serde_json::json!({
+                "id":"icon-test", "name":"SSH", "type":"ssh", "host":"example.test", "icon_auto_detect":true
+            })).unwrap();
+            app.connection_state.replace_loaded(vec![connection], Vec::new());
+            app.session.metadata_mut("remote-panel-test").unwrap().source_connection_id = Some("icon-test".into());
+            let mut metadata = app.session.metadata("remote-panel-test").unwrap().clone();
+            metadata.ssh_config.as_mut().unwrap().ssh_compatibility_mode = true;
+            app.session.register_session_metadata("compatible-panel-test", metadata);
+            app.session.select_active_session("compatible-panel-test");
+            for mode in [crate::models::HeaderStatusMode::Resources, crate::models::HeaderStatusMode::Host,
+                crate::models::HeaderStatusMode::Gpu, crate::models::HeaderStatusMode::Npu] {
+                let mut settings = app.settings.summary().clone();
+                settings.ui_header_status_visible = true;
+                settings.ui_header_status_mode = mode.persistence_id().into();
+                app.settings.replace_summary(settings);
+                for kind in ALL_KINDS {
+                    app.open_or_toggle_panel(kind.nav_item(), cx);
+                    app.sync_remote_panel_demand(cx);
+                    app.flush_remote_panel_snapshots(cx);
+                    assert!(!app.remote_panels.entity(kind).read(cx).is_polling());
+                    assert!(app.remote_panels.entity(kind).read(cx).snapshot.as_ref().unwrap().key.ssh_compatibility_mode);
+                    assert!(!app.refresh_remote_monitor_if_due(kind, cx));
+                }
+            }
+            assert!(!app.connection_icon_probe_needed());
+            assert!(!app.refresh_connection_icon_if_due(cx));
+            assert!(!app.refresh_stats_if_due(cx));
+            assert!(!app.refresh_gpu_if_due(cx));
+            assert!(!app.refresh_npu_if_due(cx));
+            assert!(!app.refresh_processes_if_due(cx));
+            assert!(!app.refresh_docker_if_due(cx));
+            app.refresh_stats(cx);
+            app.refresh_gpu(cx);
+            app.refresh_npu(cx);
+            app.refresh_processes(cx);
+            app.refresh_docker(cx);
+            app.load_docker_details("container".into(), cx);
+            assert!(app.shell.status().contains(&rust_i18n::t!("panel.sshCompatibilityModeUnavailable").to_string()));
+            assert!(!app.remote_ops.stats_is_pending());
+            assert!(!app.remote_ops.gpu_is_pending());
+            assert!(!app.remote_ops.npu_is_pending());
+            assert!(!app.remote_ops.process_is_pending());
+            assert!(!app.remote_ops.docker_is_pending());
+            app.session.select_active_session("remote-panel-test");
+            app.sync_remote_panel_demand(cx);
+            assert!(app.remote_panels.entity(RemoteMonitorKind::Npu).read(cx).is_polling());
+            app.session.select_active_session("compatible-panel-test");
+            app.sync_remote_panel_demand(cx);
+            for kind in ALL_KINDS {
+                assert!(!app.remote_panels.entity(kind).read(cx).is_polling());
+            }
+        });
+    }
 }
 
 #[cfg(test)]
 mod isolation_tests {
 
+    use super::RemoteMonitorKind;
     use crate::features::runtime_jobs::DockerResource;
     use crate::models::{DockerTab, NavItem, SessionLaunchConfig, SessionRuntimeMetadata};
+    use crate::test_support::TestConfigDir;
 
     use gpui::{AppContext as _, ParentElement as _, Styled as _};
     use zzclawterm_core::AiExecutionProfile;
@@ -1956,6 +2120,66 @@ mod isolation_tests {
             Some(revision),
             "the snapshot must be current before any paint"
         );
+    }
+
+    #[test]
+    fn process_menu_and_priority_controls_follow_the_captured_capabilities() {
+        use super::RemoteMonitorData;
+        use zzclawterm_remote_ops::process_control::ProcessControlCapabilities;
+        let test_dir = TestConfigDir::new("zzclawterm-process-capabilities");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted_processes(&mut cx, test_dir.path());
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.remote_ops.apply_processes(vec![process(42)]);
+                app.remote_ops.toggle_process_selection(42);
+                app.remote_ops.toggle_process_menu(42);
+                app.flush_remote_panel_snapshots(cx);
+            });
+        });
+        for capabilities in [
+            ProcessControlCapabilities::TerminateOnly,
+            ProcessControlCapabilities::Posix,
+        ] {
+            vcx.update(|window, cx| {
+                app.update(cx, |app, cx| {
+                    // Build the production snapshot, substituting the host capability
+                    // to verify both menus on every runner, including Linux.
+                    let mut key = app.remote_monitor_key(RemoteMonitorKind::Processes, cx);
+                    key.process_control = capabilities;
+                    let mut snapshot =
+                        app.build_remote_monitor_snapshot(RemoteMonitorKind::Processes, key, cx);
+                    if capabilities == ProcessControlCapabilities::TerminateOnly
+                        && let RemoteMonitorData::Processes { nice, .. } = &mut snapshot.data
+                    {
+                        *nice = None;
+                    }
+                    app.remote_panels
+                        .entity(RemoteMonitorKind::Processes)
+                        .update(cx, |panel, cx| {
+                            panel.clock = None;
+                            panel.set_snapshot(snapshot, cx);
+                        });
+                });
+                _ = window.draw(cx);
+            });
+            vcx.run_until_parked();
+            assert!(vcx.debug_bounds("process-kill-42").is_some());
+            for selector in [
+                "process-term-42",
+                "process-hup-42",
+                "process-stop-42",
+                "process-cont-42",
+                "process-priority-controls",
+            ] {
+                assert_eq!(
+                    vcx.debug_bounds(selector).is_some(),
+                    capabilities == ProcessControlCapabilities::Posix,
+                    "{selector}"
+                );
+            }
+        }
     }
 
     /// A sibling pane's data must not re-render Processes.

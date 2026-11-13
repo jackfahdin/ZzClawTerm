@@ -61,7 +61,7 @@ ZzClawTerm provides two related helpers for session workflows.
 
 ### Input suggestions
 
-While typing, ZzClawTerm suggests commands based on history.
+While typing, ZzClawTerm suggests commands based on history. In **Settings → Interaction**, you can enable suggestions and set the minimum and maximum history command lengths. Length filters select completion candidates while preserving history records.
 
 ## Invoking AI from the terminal
 

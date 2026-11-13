@@ -286,6 +286,11 @@ impl CloudSyncFeatureState {
         settings: CloudSyncSettings,
         secret_draft: CloudSyncSecretDraft,
     ) {
+        if self.settings.provider != settings.provider {
+            self.v4_preview = None;
+            self.conflict = None;
+            self.pending_resolution = None;
+        }
         self.settings = settings;
         self.secret_draft = secret_draft;
     }
@@ -295,7 +300,7 @@ impl CloudSyncFeatureState {
         settings: CloudSyncSettings,
         state: CloudSyncState,
     ) {
-        self.settings = settings;
+        self.replace_settings(settings, CloudSyncSecretDraft::default());
         self.state = state;
         self.secret_draft = CloudSyncSecretDraft::default();
     }
@@ -368,32 +373,12 @@ impl CloudSyncFeatureState {
         self.v4_preview.take()
     }
 
-    pub(in crate::features) fn select_v4(&mut self) {
-        self.settings.protocol_version = 4;
-        self.v4_preview = None;
-    }
-    pub(in crate::features) fn toggle_v4_preferences(&mut self) {
-        self.settings.v4_scope.preferences = !self.settings.v4_scope.preferences;
-        self.v4_preview = None;
-    }
-    pub(in crate::features) fn toggle_v4_keybindings(&mut self) {
-        self.settings.v4_scope.keybindings = !self.settings.v4_scope.keybindings;
-        self.v4_preview = None;
-    }
-    pub(in crate::features) fn toggle_v4_ai(&mut self) {
-        self.settings.v4_scope.ai = !self.settings.v4_scope.ai;
-        self.v4_preview = None;
-    }
-    pub(in crate::features) fn toggle_v4_secrets(&mut self) {
-        self.settings.v4_scope.secrets = !self.settings.v4_scope.secrets;
-        self.v4_preview = None;
-    }
-    pub(in crate::features) fn toggle_v4_trust(&mut self) {
-        self.settings.v4_scope.trusted_hosts = !self.settings.v4_scope.trusted_hosts;
-        self.v4_preview = None;
-    }
-
     pub(in crate::features) fn select_provider(&mut self, provider: &str) {
+        if self.settings.provider != provider {
+            self.v4_preview = None;
+            self.conflict = None;
+            self.pending_resolution = None;
+        }
         self.settings.provider = provider.to_string();
         self.status = t!("settings.syncProviderSetTo", provider = provider).to_string();
     }

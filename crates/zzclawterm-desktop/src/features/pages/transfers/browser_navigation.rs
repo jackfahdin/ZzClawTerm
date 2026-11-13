@@ -1,9 +1,13 @@
 use super::{normalized_transfer_browser_path, remote_file_name, remote_parent_path};
 use crate::features::ZzClawTermApp;
+use crate::features::transfers::browser_paths::remote_ancestor_selection;
 use crate::models::{TransferBrowserNavigationSnapshot, TransferBrowserSessionCacheState};
 use gpui::{Context, Window};
 use std::collections::VecDeque;
 use zzclawterm_files::sftp::{RemoteFilePath, SftpFileEntry};
+
+#[cfg(test)]
+mod tests;
 
 impl ZzClawTermApp {
     pub(in crate::features::pages::transfers) fn toggle_transfer_browser_view_mode(
@@ -14,6 +18,8 @@ impl ZzClawTermApp {
         self.persist_transfer_browser_ui_settings(cx);
         if mode == zzclawterm_core::TransferBrowserViewMode::Tree {
             self.reveal_transfer_tree_current_path(cx);
+        } else if let Some(session) = self.session.active_id_owned() {
+            self.transfer.cancel_tree_session_requests(&session);
         }
         self.defer_transfer_panel_snapshot_flush(cx);
         cx.notify();
@@ -28,6 +34,52 @@ impl ZzClawTermApp {
             .active_file_browser_backend()
             .unwrap_or(zzclawterm_files::file_browser::FileBrowserBackendKind::Remote);
         zzclawterm_files::file_browser::valid_file_browser_child_name(backend, name)
+    }
+
+    pub(in crate::features) fn android_file_initial_directory(
+        &self,
+        session_id: &str,
+    ) -> Option<String> {
+        let config = match &self.session.metadata(session_id)?.launch_config {
+            crate::models::SessionLaunchConfig::AdbShell(config)
+            | crate::models::SessionLaunchConfig::AdbFiles(config)
+            | crate::models::SessionLaunchConfig::AdbScreen(config) => config,
+            _ => return None,
+        };
+        Some(if config.directory.is_empty() {
+            zzclawterm_core::models::android::default_android_directory()
+        } else {
+            config.directory.clone()
+        })
+    }
+
+    pub(in crate::features) fn validate_android_browser_cache(&mut self, session_id: &str) {
+        if self.android_file_initial_directory(session_id).is_none() {
+            return;
+        }
+        let invalid = self
+            .transfer
+            .browser_session_cache(session_id)
+            .is_some_and(|cache| {
+                zzclawterm_files::adb::raw_path(&RemoteFilePath {
+                    display_path: cache.current_path.clone(),
+                    raw_path_token: cache.current_raw_path_token.clone(),
+                })
+                .is_err()
+                    || (!cache.home_dir.is_empty()
+                        && zzclawterm_files::adb::raw_path(&RemoteFilePath::new(&cache.home_dir))
+                            .is_err())
+                    || cache
+                        .history
+                        .iter()
+                        .chain(cache.visited_history.iter())
+                        .any(|path| {
+                            zzclawterm_files::adb::raw_path(&RemoteFilePath::new(path)).is_err()
+                        })
+            });
+        if invalid {
+            self.transfer.remove_browser_session_cache(session_id);
+        }
     }
 
     pub(in crate::features) fn cache_transfer_browser_session(&mut self, session_id: &str) {
@@ -100,6 +152,7 @@ impl ZzClawTermApp {
         session_id: &str,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.validate_android_browser_cache(session_id);
         let Some(remote_path) = self.transfer.restore_browser_session_cache(session_id) else {
             return false;
         };
@@ -115,9 +168,14 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn reset_transfer_browser_for_active_session(&mut self) {
-        self.transfer.set_remote_path(".");
-        self.transfer
-            .reset_browser_for_session(self.session.active_file_browser_backend().is_some());
+        let initial_directory = self
+            .session
+            .active_id()
+            .and_then(|id| self.android_file_initial_directory(id));
+        self.transfer.reset_browser_for_session(
+            self.session.active_file_browser_backend().is_some(),
+            initial_directory,
+        );
     }
 
     pub(in crate::features) fn load_transfer_browser_for_active_session_if_needed(
@@ -127,6 +185,7 @@ impl ZzClawTermApp {
         let Some(session_id) = self.session.active_id_owned() else {
             return;
         };
+        self.validate_android_browser_cache(&session_id);
         if self.session.active_file_browser_backend().is_none()
             || self.session.is_disconnected(&session_id)
             || self.transfer.has_browser_session_cache(&session_id)
@@ -145,10 +204,14 @@ impl ZzClawTermApp {
             self.start_transfer_initial_directory_job(cx);
             return;
         }
-        let initial_path = dirs::home_dir()
-            .or_else(|| std::env::current_dir().ok())
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_else(|| ".".to_string());
+        let initial_path = self
+            .android_file_initial_directory(&session_id)
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .or_else(|| std::env::current_dir().ok())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| ".".to_string())
+            });
         let rollback = self.prepare_transfer_browser_navigation();
         self.transfer
             .begin_browser_directory_load(initial_path.clone());
@@ -191,11 +254,24 @@ impl ZzClawTermApp {
 
     fn open_transfer_browser_directory_with_history_and_rollback(
         &mut self,
-        path: RemoteFilePath,
+        mut path: RemoteFilePath,
         record_history: bool,
         rollback: TransferBrowserNavigationSnapshot,
         cx: &mut Context<Self>,
     ) {
+        let select_after = if self.session.active_file_browser_backend()
+            == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Remote)
+        {
+            remote_ancestor_selection(
+                RemoteFilePath {
+                    display_path: rollback.browser_path.clone(),
+                    raw_path_token: rollback.browser_raw_path_token.clone(),
+                },
+                &mut path,
+            )
+        } else {
+            None
+        };
         self.forget_text_inputs("transfer.browser.path");
         let display_path = path.display_path.clone();
         self.transfer.set_remote_path(display_path.clone());
@@ -205,7 +281,7 @@ impl ZzClawTermApp {
         } else {
             self.record_transfer_browser_visited_history(display_path);
         }
-        self.start_sftp_list_job(None, rollback, cx);
+        self.start_sftp_list_job(select_after, rollback, cx);
     }
 
     pub(in crate::features) fn open_transfer_browser_history(
@@ -462,6 +538,17 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
+        if self.session.active_file_browser_backend()
+            == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Remote)
+        {
+            self.open_transfer_browser_directory_with_history_and_rollback(
+                parent_identity,
+                true,
+                rollback,
+                cx,
+            );
+            return;
+        }
         self.transfer.set_remote_path(parent.clone());
         self.transfer
             .begin_browser_parent_load_path(parent_identity);
@@ -474,6 +561,10 @@ impl ZzClawTermApp {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.reload_transfer_browser(cx);
+    }
+
+    pub(in crate::features) fn reload_transfer_browser(&mut self, cx: &mut Context<Self>) {
         let path = if self.transfer.browser_view().path.trim().is_empty() {
             self.transfer.normalized_remote_path()
         } else {

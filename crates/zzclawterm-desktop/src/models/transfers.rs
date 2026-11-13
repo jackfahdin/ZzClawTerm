@@ -27,6 +27,7 @@ pub(crate) enum TransferJobKind {
     InitialDirectory,
     ListDir {
         remote_path: String,
+        /// Entry identity to reveal after navigation; legacy display paths are also accepted.
         select_after: Option<String>,
     },
     ListChildren {
@@ -122,7 +123,7 @@ pub(crate) enum TransferJobKind {
     },
     OpenExternal {
         remote_path: String,
-        local_path: PathBuf,
+        local_path: Option<PathBuf>,
     },
     AiFileAction {
         remote_path: String,
@@ -381,6 +382,7 @@ mod transfer_job_state_tests {
             let mut job = job(kind, Some("session-a"));
             job.status = TransferJobStatus::Running;
             job.update_progress(SftpTransferProgress {
+                phase: None,
                 remote_path: "/remote/file".to_string(),
                 local_path: PathBuf::from("file"),
                 bytes_transferred: 0,
@@ -437,7 +439,7 @@ mod transfer_job_state_tests {
         let external = job(
             TransferJobKind::OpenExternal {
                 remote_path: "/remote/file.txt".to_string(),
-                local_path: PathBuf::from("/tmp/file.txt"),
+                local_path: Some(PathBuf::from("/tmp/file.txt")),
             },
             Some("session-a"),
         );
@@ -476,7 +478,7 @@ mod transfer_job_state_tests {
         assert_eq!(
             TransferJobState::display_name_for_kind(&TransferJobKind::OpenExternal {
                 remote_path: "/remote/project/file.txt".to_string(),
-                local_path: PathBuf::from("/tmp/file.txt"),
+                local_path: Some(PathBuf::from("/tmp/file.txt")),
             }),
             "file.txt"
         );
@@ -508,7 +510,7 @@ pub(crate) struct TransferJobResult {
 pub(crate) struct PromisedDownloadDestination {
     pub raw_path_token: Option<String>,
     pub local_path: PathBuf,
-    pub source: std::sync::Weak<zzclawterm_files::remote_file::RemoteFileService>,
+    pub source: zzclawterm_files::file_browser::WeakFileBrowserService,
     pub options: zzclawterm_files::sftp_transfer_types::SftpPathTransferOptions,
 }
 
@@ -523,12 +525,19 @@ pub(crate) enum TransferJobEvent {
     Started {
         detail: String,
     },
+    ExternalWorkspacePrepared {
+        local_path: PathBuf,
+    },
     ExternalModified {
         remote_path: String,
         raw_path_token: Option<String>,
         local_path: PathBuf,
     },
     Progress(SftpTransferProgress),
+    /// File adapters retain typed errors until the desktop event boundary.
+    FileFinished(Result<TransferJobOutput, anyhow::Error>),
+    /// The upload committed successfully, but fetching its new listing failed.
+    FileRefreshFailed(anyhow::Error),
     Finished(Result<TransferJobOutput, String>),
 }
 
@@ -640,7 +649,7 @@ pub(crate) enum TransferJobOutput {
         remote_path: String,
         raw_path_token: Option<String>,
         local_path: PathBuf,
-        baseline: crate::models::external_editor::ExternalEditorFileVersion,
+        baseline: zzclawterm_files::local_revision::LocalFileVersion,
     },
     AiFileActionLoaded {
         remote_path: String,

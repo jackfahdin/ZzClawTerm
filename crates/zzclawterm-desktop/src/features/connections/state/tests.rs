@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use super::list_model::{ConnectionListRow, connection_sections, flatten_connection_rows};
 use super::{
     ConnectionEditorFeatureState, apply_connection_editor_shell_path,
     apply_connection_editor_working_dir, clear_connection_editor_runtime_state,
@@ -21,14 +22,10 @@ use super::{
     set_network_proxy_protocol, set_network_tunnel_bind_localhost, set_network_tunnel_connection,
     set_network_tunnel_editor_error, set_network_tunnel_editor_field, set_network_tunnel_group,
     set_network_tunnel_type, sync_connection_search_expansion, toggle_connection_editor_flag,
-    toggle_network_move_picker_state, toggle_network_tunnel_auto_open,
-    visible_connection_ids_for_list_state,
+    toggle_network_tunnel_auto_open,
 };
 use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
 use crate::features::ZzClawTermApp;
-use crate::features::pages::connections::list::{
-    ConnectionListRow, connection_sections, flatten_connection_rows,
-};
 use crate::features::{
     connections::ConnectionDragKind, connections::ConnectionDropPosition,
     connections::ConnectionDropTarget, connections::ConnectionEditorToggle,
@@ -37,9 +34,8 @@ use crate::models::{
     ConnectionEditorCredentialOverlay, ConnectionEditorField, ConnectionEditorForwardingTab,
     ConnectionEditorPasswordSource, ConnectionEditorSelect, ConnectionEditorSshAlgorithmTab,
     ConnectionEditorState, ConnectionGroupEditorMode, ConnectionGroupEditorState,
-    ConnectionKindTab, ConnectionSortMode, NetworkGroupEditorState, NetworkMovePickerState,
-    NetworkProxyEditorField, NetworkProxyEditorState, NetworkTab, NetworkTunnelEditorField,
-    NetworkTunnelEditorState,
+    ConnectionKindTab, ConnectionSortMode, NetworkGroupEditorState, NetworkProxyEditorField,
+    NetworkProxyEditorState, NetworkTab, NetworkTunnelEditorField, NetworkTunnelEditorState,
 };
 use gpui::{AppContext as _, TestAppContext};
 use std::path::PathBuf;
@@ -445,6 +441,9 @@ fn group_search_navigation_and_range_selection_follow_rendered_connection_order(
         group("child", "Services", Some("parent"), 0),
         group("unrelated", "Staging", None, 1),
     ];
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = cache_test_app(&mut cx);
     for mode in [
         ConnectionSortMode::Default,
         ConnectionSortMode::NameAsc,
@@ -455,21 +454,30 @@ fn group_search_navigation_and_range_selection_follow_rendered_connection_order(
             HashSet::from(["parent".to_owned()]),
             HashSet::new(),
         ] {
-            let sections = connection_sections(&connections, &groups, "prod", mode);
-            let rendered = flatten_connection_rows(&sections, &expanded, None)
-                .into_iter()
-                .filter_map(|row| match row {
-                    ConnectionListRow::Connection { connection_id, .. } => Some(connection_id),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            let visible = visible_connection_ids_for_list_state(
-                &connections,
-                &groups,
-                "prod",
-                mode,
-                &expanded,
-            );
+            let (rendered, visible) = cx.update_entity(&app, |app, _| {
+                app.connection_state
+                    .replace_loaded(connections.clone(), groups.clone());
+                app.connection_state.list.sort_mode = mode;
+                app.connection_state.set_list_search_text("prod".into());
+                app.connection_state.connection_list_model();
+                app.connection_state.set_all_catalog_groups_expanded(false);
+                for id in &expanded {
+                    app.connection_state.expand_list_group(id.clone());
+                }
+                let rendered = app
+                    .connection_state
+                    .connection_list_model()
+                    .rows
+                    .iter()
+                    .filter_map(|row| match row {
+                        ConnectionListRow::Connection { connection_id, .. } => {
+                            Some(connection_id.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                (rendered, app.connection_state.visible_connection_ids())
+            });
             assert_eq!(visible, rendered);
             assert!(!visible.contains(&"excluded".to_owned()));
             let mut selected = HashSet::new();
@@ -708,8 +716,9 @@ fn all_folder_expansion_updates_nested_rows_and_only_invalidates_on_change() {
         let _ = app.connection_state.connection_list_model();
         app.connection_state.set_all_catalog_groups_expanded(false);
         assert!(app.connection_state.list_expanded_group_ids().is_empty());
-        assert_eq!(app.connection_state.visible_connection_ids(), vec!["root"]);
         assert!(!app.connection_state.connection_list_model().stats.cache_hit);
+        assert_eq!(app.connection_state.visible_connection_ids(), vec!["root"]);
+        assert!(app.connection_state.connection_list_model().stats.cache_hit);
 
         app.connection_state.set_all_catalog_groups_expanded(false);
         assert!(app.connection_state.connection_list_model().stats.cache_hit);
@@ -719,11 +728,12 @@ fn all_folder_expansion_updates_nested_rows_and_only_invalidates_on_change() {
             app.connection_state.list_expanded_group_ids(),
             &HashSet::from(["parent-group".to_string(), "child-group".to_string()])
         );
+        assert!(!app.connection_state.connection_list_model().stats.cache_hit);
         assert_eq!(
             app.connection_state.visible_connection_ids(),
             vec!["child", "parent", "root"]
         );
-        assert!(!app.connection_state.connection_list_model().stats.cache_hit);
+        assert!(app.connection_state.connection_list_model().stats.cache_hit);
 
         app.connection_state.set_all_catalog_groups_expanded(true);
         assert!(app.connection_state.connection_list_model().stats.cache_hit);
@@ -967,6 +977,8 @@ fn connection_editor_new_group_commit_closes_select_and_keeps_pending_parent() {
 #[test]
 fn editing_a_field_clears_a_stale_validation_error() {
     let mut draft = ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         error: Some("SSH host is required".to_string()),
         ..connection_editor_state_with_secret_draft()
     };
@@ -984,6 +996,8 @@ fn editing_a_field_clears_a_stale_validation_error() {
 #[test]
 fn set_connection_editor_icon_trims_empty_values_and_clears_error() {
     let mut draft = Some(ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         error: Some("stale validation".to_string()),
         ..connection_editor_state_with_secret_draft()
     });
@@ -1008,6 +1022,8 @@ fn set_connection_editor_icon_trims_empty_values_and_clears_error() {
 #[test]
 fn switching_to_no_authentication_preserves_password_and_key_drafts() {
     let mut draft = Some(ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         password_id: Some("saved-password".to_string()),
         key_id: Some("key-a".to_string()),
         error: Some("stale validation".to_string()),
@@ -1054,6 +1070,8 @@ fn set_connection_editor_agent_endpoint_updates_the_authentication_endpoint() {
 #[test]
 fn enabling_allow_all_agent_forwarding_requires_fresh_confirmation() {
     let mut draft = Some(ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         agent_allow_all_confirmed: true,
         agent_forwarding_config: zzclawterm_core::SshAgentForwardingConfig {
             enabled: false,
@@ -1076,6 +1094,8 @@ fn enabling_allow_all_agent_forwarding_requires_fresh_confirmation() {
 #[test]
 fn set_connection_editor_group_select_value_clears_group_draft() {
     let mut draft = Some(ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         new_group_name: "scratch".to_string(),
         pending_group_name: Some("pending".to_string()),
         pending_group_parent_id: Some("parent".to_string()),
@@ -1102,6 +1122,8 @@ fn set_connection_editor_group_select_value_clears_group_draft() {
 #[test]
 fn ssh_profile_selection_preserves_explicit_terminal_type() {
     let mut draft = Some(ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         terminal_type: Some(SshTerminalType::Ansi),
         ..connection_editor_state_with_secret_draft()
     });
@@ -1132,6 +1154,8 @@ fn ssh_profile_selection_preserves_explicit_terminal_type() {
 #[test]
 fn ssh_algorithm_mode_fills_only_empty_custom_lists_and_clears_presets() {
     let mut draft = Some(ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         ssh_algorithm_kex: vec!["future-kex".to_string()],
         ..connection_editor_state_with_secret_draft()
     });
@@ -1167,6 +1191,8 @@ fn ssh_algorithm_custom_edits_preserve_unknown_values_and_order() {
     let first = defaults.kex[0].clone();
     let second = defaults.kex[1].clone();
     let mut draft = Some(ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         ssh_algorithm_mode: "custom".to_string(),
         ssh_algorithm_kex: vec!["future-kex".to_string(), first.clone(), second.clone()],
         ..connection_editor_state_with_secret_draft()
@@ -1228,6 +1254,8 @@ fn recording_edits_preserve_advanced_compatibility_fields() {
     let expected_path = "logs/{session}.log".to_string();
     let expected_rotation = RecordingRotationPolicy::Size { max_bytes: 8192 };
     let mut draft = Some(ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         recording: Some(ConnectionRecordingSettings {
             auto_start: Some(true),
             mode: Some(RecordingMode::Raw),
@@ -1290,6 +1318,8 @@ fn editor_tags_trim_deduplicate_remove_and_keep_draft_fields_independent() {
 #[test]
 fn switching_password_sources_preserves_the_direct_password_and_saved_reference() {
     let mut draft = Some(ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         password_id: Some("saved-password".to_string()),
         ..connection_editor_state_with_secret_draft()
     });
@@ -1312,6 +1342,8 @@ fn switching_password_sources_preserves_the_direct_password_and_saved_reference(
 #[test]
 fn set_connection_editor_kind_updates_default_ports_and_clears_error() {
     let mut draft = Some(ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         port: "22".to_string(),
         error: Some("stale validation".to_string()),
         ..connection_editor_state_with_secret_draft()
@@ -1332,6 +1364,8 @@ fn set_connection_editor_kind_updates_default_ports_and_clears_error() {
 #[test]
 fn commit_connection_editor_new_group_requires_non_empty_name() {
     let mut draft = Some(ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         new_group_name: "  ".to_string(),
         error: None,
         ..connection_editor_state_with_secret_draft()
@@ -1350,6 +1384,8 @@ fn commit_connection_editor_new_group_requires_non_empty_name() {
 #[test]
 fn commit_connection_editor_new_group_captures_parent_and_clears_draft() {
     let mut draft = Some(ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         group_id: Some("parent".to_string()),
         new_group_name: "  staging  ".to_string(),
         focused_field: ConnectionEditorField::NewGroupName,
@@ -1375,6 +1411,8 @@ fn commit_connection_editor_new_group_captures_parent_and_clears_draft() {
 fn toggle_connection_editor_raw_tcp_preserves_enter_mode() {
     for enter_mode in ["cr", "lf", "crlf"] {
         let mut draft = Some(ConnectionEditorState {
+            android_usb: false,
+            android_screen: Default::default(),
             raw_tcp_cli: false,
             telnet_enter_mode: enter_mode.to_string(),
             error: Some("stale validation".to_string()),
@@ -1442,6 +1480,8 @@ fn connection_editor_credential_overlay_closes_competing_popups() {
 #[test]
 fn insert_connection_editor_description_newline_only_when_description_focused() {
     let mut draft = Some(ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         focused_field: ConnectionEditorField::Description,
         description: "first".to_string(),
         error: Some("stale validation".to_string()),
@@ -1476,6 +1516,8 @@ fn set_connection_editor_error_updates_active_draft() {
 #[test]
 fn apply_connection_editor_paths_update_field_and_clear_error() {
     let mut draft = Some(ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         error: Some("stale validation".to_string()),
         ..connection_editor_state_with_secret_draft()
     });
@@ -1518,6 +1560,23 @@ fn connection_editor_password_can_be_revealed_and_is_masked_again_when_reopened(
         app.connection_state.hide_editor_secrets(cx);
         assert!(field.read(cx).is_masked());
         assert_eq!(field.read(cx).value(cx), draft.password.expose_secret());
+        for mode in ["key", "agent", "none", "password"] {
+            field.update(cx, |state, cx| state.set_masked(false, cx));
+            app.set_connection_editor_select_value(
+                ConnectionEditorSelect::Authentication,
+                Some(mode),
+                cx,
+            );
+            assert!(field.read(cx).is_masked());
+            assert_eq!(field.read(cx).value(cx), draft.password.expose_secret());
+            assert_eq!(
+                app.connection_state
+                    .active_editor_draft()
+                    .unwrap()
+                    .password_edit,
+                draft.password_edit
+            );
+        }
         field.update(cx, |state, cx| state.set_masked(false, cx));
         app.set_connection_editor_select_value(ConnectionEditorSelect::SshKey, None, cx);
         assert!(field.read(cx).is_masked());
@@ -1546,6 +1605,8 @@ fn connection_password_input_replaces_or_removes_the_existing_secret_without_tri
         ConnectionKindTab::Vnc,
     ] {
         let mut draft = ConnectionEditorState {
+            android_usb: false,
+            android_screen: Default::default(),
             kind,
             password_edit: ConnectionPasswordEdit::Keep,
             password: Default::default(),
@@ -1588,6 +1649,8 @@ fn stored_password_placeholder_is_fixed_and_disappears_when_deleted_or_replaced(
         ] {
             for stored in ["short", "a much longer stored ciphertext"] {
                 let draft = ConnectionEditorState {
+                    android_usb: false,
+                    android_screen: Default::default(),
                     kind,
                     password_source: ConnectionEditorPasswordSource::Direct,
                     password_edit: ConnectionPasswordEdit::Keep,
@@ -2061,50 +2124,17 @@ fn network_proxy_protocol_selection_resets_hidden_focus() {
 }
 
 #[test]
-fn toggle_network_move_picker_toggles_same_item() {
-    let mut move_picker = None;
-
-    assert!(toggle_network_move_picker_state(
-        &mut move_picker,
-        NetworkTab::Proxies,
-        "proxy".to_string(),
-    ));
-
-    assert_eq!(
-        move_picker,
-        Some(NetworkMovePickerState {
-            tab: NetworkTab::Proxies,
-            id: "proxy".to_string(),
-        })
-    );
-
-    assert!(!toggle_network_move_picker_state(
-        &mut move_picker,
-        NetworkTab::Proxies,
-        "proxy".to_string(),
-    ));
-
-    assert_eq!(move_picker, None);
-}
-
-#[test]
 fn remove_network_item_references_clears_only_matching_tab_and_id() {
-    let mut move_picker = Some(NetworkMovePickerState {
-        tab: NetworkTab::Tunnels,
-        id: "one".to_string(),
-    });
     let mut tunnel_editor = Some(network_tunnel_editor("one"));
     let mut proxy_editor = Some(network_proxy_editor("one"));
 
     remove_network_item_references(
-        &mut move_picker,
         &mut tunnel_editor,
         &mut proxy_editor,
         NetworkTab::Tunnels,
         "one",
     );
 
-    assert_eq!(move_picker, None);
     assert_eq!(tunnel_editor, None);
     assert_eq!(proxy_editor, Some(network_proxy_editor("one")));
 }
@@ -2146,10 +2176,6 @@ fn remove_network_group_and_item_references_clears_deleted_child_state() {
         error: None,
     });
     let mut expanded_sections = HashSet::from(["proxy:group-a".to_string()]);
-    let mut move_picker = Some(NetworkMovePickerState {
-        tab: NetworkTab::Proxies,
-        id: "proxy-a".to_string(),
-    });
     let mut tunnel_editor = Some(network_tunnel_editor("proxy-a"));
     let mut proxy_editor = Some(network_proxy_editor("proxy-a"));
 
@@ -2160,7 +2186,6 @@ fn remove_network_group_and_item_references_clears_deleted_child_state() {
         "group-a",
     );
     remove_network_item_references(
-        &mut move_picker,
         &mut tunnel_editor,
         &mut proxy_editor,
         NetworkTab::Proxies,
@@ -2169,7 +2194,6 @@ fn remove_network_group_and_item_references_clears_deleted_child_state() {
 
     assert_eq!(group_editor, None);
     assert!(expanded_sections.is_empty());
-    assert_eq!(move_picker, None);
     assert_eq!(proxy_editor, None);
     assert_eq!(tunnel_editor, Some(network_tunnel_editor("proxy-a")));
 }
@@ -2368,6 +2392,7 @@ fn saved_connection(
         auth: None,
         recording: None,
         ssh_algorithms: None,
+        ssh_compatibility_mode: false,
         ssh_profile: Default::default(),
         terminal_type: None,
         sftp: Default::default(),
@@ -2393,6 +2418,8 @@ fn group(id: &str, name: &str, parent_id: Option<&str>, sort_order: i32) -> Grou
 
 fn connection_editor_state_with_secret_draft() -> ConnectionEditorState {
     ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         id: Some("conn".to_string()),
         kind: ConnectionKindTab::Ssh,
         name: "prod".to_string(),
@@ -2449,6 +2476,7 @@ fn connection_editor_state_with_secret_draft() -> ConnectionEditorState {
         agent_preview_loading: false,
         backspace_mode: "del".to_string(),
         encoding: "global".to_string(),
+        ssh_compatibility_mode: false,
         ssh_profile: Default::default(),
         terminal_type: None,
         sftp_enabled: true,
@@ -2543,6 +2571,8 @@ fn network_proxy_editor(id: &str) -> NetworkProxyEditorState {
 #[test]
 fn raw_tcp_toggle_retains_telnet_keepalive_configuration() {
     let mut draft = Some(ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         raw_tcp_cli: false,
         telnet_keep_alive_interval_secs: "45".into(),
         ..connection_editor_state_with_secret_draft()
@@ -2936,4 +2966,184 @@ fn selecting_windows_rdp_preserves_clipboard_data_and_selects_system_authenticat
         draft.rdp_security.windows_authentication.as_deref(),
         Some("system")
     );
+}
+
+#[test]
+fn ssh_compatibility_toggle_preserves_profile_terminal_and_sftp_settings() {
+    let editor = connection_editor_state_with_secret_draft();
+    assert!(!editor.ssh_compatibility_mode);
+    let mut draft = Some(editor.clone());
+    for enabled in [true, false] {
+        assert!(toggle_connection_editor_flag(
+            &mut draft,
+            ConnectionEditorToggle::SshCompatibilityMode
+        ));
+        let updated = draft.as_ref().unwrap();
+        assert_eq!(updated.ssh_compatibility_mode, enabled);
+        assert_eq!(updated.ssh_profile, editor.ssh_profile);
+        assert_eq!(updated.terminal_type, editor.terminal_type);
+        assert_eq!(updated.sftp_enabled, editor.sftp_enabled);
+        assert_eq!(
+            updated.sftp_compatibility_mode,
+            editor.sftp_compatibility_mode
+        );
+    }
+}
+
+fn visible_connection_ids_for_list_state(
+    connections: &[SavedConnection],
+    groups: &[Group],
+    query: &str,
+    sort_mode: ConnectionSortMode,
+    expanded: &HashSet<String>,
+) -> Vec<String> {
+    flatten_connection_rows(
+        &connection_sections(connections, groups, query, sort_mode),
+        expanded,
+        None,
+    )
+    .into_iter()
+    .filter_map(|row| match row {
+        ConnectionListRow::Connection { connection_id, .. } => Some(connection_id),
+        _ => None,
+    })
+    .collect()
+}
+
+#[test]
+fn ranked_search_navigation_selection_and_cache_share_the_same_rows() {
+    use std::sync::Arc;
+
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = cache_test_app(&mut cx);
+    cx.update_entity(&app, |app, cx| {
+        let groups = vec![group("group", "Servers", None, 0)];
+        let mut connections = vec![
+            saved_connection("prefix", "production", Some("group"), 0),
+            saved_connection("exact", "prod", Some("group"), 1),
+            saved_connection("substring", "my-prod", Some("group"), 2),
+        ];
+        app.connection_state
+            .replace_loaded(connections.clone(), groups.clone());
+        app.connection_state.set_all_catalog_groups_expanded(false);
+        app.connection_state.connection_list_model();
+        let initial_builds = app.connection_state.list_model.section_rebuilds;
+        app.connection_state.set_list_search_text("prod".into());
+        app.sync_connection_keyboard_active(cx);
+        assert_eq!(
+            app.connection_state.visible_connection_ids(),
+            ["exact", "prefix", "substring"]
+        );
+        assert_eq!(
+            app.connection_state.list_keyboard_active_connection_id(),
+            Some("exact")
+        );
+        assert_eq!(
+            app.connection_state.list_model.section_rebuilds,
+            initial_builds + 1
+        );
+        let snapshot = app.connection_state.connection_list_model();
+        assert!(snapshot.stats.cache_hit);
+
+        app.connection_state
+            .set_list_keyboard_active_connection_id(Some("prefix".into()));
+        app.select_connection("exact".into(), false, false, cx);
+        app.select_connection("prefix".into(), false, true, cx);
+        assert_eq!(
+            app.connection_state.list_selection().as_ref(),
+            &HashSet::from(["exact".into(), "prefix".into()])
+        );
+        app.connection_state
+            .set_list_group_hover("group".into(), true);
+        let unchanged = app.connection_state.connection_list_model();
+        assert!(Arc::ptr_eq(&snapshot.rows, &unchanged.rows));
+        assert_eq!(
+            app.connection_state.list_model.section_rebuilds,
+            initial_builds + 1
+        );
+
+        // A catalog refresh can reorder matches without stealing an existing activity.
+        connections[2].name = "prod".into();
+        app.connection_state.replace_loaded(connections, groups);
+        app.connection_state.connection_list_model();
+        assert_eq!(
+            app.connection_state.list_keyboard_active_connection_id(),
+            Some("prefix")
+        );
+        assert_eq!(
+            app.connection_state.list_model.section_rebuilds,
+            initial_builds + 2
+        );
+        app.connection_state
+            .toggle_list_group_expanded("group".into());
+        assert!(app.connection_state.visible_connection_ids().is_empty());
+        assert_eq!(
+            app.connection_state.list_model.section_rebuilds,
+            initial_builds + 2
+        );
+        assert!(app.connection_state.connection_list_model().stats.cache_hit);
+
+        app.connection_state
+            .set_list_search_text("production".into());
+        assert_eq!(app.connection_state.visible_connection_ids(), ["prefix"]);
+        assert_eq!(
+            app.connection_state.list_keyboard_active_connection_id(),
+            Some("prefix")
+        );
+        app.connection_state.set_list_search_text(String::new());
+        assert!(app.connection_state.visible_connection_ids().is_empty());
+        assert!(app.connection_state.list_expanded_group_ids().is_empty());
+        assert!(
+            app.connection_state
+                .list_keyboard_active_connection_id()
+                .is_none()
+        );
+        app.connection_state.expand_list_group("group".into());
+        assert_eq!(
+            app.connection_state.visible_connection_ids(),
+            ["prefix", "exact", "substring"]
+        );
+    });
+}
+
+#[test]
+fn large_ranked_catalog_reuses_scoring_across_navigation_and_fold_changes() {
+    use std::time::Instant;
+
+    let mut cx = TestAppContext::single();
+    let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let app = cache_test_app(&mut cx);
+    cx.update_entity(&app, |app, _| {
+        let groups: Vec<_> = (0..100)
+            .map(|n| group(&format!("g{n}"), &format!("Group {n}"), None, n))
+            .collect();
+        let connections = (0..4000)
+            .map(|n| {
+                saved_connection(
+                    &format!("c{n}"),
+                    &format!("fixture-host-{n}"),
+                    Some(&format!("g{}", n % 100)),
+                    n,
+                )
+            })
+            .collect();
+        app.connection_state.replace_loaded(connections, groups);
+        app.connection_state.set_list_search_text("host".into());
+        let started = Instant::now();
+        let snapshot = app.connection_state.connection_list_model();
+        let first = started.elapsed();
+        let builds = app.connection_state.list_model.section_rebuilds;
+        let started = Instant::now();
+        assert!(app.connection_state.connection_list_model().stats.cache_hit);
+        let cached = started.elapsed();
+        assert_eq!(app.connection_state.visible_connection_ids().len(), 4000);
+        app.connection_state.toggle_list_group_expanded("g0".into());
+        assert_eq!(app.connection_state.visible_connection_ids().len(), 3960);
+        assert_eq!(app.connection_state.list_model.section_rebuilds, builds);
+        eprintln!(
+            "ranked fixture: {} rows, first {first:?}, cached {cached:?}",
+            snapshot.rows.len()
+        );
+    });
 }

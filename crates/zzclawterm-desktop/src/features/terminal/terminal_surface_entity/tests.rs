@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use zzclawterm_terminal_gpui::geometry::terminal_visual_scroll_offset_px;
 
 use crate::entities::{OverlayStore, StartupRestoreStore, UiStoreHandles};
 use crate::features::ZzClawTermApp;
@@ -9,9 +10,7 @@ use crate::features::terminal::terminal_surface::{
 };
 use crate::models::TerminalBufferCellPos;
 use crate::models::{TerminalProtocolState, TerminalSelection};
-use crate::terminal::{
-    TerminalLineDecorations, compile_terminal_keyword_highlighter, terminal_keyword_rules_key,
-};
+use crate::terminal::{TerminalLineDecorations, compile_terminal_keyword_highlighter};
 use gpui::prelude::*;
 use gpui::{
     AppContext, Context, Entity, Render, ScrollDelta, ScrollEvent, TestAppContext, Window, bounds,
@@ -19,12 +18,15 @@ use gpui::{
 };
 use zzclawterm_core::{AppRuntime, RuntimeMode, uuid};
 use zzclawterm_terminal::{TerminalScreen, TerminalSnapshot};
-use zzclawterm_terminal_gpui::{ZzClawTerminalLayoutCache, precompute_terminal_keyword_highlights};
+use zzclawterm_terminal_gpui::{
+    ZzClawTerminalLayoutCache, precompute_terminal_keyword_highlights, terminal_keyword_rules_key,
+};
 
 use super::{
     TERMINAL_KEYWORD_HIGHLIGHT_PREFETCH_VIEWPORTS,
     TERMINAL_KEYWORD_HIGHLIGHT_PRESSURE_PREFETCH_VIEWPORTS,
-    TERMINAL_KEYWORD_HIGHLIGHT_PRESSURE_THROTTLE, TerminalKeywordHighlightRequestKey,
+    TERMINAL_KEYWORD_HIGHLIGHT_PRESSURE_THROTTLE, TERMINAL_SURFACE_RETAINED_ROW_BYTE_LIMIT,
+    TERMINAL_SURFACE_RETAINED_ROW_LIMIT, TerminalKeywordHighlightRequestKey,
     TerminalPaintedHitTestGeometry, TerminalScrollVisualState, TerminalSurface,
     TerminalSurfaceFrameSnapshot, TerminalSurfaceLocalScrollResult, TerminalVisualScrollGeometry,
     empty_terminal_keyword_rules, terminal_effective_visual_scroll_offset_px,
@@ -36,7 +38,6 @@ use super::{
     terminal_snapshot_covers_display_offset, terminal_snapshot_row_estimated_bytes,
     terminal_surface_fractional_prefetch_offset, terminal_surface_synthesized_window_extra_rows,
     terminal_surface_text_first_repaint_ready, terminal_surface_visible_rows_for_viewport,
-    terminal_visual_scroll_offset_px,
 };
 
 struct TerminalSurfaceLayoutTestView {
@@ -268,31 +269,6 @@ fn window_tint_and_transparent_surface_keep_explicit_and_inverse_ansi_background
             });
         }
     }
-}
-
-#[test]
-fn input_colors_are_cleared_when_rules_change_or_alternate_screen_takes_over() {
-    let rules = zzclawterm_core::keyword_highlight_presets::get_builtin_keyword_rules(true);
-    let highlighter = compile_terminal_keyword_highlighter(&rules);
-    let mut screen = TerminalScreen::new(40, 3);
-    screen.advance(b"$ ls");
-    let highlights = Arc::new(
-        zzclawterm_terminal_gpui::precompute_terminal_input_highlights(
-            &screen.snapshot(),
-            &highlighter,
-        )
-        .unwrap(),
-    );
-    let key = highlights.rules_key();
-    let mut surface = TerminalSurface::new("session");
-    assert!(surface.set_input_keyword_highlights(Some(highlights.clone()), key));
-    assert!(!surface.set_input_keyword_highlights(Some(highlights.clone()), key));
-    assert!(surface.set_input_keyword_highlights(Some(highlights.clone()), key.wrapping_add(1)));
-    assert!(surface.input_keyword_highlights.is_none());
-    assert!(surface.set_input_keyword_highlights(Some(highlights.clone()), key));
-    surface.protocol_state.alternate_screen = true;
-    assert!(surface.set_input_keyword_highlights(Some(highlights), key));
-    assert!(surface.input_keyword_highlights.is_none());
 }
 
 #[test]
@@ -579,7 +555,8 @@ fn switching_to_no_wrap_does_not_replay_cursor_reveals_from_character_mode() {
 fn painted_hit_test_grid_bounds_match_the_rendered_grid_layout() {
     let grid_bounds = rendered_terminal_grid_bounds(false);
 
-    assert_eq!(grid_bounds.origin, point(px(0.0), px(0.0)));
+    let rail = zzclawterm_terminal_gpui::command_blocks::COMMAND_RAIL_WIDTH;
+    assert_eq!(grid_bounds.origin, point(px(rail), px(0.0)));
     assert_eq!(grid_bounds.size.height, px(240.0));
 }
 
@@ -1559,8 +1536,9 @@ fn keyword_highlight_deferred_task_coalesces_latest_snapshot_under_pressure() {
         );
         surface.keyword_highlight_last_started_at = Some(Instant::now());
         surface.schedule_keyword_highlights(false, true, cx);
+        assert!(surface.keyword_highlights.is_none());
         assert!(surface.keyword_highlight_deferred_task.is_some());
-        let first_pending_key = surface.keyword_highlight_pending_key;
+        let first_key = surface.keyword_highlight_pending_key;
 
         apply_test_frame_snapshot!(
             surface,
@@ -1579,7 +1557,7 @@ fn keyword_highlight_deferred_task_coalesces_latest_snapshot_under_pressure() {
         );
         surface.schedule_keyword_highlights(false, true, cx);
         assert!(surface.keyword_highlight_deferred_task.is_some());
-        assert_ne!(surface.keyword_highlight_pending_key, first_pending_key);
+        assert_ne!(surface.keyword_highlight_pending_key, first_key);
         surface.keyword_highlight_last_started_at = None;
     });
 
@@ -1616,7 +1594,13 @@ fn cancelling_pending_keyword_highlights_keeps_published_highlights() {
         enabled: true,
     }];
     let rules = Arc::new(rules);
-    let highlighter = Arc::new(compile_terminal_keyword_highlighter(rules.as_ref()));
+    let highlighter = Arc::new(compile_terminal_keyword_highlighter(
+        rules.as_ref(),
+        zzclawterm_terminal_gpui::TerminalKeywordHighlightConfig {
+            line_roles: true,
+            ansi: zzclawterm_ui::theme_palette("github-dark").terminal_ansi,
+        },
+    ));
     let highlights = Arc::new(precompute_terminal_keyword_highlights(
         &snapshot,
         highlighter.as_ref(),
@@ -1664,7 +1648,13 @@ fn transient_empty_keyword_rules_keep_pending_highlights() {
     surface.keyword_highlight_generation = 41;
     surface.keyword_highlight_pending_key = Some(pending_key);
     surface.keyword_highlighter_rules = Some(Arc::new(Vec::new()));
-    surface.keyword_highlighter = Some(Arc::new(compile_terminal_keyword_highlighter(&[])));
+    surface.keyword_highlighter = Some(Arc::new(compile_terminal_keyword_highlighter(
+        &[],
+        zzclawterm_terminal_gpui::TerminalKeywordHighlightConfig {
+            line_roles: true,
+            ansi: zzclawterm_ui::theme_palette("github-dark").terminal_ansi,
+        },
+    )));
     surface.keyword_highlights = Some(Arc::new(precompute_terminal_keyword_highlights(
         &TerminalScreen::default().viewport_snapshot(0),
         surface.keyword_highlighter.as_ref().unwrap().as_ref(),
@@ -1693,7 +1683,13 @@ fn configured_empty_keyword_rules_clear_pending_highlights() {
     surface.keyword_highlight_generation = 41;
     surface.keyword_highlight_pending_key = Some(pending_key);
     surface.keyword_highlighter_rules = Some(Arc::new(Vec::new()));
-    surface.keyword_highlighter = Some(Arc::new(compile_terminal_keyword_highlighter(&[])));
+    surface.keyword_highlighter = Some(Arc::new(compile_terminal_keyword_highlighter(
+        &[],
+        zzclawterm_terminal_gpui::TerminalKeywordHighlightConfig {
+            line_roles: true,
+            ansi: zzclawterm_ui::theme_palette("github-dark").terminal_ansi,
+        },
+    )));
     surface.keyword_highlights = Some(Arc::new(precompute_terminal_keyword_highlights(
         &TerminalScreen::default().viewport_snapshot(0),
         surface.keyword_highlighter.as_ref().unwrap().as_ref(),
@@ -1720,7 +1716,13 @@ fn cached_keyword_highlighter_reuses_equal_rule_sets() {
     }]);
     let equivalent_rules = Arc::new(cached_rules.as_ref().clone());
     assert!(!Arc::ptr_eq(&cached_rules, &equivalent_rules));
-    let highlighter = Arc::new(compile_terminal_keyword_highlighter(cached_rules.as_ref()));
+    let highlighter = Arc::new(compile_terminal_keyword_highlighter(
+        cached_rules.as_ref(),
+        zzclawterm_terminal_gpui::TerminalKeywordHighlightConfig {
+            line_roles: true,
+            ansi: zzclawterm_ui::theme_palette("github-dark").terminal_ansi,
+        },
+    ));
     let mut surface = TerminalSurface::new("session");
     surface.keyword_highlighter_rules = Some(cached_rules);
     surface.keyword_highlighter = Some(highlighter.clone());
@@ -2284,6 +2286,7 @@ fn promoting_current_scroll_window_does_not_retain_it_again() {
     let scrollback_len = snapshot.scrollback_len;
     let mut surface = TerminalSurface::new("session");
     surface.snapshot = Some(snapshot.clone());
+    surface.history = snapshot.history;
 
     assert!(surface.promote_snapshot_covering_display_offset(1, rows, scrollback_len));
     assert!(surface.retained_snapshots.is_empty());
@@ -2997,7 +3000,7 @@ fn assert_return_to_live_paints_latest_last_row(
         );
     });
     cx.update_entity(&surface, |surface, cx| {
-        surface.set_app(app.clone());
+        surface.set_app(app.clone(), true);
         surface.handle_scroll_wheel(
             &ScrollEvent {
                 delta: if fractional {
@@ -3080,10 +3083,15 @@ fn surface_cursor_tracks_action_link_modifiers_and_selection() {
             session_id: "session".to_string(),
             x: px(10.),
             y: px(20.),
-            kind_label: "URL".to_string(),
-            value: "https://example.com".to_string(),
-            default_action_label: "Open".to_string(),
-            default_action_preview: "https://example.com".to_string(),
+            default_action: crate::action_links::ActionLinkAction {
+                id: "open".to_string(),
+                label: "Open".to_string(),
+                target: crate::action_links::ActionLinkTarget::OpenUrl(
+                    "https://example.com".to_string(),
+                ),
+                mac_format: None,
+                is_default: true,
+            },
             has_more_actions: false,
             match_key: "url|https://example.com|0|19".to_string(),
         });
@@ -4066,7 +4074,7 @@ fn surface_retained_scroll_state_resets_when_viewport_rows_change() {
 }
 
 #[test]
-fn full_history_rotation_discards_retained_rows_and_rejects_old_prefetch() {
+fn full_history_rotation_keeps_surviving_rows_and_converts_old_prefetch() {
     let mut screen = TerminalScreen::new(16, 3);
     screen.set_scrollback_limit(8);
     screen.advance(b"0\r\n1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9\r\n10\r\n");
@@ -4105,14 +4113,11 @@ fn full_history_rotation_discards_retained_rows_and_rejects_old_prefetch() {
         false,
         "block"
     );
-    assert_eq!(surface.retained_snapshots.len(), 1);
-    assert!(
-        surface
-            .retained_rows
-            .values()
-            .all(|row| !old_rows.values().any(|old| Arc::ptr_eq(old, row)))
-    );
-    assert!(!surface.retain_prefetched_snapshot(old));
+    assert_eq!(surface.retained_snapshots.len(), 2);
+    for (key, row) in old_rows {
+        assert!(Arc::ptr_eq(surface.retained_row(key - 2).unwrap(), &row));
+    }
+    assert!(surface.retain_prefetched_snapshot(old));
     assert!(!surface.has_snapshot_covering_display_offset(5, 3, 8));
     assert_eq!(surface.snapshot.as_ref().unwrap().history, fresh.history);
 }
@@ -4190,4 +4195,516 @@ fn pending_local_scroll_reanchors_across_full_history_rotation() {
     let snapshot = surface.snapshot.as_ref().unwrap();
     let anchor = terminal_snapshot_anchor_row_for_display_offset(snapshot, 5, 3, 8);
     assert_eq!(snapshot.line(anchor), Some(reading.as_str()));
+}
+
+fn install_keyword_test_frame(surface: &mut TerminalSurface, snapshot: Arc<TerminalSnapshot>) {
+    let viewport_rows = snapshot.viewport_rows;
+    let scrollback_len = snapshot.scrollback_len;
+    let history = snapshot.history;
+    surface.apply_frame_snapshot(TerminalSurfaceFrameSnapshot::new(
+        snapshot,
+        TerminalScrollVisualState {
+            history,
+            session_id: "highlight-test".into(),
+            scroll_offset: 0,
+            scroll_residual_lines: 0.,
+            display_offset: 0,
+            scrollback_len,
+            viewport_rows,
+            has_new_while_scrolled: false,
+            performance_overlay: None,
+            skipped_output_chars: 0,
+        },
+    ));
+}
+
+#[test]
+fn applying_and_painting_a_frame_does_not_compile_or_parse_keywords() {
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let mut screen = TerminalScreen::new(60, 4);
+    screen.advance(
+        "\u{2003}\u{2003}\u{2003}\u{2003}-rw-r--r-- 1 root root 123 Oct 30 文件.txt".as_bytes(),
+    );
+    let surface = cx.new(|_| TerminalSurface::new("highlight-test"));
+    cx.update_entity(&surface, |surface, _| {
+        surface.keyword_rules =
+            Arc::new(zzclawterm_core::keyword_highlight_presets::get_builtin_keyword_rules(true));
+        install_keyword_test_frame(surface, Arc::new(screen.snapshot()));
+        assert!(surface.keyword_highlighter.is_none());
+        assert!(surface.keyword_highlights.is_none());
+    });
+    let window = cx.open_window(size(px(600.), px(120.)), {
+        let surface = surface.clone();
+        move |_, _| TerminalSurfaceLayoutTestView {
+            surface,
+            mounted: true,
+        }
+    });
+    cx.update_window(window.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.read_entity(&surface, |surface, _| {
+        assert!(surface.keyword_highlighter.is_none());
+        assert!(surface.keyword_highlights.is_none());
+        assert!(surface.keyword_highlight_task.is_none());
+    });
+}
+
+#[test]
+fn output_highlight_preferences_follow_draft_cancel_and_settings_reload_on_open_terminals() {
+    use crate::features::test_support::app_with_visible_local_session;
+    use crate::test_support::TestConfigDir;
+
+    for original_line_roles in [false, true] {
+        let dir = TestConfigDir::new("zzclawterm-highlight-settings-restore");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+        let surfaces = cx.update_entity(&app, |app, cx| {
+            let mut settings = app.settings.summary().clone();
+            settings.ui_highlight_line_roles = original_line_roles;
+            app.apply_gpui_settings(settings, cx);
+            let mut keywords = app.settings.keyword_config().clone();
+            keywords.enabled = true;
+            keywords
+                .builtin_rules
+                .insert("builtin-net-address".into(), false);
+            app.settings.replace_keyword_config(keywords);
+            app.invalidate_paint_theme_caches();
+            [
+                app.ensure_terminal_surface("s1", cx),
+                app.ensure_terminal_surface("s2", cx),
+            ]
+        });
+        cx.update_entity(&app, |app, cx| {
+            app.begin_settings_draft(cx);
+            app.toggle_line_role_highlights(cx);
+            app.toggle_keyword_highlights(cx);
+            assert!(app.resolved_keyword_highlight_rules().is_empty());
+            app.toggle_line_role_highlights(cx);
+            assert_eq!(
+                app.settings.summary().ui_highlight_line_roles,
+                !original_line_roles
+            );
+            app.toggle_keyword_highlights(cx);
+            assert!(!app.resolved_keyword_highlight_rules().is_empty());
+            assert!(!app.settings.keyword_config().builtin_rules["builtin-net-address"]);
+            for surface in &surfaces {
+                assert_eq!(
+                    surface.read(cx).keyword_highlight_config().line_roles,
+                    !original_line_roles
+                );
+            }
+            app.cancel_settings(cx);
+            assert!(app.settings.keyword_config().enabled);
+            assert!(!app.settings.keyword_config().builtin_rules["builtin-net-address"]);
+            for surface in &surfaces {
+                assert_eq!(
+                    surface.read(cx).keyword_highlight_config().line_roles,
+                    original_line_roles
+                );
+            }
+
+            let mut reloaded = app.settings.summary().clone();
+            reloaded.ui_highlight_line_roles = !original_line_roles;
+            app.apply_gpui_settings(reloaded, cx);
+            for surface in &surfaces {
+                assert_eq!(
+                    surface.read(cx).keyword_highlight_config().line_roles,
+                    !original_line_roles
+                );
+            }
+        });
+    }
+}
+
+#[test]
+fn line_role_changes_reject_the_in_flight_configuration_and_recompute() {
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let surface = cx.new(|_| TerminalSurface::new("highlight-test"));
+    let mut screen = TerminalScreen::new(80, 4);
+    screen.advance(b"-rw-r--r-- 1 root root 123 Oct 30 10:00 a.txt");
+    cx.update_entity(&surface, |surface, cx| {
+        surface.keyword_rules =
+            Arc::new(zzclawterm_core::keyword_highlight_presets::get_builtin_keyword_rules(true));
+        install_keyword_test_frame(surface, Arc::new(screen.snapshot()));
+        surface.schedule_keyword_highlights(true, false, cx);
+        assert!(surface.keyword_highlight_task.is_some());
+        for enabled in [false, true, false] {
+            surface.set_line_roles(enabled, cx);
+        }
+        assert!(surface.keyword_highlights.is_none());
+        assert!(surface.keyword_highlighter.is_none());
+        assert!(
+            surface.keyword_highlight_task.is_some(),
+            "cancellation retains the single worker owner"
+        );
+    });
+    cx.run_until_parked();
+    cx.read_entity(&surface, |surface, _| {
+        let config = surface.keyword_highlight_config();
+        assert!(!config.line_roles);
+        assert_eq!(
+            surface.keyword_highlighter.as_ref().unwrap().config(),
+            config
+        );
+        assert_eq!(
+            surface.keyword_highlights.as_ref().unwrap().rules_key(),
+            zzclawterm_terminal_gpui::terminal_keyword_highlight_config_key(
+                &surface.keyword_rules,
+                config
+            )
+        );
+        assert!(surface.keyword_highlight_task.is_none());
+        assert!(surface.keyword_highlight_pending_key.is_none());
+    });
+}
+
+#[test]
+fn output_frames_coalesce_without_restarting_the_running_worker() {
+    let mut cx = TestAppContext::single();
+    let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+    let surface = cx.new(|_| TerminalSurface::new("highlight-test"));
+    let mut screen = TerminalScreen::new(60, 4);
+    screen.advance(b"ERROR initial");
+    cx.update_entity(&surface, |surface, cx| {
+        surface.keyword_rules =
+            Arc::new(zzclawterm_core::keyword_highlight_presets::get_builtin_keyword_rules(true));
+        install_keyword_test_frame(surface, Arc::new(screen.snapshot()));
+        surface.schedule_keyword_highlights(true, false, cx);
+        let generation = surface.keyword_highlight_generation;
+        for index in 0..128 {
+            screen.advance(format!("\r\nERROR output {index}").as_bytes());
+            install_keyword_test_frame(surface, Arc::new(screen.snapshot()));
+            surface.schedule_keyword_highlights(true, false, cx);
+            assert_eq!(surface.keyword_highlight_generation, generation);
+        }
+    });
+    cx.run_until_parked();
+    cx.read_entity(&surface, |surface, _| {
+        let snapshot = surface.snapshot.as_ref().unwrap();
+        assert!(
+            surface
+                .keyword_highlights
+                .as_ref()
+                .unwrap()
+                .matches_snapshot(snapshot, surface.palette)
+        );
+        assert!(surface.keyword_highlight_task.is_none());
+        assert!(surface.keyword_highlight_pending_key.is_none());
+    });
+}
+
+#[test]
+fn changing_only_the_palette_invalidates_compiled_and_published_highlights() {
+    let rules =
+        Arc::new(zzclawterm_core::keyword_highlight_presets::get_builtin_keyword_rules(true));
+    let mut surface = TerminalSurface::new("palette-test");
+    surface.keyword_rules = rules.clone();
+    surface.keyword_highlighter_rules = Some(rules.clone());
+    surface.keyword_highlighter = Some(Arc::new(compile_terminal_keyword_highlighter(
+        &rules,
+        surface.keyword_highlight_config(),
+    )));
+    surface.palette.terminal_ansi[12] ^= 0x00ffff;
+    assert!(
+        surface
+            .cached_keyword_highlighter_for_rules(&rules)
+            .is_none()
+    );
+    surface.invalidate_keyword_highlight_config();
+    assert!(surface.keyword_highlighter.is_none());
+    assert!(surface.keyword_highlights.is_none());
+}
+
+#[test]
+fn full_history_repeated_rotation_keeps_text_selection_and_row_allocations() {
+    for limit in [128, 5000, 100000] {
+        assert_history_rotation_reuses_rows(limit);
+    }
+}
+
+fn assert_history_rotation_reuses_rows(limit: usize) {
+    let mut screen = TerminalScreen::new(32, 4);
+    screen.set_scrollback_limit(limit);
+    for index in 0..limit + 6 {
+        screen.advance_decoded_text(&format!("line {index}\r\n"));
+    }
+    let original = Arc::new(screen.viewport_snapshot_with_window(40, 8, 8));
+    let mut surface = TerminalSurface::new("session");
+    apply_test_frame_snapshot!(
+        surface,
+        original.clone(),
+        40,
+        0.0,
+        40,
+        limit,
+        4,
+        false,
+        None,
+        0,
+        false,
+        false,
+        "block"
+    );
+    let start = original.total_rows - original.display_offset - original.row_count();
+    let selection = TerminalSelection::from_range(
+        TerminalBufferCellPos::new(start + 8, 1),
+        TerminalBufferCellPos::new(start + 9, 3),
+    );
+    surface.set_selection_visual(Some(selection));
+    let cache_keys: Vec<_> = surface.retained_rows.keys().copied().collect();
+    for delta in 1..=20 {
+        screen.advance(b"new line\r\n");
+        let state = TerminalScrollVisualState {
+            history: screen.history_state(),
+            session_id: "session".into(),
+            scroll_offset: 40 + delta,
+            scroll_residual_lines: 0.0,
+            display_offset: 40 + delta,
+            scrollback_len: limit,
+            viewport_rows: 4,
+            has_new_while_scrolled: true,
+            performance_overlay: None,
+            skipped_output_chars: 0,
+        };
+        surface.apply_scroll_visual_state(state);
+        let retained = surface.snapshot.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&original.row_data, &retained.row_data));
+        assert_eq!(
+            retained.line(8),
+            screen.viewport_snapshot(40 + delta).line(0)
+        );
+        assert_eq!(surface.selection_visual, selection.after_eviction(delta));
+        assert_eq!(surface.retained_row_origin, delta);
+        assert_eq!(
+            surface.retained_rows.keys().copied().collect::<Vec<_>>(),
+            cache_keys
+        );
+        assert!(!surface.scroll_snapshot_pending);
+        assert!(surface.retained_rows.len() <= TERMINAL_SURFACE_RETAINED_ROW_LIMIT);
+        assert!(surface.retained_row_estimated_bytes <= TERMINAL_SURFACE_RETAINED_ROW_BYTE_LIMIT);
+    }
+}
+
+#[test]
+fn late_oldest_prefetch_supplies_retained_rows_without_committing_its_stale_window() {
+    let mut screen = TerminalScreen::new(16, 3);
+    screen.set_scrollback_limit(128);
+    screen.advance(&b"history\r\n".repeat(134));
+    let paint = Arc::new(screen.viewport_snapshot(128));
+    let prefetch = screen.viewport_snapshot_with_window(128, 0, 16);
+    let mut surface = TerminalSurface::new("session");
+    apply_test_frame_snapshot!(
+        surface,
+        paint.clone(),
+        128,
+        0.0,
+        128,
+        128,
+        3,
+        false,
+        None,
+        0,
+        false,
+        false,
+        "block"
+    );
+    screen.advance(b"new\r\nnew\r\n");
+    let state = TerminalScrollVisualState {
+        history: screen.history_state(),
+        session_id: "session".into(),
+        scroll_offset: 128,
+        scroll_residual_lines: 0.0,
+        display_offset: 128,
+        scrollback_len: 128,
+        viewport_rows: 3,
+        has_new_while_scrolled: true,
+        performance_overlay: None,
+        skipped_output_chars: 0,
+    };
+    surface.apply_scroll_visual_state(state.clone());
+    assert!(Arc::ptr_eq(surface.snapshot.as_ref().unwrap(), &paint));
+    assert!(!surface.retain_prefetched_snapshot(Arc::new(prefetch.clone())));
+    assert!(surface.retain_surviving_prefetched_rows(&prefetch));
+    surface.apply_scroll_visual_state(state);
+    let snapshot = surface.snapshot.as_ref().unwrap();
+    assert_eq!(snapshot.history, screen.history_state());
+    assert!(Arc::ptr_eq(&snapshot.row_data[0], &prefetch.row_data[2]));
+    assert!(!surface.scroll_snapshot_pending);
+}
+
+#[test]
+fn late_oldest_logical_frame_paints_only_retained_rows_with_its_source_index() {
+    let mut screen = TerminalScreen::new(16, 3);
+    screen.set_scrollback_limit(128);
+    screen.set_logical_line_snapshots(true);
+    screen.advance(&b"history\r\n".repeat(134));
+    let snapshot = Arc::new(screen.viewport_snapshot_with_window(128, 0, 16));
+    let mut surface = TerminalSurface::new("session");
+    surface.wrap_mode = zzclawterm_core::models::settings::TerminalWrapMode::None;
+    screen.advance(b"new\r\nnew\r\n");
+    let state = TerminalScrollVisualState {
+        history: screen.history_state(),
+        session_id: "session".into(),
+        scroll_offset: 128,
+        scroll_residual_lines: 0.0,
+        display_offset: 128,
+        scrollback_len: 128,
+        viewport_rows: 3,
+        has_new_while_scrolled: true,
+        performance_overlay: None,
+        skipped_output_chars: 0,
+    };
+    assert!(surface.apply_retained_logical_frame(snapshot.clone(), &state));
+    assert_eq!(surface.history, state.history);
+    assert_eq!(surface.display_offset, 126);
+    assert!(Arc::ptr_eq(surface.snapshot.as_ref().unwrap(), &snapshot));
+    assert!(!surface.has_snapshot_covering_display_offset(128, 3, 128));
+}
+
+#[test]
+fn full_history_missing_target_keeps_last_paint_and_its_decorations() {
+    let mut screen = TerminalScreen::new(16, 3);
+    screen.set_scrollback_limit(8);
+    screen.advance(b"0\r\n1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9\r\n10\r\n");
+    let old = Arc::new(screen.viewport_snapshot(8));
+    let mut surface = TerminalSurface::new("session");
+    apply_test_frame_snapshot!(
+        surface,
+        old.clone(),
+        8,
+        0.0,
+        8,
+        8,
+        3,
+        false,
+        None,
+        0,
+        false,
+        false,
+        "block"
+    );
+    surface.decorations = Arc::from(vec![TerminalLineDecorations {
+        link_ranges: vec![(0, 1)],
+        ..Default::default()
+    }]);
+    let decorations = surface.decorations.clone();
+    screen.advance(b"11\r\n");
+    surface.apply_scroll_visual_state(TerminalScrollVisualState {
+        history: screen.history_state(),
+        session_id: "session".into(),
+        scroll_offset: 8,
+        scroll_residual_lines: 0.0,
+        display_offset: 8,
+        scrollback_len: 8,
+        viewport_rows: 3,
+        has_new_while_scrolled: true,
+        performance_overlay: None,
+        skipped_output_chars: 0,
+    });
+    assert!(Arc::ptr_eq(surface.snapshot.as_ref().unwrap(), &old));
+    assert!(Arc::ptr_eq(&surface.decorations, &decorations));
+    assert!(!surface.has_snapshot_covering_display_offset(8, 3, 8));
+}
+
+#[test]
+fn full_history_mixed_live_prefetch_synthesizes_only_surviving_rows() {
+    let mut screen = TerminalScreen::new(32, 4);
+    screen.set_scrollback_limit(128);
+    for index in 0..134 {
+        screen.advance_decoded_text(&format!("line {index}\r\n"));
+    }
+    let original = Arc::new(screen.viewport_snapshot_with_window(20, 8, 20));
+    let reading = screen.viewport_snapshot(20).line(0).unwrap().to_string();
+    let mut surface = TerminalSurface::new("session");
+    apply_test_frame_snapshot!(
+        surface,
+        original.clone(),
+        20,
+        0.0,
+        20,
+        128,
+        4,
+        false,
+        None,
+        0,
+        false,
+        false,
+        "block"
+    );
+    screen.advance(b"new line\r\n");
+    surface.apply_scroll_visual_state(TerminalScrollVisualState {
+        history: screen.history_state(),
+        session_id: "session".into(),
+        scroll_offset: 21,
+        scroll_residual_lines: 0.0,
+        display_offset: 21,
+        scrollback_len: 128,
+        viewport_rows: 4,
+        has_new_while_scrolled: true,
+        performance_overlay: None,
+        skipped_output_chars: 0,
+    });
+    let fresh = surface.snapshot.as_ref().unwrap();
+    assert_eq!(fresh.history, screen.history_state());
+    let anchor = terminal_snapshot_anchor_row_for_display_offset(fresh, 21, 4, 128);
+    assert_eq!(fresh.line(anchor), Some(reading.as_str()));
+    assert!(
+        original
+            .rows()
+            .iter()
+            .any(|row| Arc::ptr_eq(row, &fresh.row_data[anchor]))
+    );
+}
+
+#[test]
+fn full_history_no_wrap_wait_keeps_long_line_frame_and_source_index() {
+    let mut screen = TerminalScreen::new(8, 3);
+    screen.set_scrollback_limit(128);
+    screen.set_logical_line_snapshots(true);
+    screen.advance("x".repeat(800).as_bytes());
+    screen.advance(b"\r\n");
+    for _ in 0..35 {
+        screen.advance(b"tail\r\n");
+    }
+    let old = Arc::new(screen.viewport_snapshot(50));
+    let mut surface = TerminalSurface::new("session");
+    surface.wrap_mode = zzclawterm_core::models::settings::TerminalWrapMode::None;
+    apply_test_frame_snapshot!(
+        surface,
+        old.clone(),
+        50,
+        0.0,
+        50,
+        128,
+        3,
+        false,
+        None,
+        0,
+        false,
+        false,
+        "block"
+    );
+    screen.advance(b"new\r\n");
+    surface.apply_scroll_visual_state(TerminalScrollVisualState {
+        history: screen.history_state(),
+        session_id: "session".into(),
+        scroll_offset: 51,
+        scroll_residual_lines: 0.0,
+        display_offset: 51,
+        scrollback_len: 128,
+        viewport_rows: 3,
+        has_new_while_scrolled: true,
+        performance_overlay: None,
+        skipped_output_chars: 0,
+    });
+    assert!(Arc::ptr_eq(surface.snapshot.as_ref().unwrap(), &old));
+    assert!(surface.retained_rows.is_empty());
+    assert!(!surface.has_snapshot_covering_display_offset(51, 3, 128));
+    assert!(surface.unwrapped_layout(&old).is_some());
 }

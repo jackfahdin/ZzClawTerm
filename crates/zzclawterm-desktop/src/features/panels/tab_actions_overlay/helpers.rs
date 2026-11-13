@@ -91,6 +91,10 @@ mod tests {
 
         assert_eq!(tab_actions_menu_content_height(saved_ssh), 604.);
         assert_eq!(tab_actions_menu_content_height(local), 520.);
+        assert_eq!(
+            tab_actions_menu_content_height(policy(TabSessionCapability::AdbShell, false)),
+            tab_actions_menu_content_height(local),
+        );
         assert_eq!(tab_actions_menu_content_height(saved_vnc), 306.);
     }
 

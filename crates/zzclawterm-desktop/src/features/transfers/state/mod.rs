@@ -9,6 +9,7 @@ mod admission;
 mod browser;
 mod clipboard;
 mod delete;
+mod privilege;
 pub(in crate::features) use browser::TransferSessionTransferBundle;
 pub(in crate::features) use clipboard::TransferFileClipboard;
 pub(super) use delete::TransferDeleteOutcome;
@@ -50,10 +51,14 @@ use zzclawterm_ui::{ChildWindowSlot, ZzClawWindowHandle};
 
 struct TransferRetryContext {
     options: SftpPathTransferOptions,
-    source: Option<std::sync::Weak<zzclawterm_files::remote_file::RemoteFileService>>,
+    source: Option<zzclawterm_files::file_browser::WeakFileBrowserService>,
+    local: bool,
+    upload_target_lock: Option<Arc<std::sync::Mutex<()>>>,
 }
 
 pub(in crate::features) struct TransferFeatureState {
+    pub(super) sudo_prompt: Option<super::privilege_runtime::FileSudoPrompt>,
+    external_file_tasks: HashMap<String, std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     file_operations: HashMap<String, super::file_operations::FileOperationContext>,
     clipboard: Option<TransferFileClipboard>,
     clipboard_generation: u64,
@@ -190,6 +195,7 @@ pub(super) struct TransferBrowserState {
     /// Latest SFTP navigation job per session; older results must not rewind the browser.
     pub(super) navigation_jobs: HashMap<String, String>,
     pub(super) pending_navigations: HashMap<String, TransferBrowserNavigationSnapshot>,
+    pub(super) navigation_handles: HashMap<String, crate::blocking_jobs::JobHandle>,
     pub(super) pending_cwd_sync: bool,
     #[cfg(test)]
     pub(super) directory_requests: Option<Vec<(String, zzclawterm_files::sftp::RemoteFilePath)>>,
@@ -201,6 +207,7 @@ pub(super) struct TransferBrowserState {
     pub(super) selected_remote_path: Option<String>,
     pub(super) selected_remote_paths: HashSet<String>,
     pub(super) drag_selection: Option<TransferBrowserDragSelectionState>,
+    pub(super) pending_selection_click: Option<String>,
     pub(super) external_drop_hover: bool,
     pub(super) context_target: TransferBrowserContextTarget,
     pub(super) rename_click_candidate: Option<String>,
@@ -366,6 +373,8 @@ impl TransferFeatureState {
     ) -> Self {
         let (tx, rx) = unbounded();
         Self {
+            sudo_prompt: None,
+            external_file_tasks: HashMap::new(),
             file_operations: HashMap::new(),
             clipboard: None,
             clipboard_generation: 0,
@@ -404,6 +413,7 @@ impl TransferFeatureState {
                 session_cache: HashMap::new(),
                 navigation_jobs: HashMap::new(),
                 pending_navigations: HashMap::new(),
+                navigation_handles: HashMap::new(),
                 pending_cwd_sync: false,
                 #[cfg(test)]
                 directory_requests: None,
@@ -418,6 +428,7 @@ impl TransferFeatureState {
                 external_drop_hover: false,
                 context_target: TransferBrowserContextTarget::default(),
                 rename_click_candidate: None,
+                pending_selection_click: None,
                 pending_rename: None,
                 pending_rename_token: 0,
                 favorites_menu: None,
@@ -504,9 +515,31 @@ impl TransferFeatureState {
     }
 
     pub(in crate::features) fn cancel_bulk_jobs_for_session(&mut self, session: &str) {
+        self.cancel_session_jobs(session, false);
+    }
+
+    pub(in crate::features) fn cancel_bulk_jobs_for_closed_view(
+        &mut self,
+        session: &str,
+        adb: bool,
+    ) {
+        self.cancel_session_jobs(session, adb);
+    }
+
+    fn cancel_session_jobs(&mut self, session: &str, preserve_adb_transfers: bool) {
         for job in &mut self.queue.jobs {
+            let file_transfer = matches!(
+                job.kind,
+                crate::models::TransferJobKind::Upload { .. }
+                    | crate::models::TransferJobKind::Download { .. }
+                    | crate::models::TransferJobKind::DragExport { .. }
+            );
+            if preserve_adb_transfers && file_transfer && job.session_id.as_deref() == Some(session)
+            {
+                continue;
+            }
             let target_matches = matches!(&job.kind, crate::models::TransferJobKind::SendTo { target_session_id, .. } if target_session_id == session);
-            if self.admission.manages(&job.id)
+            if (self.admission.manages(&job.id) || file_transfer)
                 && (job.session_id.as_deref() == Some(session) || target_matches)
                 && let Some(control) = &job.control
             {
@@ -563,6 +596,8 @@ impl TransferFeatureState {
             TransferRetryContext {
                 options: retry_options,
                 source: None,
+                local: false,
+                upload_target_lock: None,
             },
         );
         path_options
@@ -572,13 +607,15 @@ impl TransferFeatureState {
         &mut self,
         job_id: &str,
         options: SftpPathTransferOptions,
-        source: std::sync::Weak<zzclawterm_files::remote_file::RemoteFileService>,
+        source: impl Into<zzclawterm_files::file_browser::WeakFileBrowserService>,
     ) {
         self.path_options_by_job.insert(
             job_id.to_owned(),
             TransferRetryContext {
                 options,
-                source: Some(source),
+                source: Some(source.into()),
+                local: false,
+                upload_target_lock: None,
             },
         );
     }
@@ -586,10 +623,54 @@ impl TransferFeatureState {
     pub(in crate::features) fn promised_download_source(
         &self,
         job_id: &str,
-    ) -> Option<std::sync::Weak<zzclawterm_files::remote_file::RemoteFileService>> {
+    ) -> Option<zzclawterm_files::file_browser::WeakFileBrowserService> {
         self.path_options_by_job
             .get(job_id)
             .and_then(|context| context.source.clone())
+    }
+
+    pub(in crate::features) fn bind_transfer_job_source(
+        &mut self,
+        job_id: &str,
+        service: &zzclawterm_files::file_browser::FileBrowserService,
+    ) {
+        if let Some(context) = self.path_options_by_job.get_mut(job_id) {
+            context.source = service.downgrade();
+            context.local =
+                service.kind() == zzclawterm_files::file_browser::FileBrowserBackendKind::Local;
+        }
+    }
+
+    pub(in crate::features) fn transfer_job_is_local(&self, job_id: &str) -> bool {
+        self.path_options_by_job
+            .get(job_id)
+            .is_some_and(|context| context.local)
+    }
+
+    pub(in crate::features) fn bind_upload_target_lock(
+        &mut self,
+        job_id: &str,
+        lock: Arc<std::sync::Mutex<()>>,
+    ) {
+        if let Some(context) = self.path_options_by_job.get_mut(job_id) {
+            context.upload_target_lock = Some(lock);
+        }
+    }
+
+    pub(in crate::features) fn upload_target_lock(
+        &self,
+        job_id: &str,
+    ) -> Arc<std::sync::Mutex<()>> {
+        self.path_options_by_job
+            .get(job_id)
+            .and_then(|context| context.upload_target_lock.clone())
+            .unwrap_or_else(|| Arc::new(std::sync::Mutex::new(())))
+    }
+
+    pub(in crate::features) fn is_promised_download(&self, job_id: &str) -> bool {
+        self.path_options_by_job
+            .get(job_id)
+            .is_some_and(|context| context.options.is_promised_download())
     }
 
     /// 已有任务沿用原策略和 Ask 决定，只接受当前的执行参数；旧任务才使用回退值。
@@ -1236,7 +1317,7 @@ impl TransferFeatureState {
         remote_path: String,
         raw_path_token: Option<String>,
         local_path: std::path::PathBuf,
-        baseline: crate::models::external_editor::ExternalEditorFileVersion,
+        baseline: zzclawterm_files::local_revision::LocalFileVersion,
     ) -> Result<(), String> {
         let watcher = ExternalEditorWatcher::spawn(
             job_id.clone(),
@@ -1417,6 +1498,9 @@ impl TransferFeatureState {
             changed |= source.session_id() == Some(old_id) || target.session_id() == Some(old_id);
             context.replace_session(old_id, new_id);
         }
+        if self.invalidate_browser_navigation(old_id).is_some() {
+            changed = true;
+        }
         self.tree.replace_session(old_id, new_id);
         if self.file_ops.delete_refresh_pending.remove(old_id) {
             self.file_ops
@@ -1429,10 +1513,6 @@ impl TransferFeatureState {
             changed = true;
         }
 
-        if let Some(job_id) = self.browser.navigation_jobs.remove(old_id) {
-            self.browser.pending_navigations.remove(&job_id);
-            changed = true;
-        }
         self.prune_unreferenced_browser_navigation_snapshots();
 
         for job in &mut self.queue.jobs {

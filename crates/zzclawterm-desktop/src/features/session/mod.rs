@@ -2,8 +2,8 @@
 mod transfer_wire;
 
 use crate::app_shell::session_hub::ssh_connections::SshConnectionLease;
+use remote_files::RemoteFilesSession;
 use std::collections::HashMap;
-use zzclawterm_files::remote_file::RemoteFileService;
 
 mod auth_runtime;
 mod duplicate_prompts;
@@ -11,11 +11,15 @@ pub(in crate::features) mod notice_runtime;
 pub(in crate::features) mod notices;
 mod prompt_runtime;
 mod recording_runtime;
+pub(in crate::features) mod remote_files;
 pub(in crate::features) mod runtime_auth;
 mod session_dialog_runtime;
 mod session_lifecycle;
 mod session_order;
 mod session_runtime;
+pub(in crate::features) use session_runtime::{
+    SessionStartFocusTarget, SshSessionConfigBuildContext,
+};
 mod session_state;
 mod start_tab_actions;
 mod startup_restore_runtime;
@@ -31,7 +35,7 @@ struct SessionProtocolRuntimeState {
     xymodem: HashMap<String, xymodem_runtime::XymodemSessionState>,
     zmodem: HashMap<String, zmodem_runtime::ZmodemSessionState>,
     trzsz: HashMap<String, trzsz_runtime::TrzszSessionState>,
-    remote_files: HashMap<String, std::sync::Arc<RemoteFileService>>,
+    remote_files: HashMap<String, RemoteFilesSession>,
     ssh_connections: HashMap<String, SshConnectionLease>,
 }
 
@@ -46,6 +50,7 @@ impl SessionProtocolRuntimeState {
         for state in self.trzsz.values_mut() {
             state.stop_workers();
         }
+        self.remote_files.clear();
         self.ssh_connections.clear();
     }
 }

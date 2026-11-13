@@ -1,6 +1,9 @@
 use rust_i18n::t;
 
-use gpui::{AnyWindowHandle, Context, IntoElement as _, ParentElement as _, Window, div};
+use gpui::{
+    AnyWindowHandle, AppContext, Context, IntoElement as _, ParentElement as _, WeakEntity, Window,
+    div,
+};
 use zzclawterm_ui::ZzClawDialogWindowExt as _;
 
 use crate::features::{
@@ -135,6 +138,7 @@ impl ZzClawTermApp {
     ) {
         self.hide_secret_inputs(cx);
         self.security.lock_secrets();
+        self.cancel_file_sudo_prompt(cx);
         self.forget_text_inputs("security.editor.");
         self.connection_state.clear_editor_secrets(cx);
         self.forget_text_inputs("security.unlock.password");
@@ -169,11 +173,28 @@ impl ZzClawTermApp {
                     .map_err(|error| error.to_string())
             });
             let result = await_blocking_job(task).await.and_then(|result| result);
-            let _ = ZzClawTermApp::update_in_main_window(&this, cx, |this, window, cx| {
-                this.finish_security_unlock(request_id, generation, origin, result, window, cx);
-            });
+            let _ = Self::dispatch_security_unlock_result(
+                &this, cx, request_id, generation, origin, result,
+            );
         })
         .detach();
+    }
+
+    fn dispatch_security_unlock_result<C: AppContext>(
+        this: &WeakEntity<Self>,
+        cx: &mut C,
+        request_id: u64,
+        generation: u64,
+        origin: AnyWindowHandle,
+        result: Result<bool, String>,
+    ) -> anyhow::Result<()> {
+        // Secret prompts can belong to child windows. Neither the main window
+        // nor the last window that rendered the app owns this dialog's result.
+        cx.update_window(origin, |_, window, cx| {
+            this.update(cx, |this, cx| {
+                this.finish_security_unlock(request_id, generation, origin, result, window, cx);
+            })
+        })?
     }
 
     pub(in crate::features) fn finish_security_unlock(
@@ -204,9 +225,9 @@ impl ZzClawTermApp {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(50))
                     .await;
-                let _ = ZzClawTermApp::update_in_main_window(&this, cx, |app, window, cx| {
-                    app.finish_security_unlock(request_id, generation, origin, result, window, cx);
-                });
+                let _ = Self::dispatch_security_unlock_result(
+                    &this, cx, request_id, generation, origin, result,
+                );
             })
             .detach();
             return;
@@ -338,6 +359,9 @@ impl ZzClawTermApp {
         .detach();
     }
 }
+
+#[cfg(test)]
+mod origin_tests;
 
 #[cfg(test)]
 mod tests {

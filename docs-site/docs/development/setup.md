@@ -177,15 +177,21 @@ Release workflow 需要 Tauri updater 签名 Secrets；`ZZCLAWTERM_GITHUB_GIST_C
 
 ## CI 按需执行
 
-Rust 工作流先运行轻量的 `orchestrate`，验证筛选规则并比较 PR 事件中的 base SHA 与实际测试的合并提交。它按全部变更路径的并集选择任务，并在 Actions 的 Job Summary 中列出原因。普通 Rust 改动仍执行现有 lint 和 Linux、macOS、Windows workspace 测试；应用翻译 JSON 也保留这些验证。
+Rust 和 Docs 工作流先运行轻量的 `orchestrate`，验证筛选规则：PR 比较 base SHA 与实际测试的合并提交，push 比较 before/after，Merge Queue 比较 base_sha/head_sha。它按全部变更路径的并集选择任务，并在 Actions 的 Job Summary 中列出原因。普通 Rust 改动仍执行现有 lint 和 Linux、macOS、Windows workspace 测试；应用翻译 JSON 也保留这些验证。
 
-四组 tmux 兼容性任务仅在 transport、terminal、core、插件 API、MCP 协议及共享构建/CI 配置变化时运行。插件 SDK 根据插件示例、脚本及相关 crate 变化运行；Python 和工作流检查也有各自的路径规则。纯文档站或根目录 Markdown 改动跳过 Rust 重型任务，`Docs` 工作流仍照常构建全部 locale。
+四组 tmux 兼容性任务仅在 transport、terminal、core、插件 API、MCP 协议及共享构建/CI 配置变化时运行。插件 SDK 根据插件示例、脚本及相关 crate 变化运行；Python 和工作流检查也有各自的路径规则。纯文档站或根目录 Markdown 改动只执行文档相关验证；纯 Rust 改动跳过文档站构建。共享构建配置或无法分类的路径启用全套检查。
 
-给 PR 添加 `run-tmux` 标签可以强制执行完整 tmux 矩阵；标签保留时，后续提交也会继续运行。标签事件同时重新执行该 PR 按路径应运行的其他检查，不会只报告 tmux 结果。Push 到 `main` 或 `migration/gpui`、Merge Queue 和手动运行 `Rust` 工作流都会执行完整任务集。
+给 PR 添加 `run-tmux` 标签可以强制执行完整 tmux 矩阵；标签保留时，后续提交也会继续运行。标签事件同时重新执行该 PR 按路径应运行的其他检查，不会只报告 tmux 结果。Push 到 `main` 或 `migration/gpui` 及 Merge Queue 也按改动选择任务；手动运行保持全量。每周日北京时间 03:00（UTC cron `0 19 * * 6`）在默认 main 分支运行完整常规 CI。focal Docker 构建只通过 Release 调用或手动运行。
 
 筛选无法识别的路径、新 crate、Cargo 清单/锁文件及共享构建配置改动会启用全部任务；比较版本缺失或 Git diff 失败也回退到全量。筛选脚本异常或其回归测试失败则使 `Rust gate` 失败。新增 workspace crate 或调整相关 crate 的依赖时，需要同步更新 `scripts/ci/select_rust_jobs.py` 的登记与依赖集合，清单检查会防止漏测。
 
 `Rust gate` 和 `Docs gate` 保持为统一 Required Check，并支持 Merge Queue。Gate 始终汇总依赖结果：成功和按条件跳过可以通过，失败或取消不能通过。
+
+普通 CI 与发布共用根目录 `rust-toolchain.toml` 固定的 Rust 1.99.1。Python 脚本测试通过 `python scripts/ci/test_scripts.py` 自动发现；Windows 资源、WiX 和诊断原生测试分别通过 `--suite windows-resources`、`--suite windows-msi`、`--suite diagnostic` 执行，指定套件缺少必需工具会失败。每个平台的跳过数量写入 Job Summary。
+
+Release 和 Snapshot 共用六平台打包流程，来源记录绑定实际源码、target/variant、编译器、锁文件、构建配置与文件哈希。旧来源记录可用 `release_provenance.py verify --legacy` 验证；正式发布要求完整版本 2 记录及全部兼容包，信息不完整时重建全部产物。发布后的结构化回执供 Gitee、AUR 和 Homebrew 共用；渠道失败可单独重试。恢复步骤见 [Release 工具说明](https://github.com/nyakang/zzclawterm/blob/main/scripts/release/README.md)。
+
+稳定版、预发布版和 `verify_release=true` 签名演练均包含 glibc 2.31；普通 Linux 安装包保持 glibc 2.35 基线。在对应 GitHub Release 附件中获取 `_linux_x64_glibc231.tar.gz` 或 `.deb`，并核对 `SHA256SUMS`。兼容包继续手动升级，不更改现有自动更新渠道。Continuous Build 默认构建六平台原生包，保留 `continuous-build` 固定下载链接；Windows 安装包统一使用 Inno Setup。
 
 ## 文档站开发
 
@@ -216,9 +222,9 @@ pnpm --dir docs-site build
 
 ## 修改第三方依赖
 
-ZzClawTerm 打了补丁的第三方依赖**没有 vendor 到仓库里**。全部 10 个都是 [github.com/jackfahdin](https://github.com/jackfahdin) 名下 fork 的 `nyaterm` 分支上的补丁序列（fork 自 [github.com/nyakang](https://github.com/nyakang) 下的原始序列），由 Cargo 从 GitHub 按根 `Cargo.toml` 固定的 revision 拉取：`alacritty`、`gpui-kit`、`IronRDP`、`portable-pty`、`russh`、`russh-sftp`、`sspi-rs`、`vnc-rs`、`zed`（`gpui`）和 `zmodem2`。[gitcode.com/JackfahdinImport](https://gitcode.com/JackfahdinImport) 仅作镜像，以方便中国大陆访问。
+ZzClawTerm 打了补丁的第三方依赖**没有 vendor 到仓库里**。全部 10 个都是 [github.com/jackfahdin](https://github.com/jackfahdin) 名下 fork 的 `zzclawterm` 分支上的补丁序列（fork 自 [github.com/nyakang](https://github.com/nyakang) 下的原始序列），由 Cargo 从 GitHub 按根 `Cargo.toml` 固定的 revision 拉取：`alacritty`、`gpui-kit`、`IronRDP`、`portable-pty`、`russh`、`russh-sftp`、`sspi-rs`、`vnc-rs`、`zed`（`gpui`）和 `zmodem2`。[gitcode.com/JackfahdinImport](https://gitcode.com/JackfahdinImport) 仅作镜像，以方便中国大陆访问。
 
-改动流程是：提交到 fork 分支 → 推送 → 在根 `Cargo.toml` 里 bump revision。补丁按关注点拆分而不是压成一个提交，并在提交信息和该分支的 `NYATERM.md` 里记录原因与验证方式。已有序列优先 rebase 到更新的上游 revision，而不是不断累积快照。
+改动流程是：提交到 fork 分支 → 推送 → 在根 `Cargo.toml` 里 bump revision。补丁按关注点拆分而不是压成一个提交，并在提交信息和该分支的 `ZZCLAWTERM.md` 里记录原因与验证方式。已有序列优先 rebase 到更新的上游 revision，而不是不断累积快照。
 
 `temp/vendor/` 下是这些源码的只读本地副本，仅供阅读。**它不参与编译，改动那里既不会生效也不会报错。**
 

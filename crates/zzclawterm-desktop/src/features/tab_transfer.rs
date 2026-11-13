@@ -20,6 +20,7 @@ pub(crate) struct WorkspaceTabTransferBundle {
     completion: Vec<super::commands::CompletionSessionTransfer>,
     terminal: TerminalSessionTransferBundle,
     transfer: TransferSessionTransferBundle,
+    android: super::android::AndroidTabTransfer,
     sync_input: SyncInputTransferBundle,
     source_index: usize,
     source_active_id: Option<String>,
@@ -218,7 +219,9 @@ impl ZzClawTermApp {
         {
             return Err("stop the active recording before moving this tab".to_string());
         }
-        if self.transfer.session_has_active_transfer(&session_ids) {
+        if self.transfer.session_has_active_transfer(&session_ids)
+            || self.transfer.has_external_file_tasks(&session_ids)
+        {
             return Err(
                 "wait for active file transfers to finish before moving this tab".to_string(),
             );
@@ -233,6 +236,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) -> Result<WorkspaceTabTransferBundle, String> {
         let session_ids = self.can_transfer_tab_tree(root_tab_id, source_revision, cx)?;
+        self.cancel_file_sudo_for_sessions(&session_ids, cx);
         let source_index = self.session.session_index(root_tab_id).unwrap_or(0);
         let source_active_id = self.session.active_id_owned();
         let source_terminal_tree = self.shell.terminal_window_tree();
@@ -252,6 +256,9 @@ impl ZzClawTermApp {
         };
         let terminal = self.terminal.detach_sessions_for_transfer(frames);
         let transfer = self.transfer.detach_sessions_for_transfer(&session_ids);
+        let android = self
+            .android
+            .detach_tab(&session_ids, &mut self.file_manager);
         let sync_input = self.sync_input.detach_sessions_for_transfer(&session_ids);
         let catalog = self
             .session
@@ -294,6 +301,7 @@ impl ZzClawTermApp {
             completion,
             terminal,
             transfer,
+            android,
             sync_input,
             source_index,
             source_active_id,
@@ -310,6 +318,12 @@ impl ZzClawTermApp {
         if let Err(error) = self.can_accept_tab_tree(&bundle.session_ids, placement) {
             return Err(Box::new((error, bundle)));
         }
+        if !self.android.can_attach_tab(&bundle.android) {
+            return Err(Box::new((
+                rust_i18n::t!("android.errors.leaseConflict").into_owned(),
+                bundle,
+            )));
+        }
         let insert_index = match placement {
             MoveTabPlacement::BeforeTab(tab_id) => self.session.session_index(tab_id),
             MoveTabPlacement::AfterTab(tab_id) => {
@@ -323,6 +337,7 @@ impl ZzClawTermApp {
             completion,
             terminal,
             transfer,
+            android,
             sync_input,
             pane_root,
             source_index,
@@ -341,6 +356,7 @@ impl ZzClawTermApp {
                     completion,
                     terminal,
                     transfer,
+                    android,
                     sync_input,
                     source_index,
                     source_active_id,
@@ -353,6 +369,9 @@ impl ZzClawTermApp {
         for id in &session_ids {
             self.ensure_sftp_session_view(id, cx);
         }
+        self.android
+            .attach_tab(android, &mut self.file_manager, cx.entity(), cx);
+        self.ensure_android_clock(cx);
         self.commands.accept_completion_sessions(completion);
         self.rebind_zmodem_recording();
         self.transfer.attach_sessions_from_transfer(transfer);
@@ -409,6 +428,9 @@ impl ZzClawTermApp {
         for id in &bundle.session_ids {
             self.ensure_sftp_session_view(id, cx);
         }
+        self.android
+            .attach_tab(bundle.android, &mut self.file_manager, cx.entity(), cx);
+        self.ensure_android_clock(cx);
         self.commands.accept_completion_sessions(bundle.completion);
         self.rebind_zmodem_recording();
         self.transfer.attach_sessions_from_transfer(bundle.transfer);

@@ -4,7 +4,6 @@
 mod chrome;
 mod connections;
 pub(crate) mod event_wake;
-pub(crate) mod external_editor;
 mod layout_state;
 mod navigation;
 mod network;
@@ -12,17 +11,14 @@ mod prompts;
 pub(crate) mod recording;
 mod remote;
 mod security;
-mod session;
+pub(crate) mod session;
 mod session_event_bridge;
-mod terminal;
+pub(crate) mod terminal;
 mod transfer_preview;
 mod transfer_ui;
 mod transfers;
 mod workspace_pane;
 mod workspace_tabs;
-
-#[cfg(test)]
-mod tests_workspace;
 
 pub(crate) use chrome::*;
 pub(crate) use connections::*;
@@ -30,7 +26,10 @@ pub(crate) use layout_state::*;
 pub(crate) use navigation::*;
 pub(crate) use network::*;
 pub(crate) use prompts::*;
-pub(crate) use recording::*;
+pub(crate) use recording::{
+    RecordingEventReceiver, RecordingHistorySearchEvent, RecordingHistorySearchKey,
+    RecordingWriteEvent, RecordingWriteHandle, RecordingWritePipeline,
+};
 pub(crate) use remote::*;
 pub(crate) use security::*;
 pub(crate) use session::*;

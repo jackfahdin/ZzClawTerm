@@ -10,7 +10,8 @@ use thiserror::Error;
 
 mod electerm;
 mod finalshell;
-mod mobaxterm;
+pub mod mobaxterm;
+mod mobaxterm_crypto;
 mod securecrt;
 mod ssh_config;
 mod termius;
@@ -38,6 +39,10 @@ const XSHELL_ENTRY_LIMIT: usize = 10_000;
 pub enum SessionImportError {
     #[error("WindTerm master password is required")]
     WindTermMasterPasswordRequired,
+    #[error("MobaXterm credentials require a master password or cannot be decrypted automatically")]
+    MobaXtermMasterPasswordRequired,
+    #[error("MobaXterm master password is incorrect or credential data is damaged")]
+    MobaXtermCredentialDecryptionFailed,
     #[error("{0}")]
     Config(String),
     #[error("{0}")]
@@ -50,6 +55,10 @@ type AppResult<T> = Result<T, SessionImportError>;
 #[derive(Default)]
 pub struct SessionImportOptions<'a> {
     pub windterm_master_password: Option<&'a str>,
+    /// Optional `MobaXterm Stored Passwords.txt` chosen alongside the session file.
+    pub mobaxterm_passwords_path: Option<&'a Path>,
+    pub mobaxterm_master_password: Option<&'a str>,
+    pub mobaxterm_skip_encrypted_credentials: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +67,7 @@ pub enum SessionImportWarningKind {
     UnreadableProfileConfig,
     UnreadableAutoLogin,
     UnreadablePrivateKey,
+    UnreadableMobaXtermCredential,
 }
 
 /// Import diagnostics contain only a source index and a reason, never user data.
@@ -65,6 +75,45 @@ pub enum SessionImportWarningKind {
 pub struct SessionImportWarning {
     pub session_index: usize,
     pub kind: SessionImportWarningKind,
+}
+
+/// Why a source entry was skipped, or why an imported entry uses defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionImportNoticeKind {
+    SkippedUnsupportedType,
+    SkippedMalformedEntry,
+    SkippedMissingEndpoint,
+    SkippedMissingSerialPort,
+    SerialSettingsDefaulted,
+    VncSettingsDefaulted,
+}
+
+impl SessionImportNoticeKind {
+    /// Only entries that were not imported count as skipped.
+    pub fn is_skipped(self) -> bool {
+        !matches!(
+            self,
+            Self::SerialSettingsDefaulted | Self::VncSettingsDefaulted
+        )
+    }
+}
+
+/// Per-entry import notice shown in the result. The session name is user data,
+/// so `Debug` deliberately omits it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SessionImportNotice {
+    pub session_name: String,
+    pub kind: SessionImportNoticeKind,
+}
+
+impl std::fmt::Debug for SessionImportNotice {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionImportNotice")
+            .field("kind", &self.kind)
+            .field("session_name_len", &self.session_name.chars().count())
+            .finish()
+    }
 }
 
 struct ImportedSession {
@@ -96,6 +145,8 @@ pub struct PreparedSessionImport {
     pub passwords: Vec<SavedPassword>,
     pub ssh_keys: Vec<SshKey>,
     pub connections: Vec<PreparedSessionConnection>,
+    /// Entries skipped during parsing, plus entries imported with defaults.
+    pub notices: Vec<SessionImportNotice>,
 }
 
 type PreparedJsonConnection = PreparedSessionConnection;
@@ -110,6 +161,7 @@ impl std::fmt::Debug for PreparedSessionImport {
             .field("ssh_key_count", &self.ssh_keys.len())
             .field("connection_count", &self.connections.len())
             .field("warning_count", &self.warnings.len())
+            .field("notice_count", &self.notices.len())
             .finish()
     }
 }
@@ -257,6 +309,7 @@ fn prepare_legacy_sessions(imported: Vec<ImportedSession>) -> PreparedSessionImp
         passwords: Vec::new(),
         ssh_keys: Vec::new(),
         connections,
+        notices: Vec::new(),
     }
 }
 
@@ -280,8 +333,8 @@ pub fn prepare_session_import_with_options(
     let lower = path.to_ascii_lowercase();
     let prepared = if lower.ends_with(".xts") {
         prepare_legacy_sessions(parse_xshell(&path)?)
-    } else if lower.ends_with(".mxtsessions") {
-        prepare_legacy_sessions(parse_mobaxterm(&path)?)
+    } else if lower.ends_with(".mxtsessions") || lower.ends_with(".ini") {
+        parse_mobaxterm(file_path, options)?
     } else if lower.ends_with(".sessions") {
         parse_windterm(file_path, options.windterm_master_password)?
     } else if lower.ends_with(".xml") {
@@ -290,7 +343,7 @@ pub fn prepare_session_import_with_options(
         electerm::parse_json_import(file_path)?
     } else {
         return Err(AppError::Config(
-            "Unsupported file format. Please use .xts (Xshell), .mxtsessions (MobaXterm), .sessions (WindTerm), .xml (SecureCRT), .json (ZzClawTerm JSON or Electerm bookmarks), or a FinalShell conn directory."
+            "Unsupported file format. Please use .xts (Xshell), .mxtsessions or MobaXterm .ini, .sessions (WindTerm), .xml (SecureCRT), .json (ZzClawTerm JSON or Electerm bookmarks), or a FinalShell conn directory."
                 .to_string(),
         ));
     };

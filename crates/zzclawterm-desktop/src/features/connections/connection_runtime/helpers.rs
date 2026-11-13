@@ -20,6 +20,10 @@ use crate::models::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ConnectionEditorValidationError {
     HostRequired,
+    AndroidSettings(zzclawterm_core::models::android::AndroidScreenValidationError),
+    AndroidDeviceRequired,
+    AndroidHostInvalid,
+    AndroidDirectoryInvalid,
     PortInvalid,
     TelnetKeepAliveIntervalInvalid,
     UsernameRequired,
@@ -136,6 +140,8 @@ pub(super) fn connection_editor_from_saved(
     };
     let icon_auto_detect = connection.icon_auto_detect_enabled();
     let mut editor = ConnectionEditorState {
+        android_usb: false,
+        android_screen: Default::default(),
         id: Some(connection.id),
         kind: ConnectionKindTab::from_connection_type(&connection.config),
         name: connection.name,
@@ -192,7 +198,8 @@ pub(super) fn connection_editor_from_saved(
             auth.account_id.clone()
         },
         password_id: auth.password_id,
-        password: if auth.mode == "password"
+        password: if (auth.mode == "password"
+            || matches!(connection.config, ConnectionType::Ssh { .. }))
             && password_source == ConnectionEditorPasswordSource::Direct
             && !auth.has_password
         {
@@ -218,6 +225,7 @@ pub(super) fn connection_editor_from_saved(
         agent_preview_loading: false,
         backspace_mode: "del".to_string(),
         encoding: String::new(),
+        ssh_compatibility_mode: connection.ssh_compatibility_mode,
         ssh_profile: connection.ssh_profile,
         terminal_type: connection.terminal_type,
         sftp_enabled: sftp.enabled,
@@ -281,6 +289,28 @@ pub(super) fn connection_editor_from_saved(
     };
 
     match connection.config {
+        ConnectionType::Adb {
+            device,
+            directory,
+            screen,
+        } => {
+            editor.android_usb = matches!(
+                device,
+                zzclawterm_core::models::android::AdbDeviceSelector::Usb { .. }
+            );
+            match device {
+                zzclawterm_core::models::android::AdbDeviceSelector::Usb { serial } => {
+                    editor.host = serial;
+                    editor.port.clear();
+                }
+                zzclawterm_core::models::android::AdbDeviceSelector::Tcp { host, port } => {
+                    editor.host = host;
+                    editor.port = port.to_string();
+                }
+            }
+            editor.working_dir = directory;
+            editor.android_screen = screen;
+        }
         ConnectionType::Ssh {
             host,
             port,
@@ -491,8 +521,9 @@ pub(super) fn build_saved_connection_from_editor(
                 .to_string(),
                 ai_execution_profile: AiExecutionProfile::Auto,
                 x11_forwarding: editor.x11_forwarding,
-                auth_agent_endpoint: (editor.auth_mode == "agent")
-                    .then(|| editor.agent_endpoint.clone()),
+                auth_agent_endpoint: (editor.auth_mode == "agent"
+                    || editor.agent_endpoint != zzclawterm_core::SshAgentEndpoint::default())
+                .then(|| editor.agent_endpoint.clone()),
                 agent_forwarding_config: (editor.agent_forwarding_config
                     != zzclawterm_core::SshAgentForwardingConfig::default())
                 .then(|| editor.agent_forwarding_config.clone()),
@@ -653,6 +684,48 @@ pub(super) fn build_saved_connection_from_editor(
                 reconnect: editor.rdp_reconnect.clone(),
             }
         }
+        ConnectionKindTab::Adb => {
+            let host = editor.host.trim().to_string();
+            if host.is_empty() {
+                return Err(if editor.android_usb {
+                    ConnectionEditorValidationError::AndroidDeviceRequired
+                } else {
+                    ConnectionEditorValidationError::AndroidHostInvalid
+                });
+            }
+            let device = if editor.android_usb {
+                zzclawterm_core::models::android::AdbDeviceSelector::Usb { serial: host }
+            } else {
+                zzclawterm_core::models::android::AdbDeviceSelector::Tcp {
+                    host,
+                    port: parse_port(&editor.port)?,
+                }
+            };
+            device.validate().map_err(|_| {
+                if editor.android_usb {
+                    ConnectionEditorValidationError::AndroidDeviceRequired
+                } else {
+                    ConnectionEditorValidationError::AndroidHostInvalid
+                }
+            })?;
+            let directory = if editor.working_dir.is_empty() {
+                "/sdcard/".into()
+            } else {
+                editor.working_dir.clone()
+            };
+            if !directory.starts_with('/') || directory.contains('\0') {
+                return Err(ConnectionEditorValidationError::AndroidDirectoryInvalid);
+            }
+            editor
+                .android_screen
+                .validate()
+                .map_err(ConnectionEditorValidationError::AndroidSettings)?;
+            ConnectionType::Adb {
+                device,
+                directory,
+                screen: editor.android_screen,
+            }
+        }
         ConnectionKindTab::Vnc => {
             let host = editor.host.trim().to_string();
             if host.is_empty() {
@@ -754,6 +827,7 @@ pub(super) fn build_saved_connection_from_editor(
                 local_terminal_default_name(shell_path).into_owned()
             }
             ConnectionType::Serial { port_name, .. } => port_name.clone(),
+            ConnectionType::Adb { device, .. } => device.serial(),
         }
     } else {
         editor.name.trim().to_string()
@@ -787,7 +861,9 @@ pub(super) fn build_saved_connection_from_editor(
                 }
                 _ => "none".to_string(),
             };
-            let (password, has_password) = if mode == "password"
+            // SSH authentication tabs choose what to use, not what to retain.
+            let retain_ssh_credentials = editor.kind == ConnectionKindTab::Ssh;
+            let (password, has_password) = if (mode == "password" || retain_ssh_credentials)
                 && editor.password_source == ConnectionEditorPasswordSource::Direct
             {
                 match editor.password_edit {
@@ -816,7 +892,7 @@ pub(super) fn build_saved_connection_from_editor(
                     ConnectionKindTab::Ssh | ConnectionKindTab::Telnet
                 )
                 .then_some(
-                    if mode == "password"
+                    if (mode == "password" || retain_ssh_credentials)
                         && editor.password_source == ConnectionEditorPasswordSource::Saved
                     {
                         zzclawterm_core::models::credentials::ConnectionPasswordSource::Account
@@ -824,7 +900,7 @@ pub(super) fn build_saved_connection_from_editor(
                         zzclawterm_core::models::credentials::ConnectionPasswordSource::Connection
                     },
                 ),
-                password_id: (mode == "password")
+                password_id: (mode == "password" || retain_ssh_credentials)
                     .then(|| editor.password_id.clone())
                     .flatten(),
                 username_source: (matches!(
@@ -838,7 +914,7 @@ pub(super) fn build_saved_connection_from_editor(
                         == zzclawterm_core::ConnectionUsernameSource::Connection)
                     .then_some(zzclawterm_core::ConnectionUsernameSource::Connection),
                 password,
-                key_id: (mode == "key")
+                key_id: (mode == "key" || retain_ssh_credentials)
                     .then(|| {
                         editor
                             .key_id
@@ -863,7 +939,10 @@ pub(super) fn build_saved_connection_from_editor(
     };
 
     let network = match editor.kind {
-        ConnectionKindTab::Ssh | ConnectionKindTab::Rdp | ConnectionKindTab::Vnc => {
+        ConnectionKindTab::Ssh
+        | ConnectionKindTab::Telnet
+        | ConnectionKindTab::Rdp
+        | ConnectionKindTab::Vnc => {
             let proxy_id = editor
                 .proxy_id
                 .clone()
@@ -982,6 +1061,8 @@ pub(super) fn build_saved_connection_from_editor(
         // remains part of the compatibility-sensitive saved connection.
         recording: editor.recording.clone(),
         ssh_algorithms,
+        ssh_compatibility_mode: editor.kind == ConnectionKindTab::Ssh
+            && editor.ssh_compatibility_mode,
         ssh_profile: if editor.kind == ConnectionKindTab::Ssh {
             editor.ssh_profile
         } else {
@@ -1133,6 +1214,27 @@ mod tests {
     }
 
     #[test]
+    fn android_editor_round_trips_usb_tcp_and_screen_settings() {
+        for device in [
+            serde_json::json!({"kind":"usb","serial":"fixture-usb"}),
+            serde_json::json!({"kind":"tcp","host":"example.test","port":5555}),
+        ] {
+            let original: SavedConnection = serde_json::from_value(serde_json::json!({
+                "id":"android", "name":"Android", "type":"adb", "device":device,
+                "directory":"/sdcard/", "screen":{"max_size":1920,"max_fps":60,"bit_rate":12_000_000}
+            })).unwrap();
+            let editor = connection_editor_from_saved(original.clone(), false);
+            let saved = build_saved_connection_from_editor(&editor).unwrap();
+            assert_eq!(saved.config, original.config);
+            let reopened = connection_editor_from_saved(saved, false);
+            assert_eq!(reopened.android_screen, editor.android_screen);
+            assert_eq!(reopened.android_usb, editor.android_usb);
+            assert_eq!(reopened.host, editor.host);
+            assert_eq!(reopened.port, editor.port);
+        }
+    }
+
+    #[test]
     fn connection_editor_round_trip_preserves_icon() {
         let connection = SavedConnection {
             extensions: Default::default(),
@@ -1155,6 +1257,7 @@ mod tests {
             auth: None,
             recording: None,
             ssh_algorithms: None,
+            ssh_compatibility_mode: false,
             ssh_profile: Default::default(),
             terminal_type: None,
             sftp: Default::default(),
@@ -1204,6 +1307,7 @@ mod tests {
             }),
             recording: None,
             ssh_algorithms: None,
+            ssh_compatibility_mode: false,
             ssh_profile: Default::default(),
             terminal_type: None,
             sftp: Default::default(),
@@ -1262,11 +1366,12 @@ mod tests {
     }
 
     #[test]
-    fn connection_editor_does_not_prefill_account_or_inactive_passwords() {
+    fn connection_editor_restores_inactive_direct_passwords_and_hides_account_or_locked_secrets() {
         for auth in [
             serde_json::json!({"mode": "password", "password_source": "account", "account_id": "account", "password": "fixture-secret"}),
             serde_json::json!({"mode": "key", "password": "fixture-secret"}),
             serde_json::json!({"mode": "none", "password": "fixture-secret"}),
+            serde_json::json!({"mode": "key", "password": "fixture-secret", "has_password": true}),
         ] {
             let connection: SavedConnection = serde_json::from_value(serde_json::json!({
                 "id": "password-prefill", "name": "Password prefill", "type": "ssh",
@@ -1274,7 +1379,13 @@ mod tests {
             }))
             .expect("connection");
             let editor = connection_editor_from_saved(connection, false);
-            assert!(editor.password.is_empty());
+            if editor.password_source == ConnectionEditorPasswordSource::Direct
+                && !editor.existing_password_locked
+            {
+                assert_eq!(editor.password.expose_secret(), "fixture-secret");
+            } else {
+                assert!(editor.password.is_empty());
+            }
         }
     }
 
@@ -1401,6 +1512,7 @@ mod tests {
             }),
             recording: None,
             ssh_algorithms: None,
+            ssh_compatibility_mode: false,
             ssh_profile: Default::default(),
             terminal_type: None,
             sftp: Default::default(),
@@ -1458,6 +1570,7 @@ mod tests {
             }),
             recording: None,
             ssh_algorithms: None,
+            ssh_compatibility_mode: false,
             ssh_profile: Default::default(),
             terminal_type: None,
             sftp: Default::default(),
@@ -1516,6 +1629,7 @@ mod tests {
                 macs: vec!["hmac-sha2-256".to_string()],
                 host_keys: vec!["ssh-ed25519".to_string()],
             }),
+            ssh_compatibility_mode: false,
             ssh_profile: SshProfile::NetworkDevice,
             terminal_type: Some(SshTerminalType::Vt220),
             sftp: SftpSettings {
@@ -1617,6 +1731,7 @@ mod tests {
             auth: None,
             recording: None,
             ssh_algorithms: None,
+            ssh_compatibility_mode: false,
             ssh_profile: Default::default(),
             terminal_type: None,
             sftp: Default::default(),
@@ -1775,6 +1890,7 @@ mod tests {
             }),
             recording: Some(expected_recording.clone()),
             ssh_algorithms: None,
+            ssh_compatibility_mode: false,
             ssh_profile: Default::default(),
             terminal_type: None,
             sftp: Default::default(),
@@ -1887,6 +2003,7 @@ mod tests {
             }),
             recording: None,
             ssh_algorithms: None,
+            ssh_compatibility_mode: false,
             ssh_profile: Default::default(),
             terminal_type: None,
             sftp: Default::default(),
@@ -2004,6 +2121,7 @@ mod tests {
             }),
             recording: None,
             ssh_algorithms: None,
+            ssh_compatibility_mode: false,
             ssh_profile: Default::default(),
             terminal_type: None,
             sftp: Default::default(),
@@ -2140,6 +2258,7 @@ pub(in crate::features) enum ConnectionEditorToggle {
     AgentStoredKeys,
     SftpEnabled,
     SftpCompatibilityMode,
+    SshCompatibilityMode,
     RawTcp,
     LocalEcho,
     LocalLineEdit,
@@ -2255,7 +2374,7 @@ mod account_edit_tests {
     }
 
     #[test]
-    fn saving_only_emits_the_active_authentication_and_explicit_password_edit() {
+    fn ssh_authentication_tabs_retain_credentials_and_honor_explicit_password_edits() {
         use super::build_saved_connection_from_editor;
         use super::connection_editor_from_saved;
         use crate::models::ConnectionEditorPasswordSource;
@@ -2267,13 +2386,40 @@ mod account_edit_tests {
         let mut editor = connection_editor_from_saved(connection, false);
         editor.key_id = Some("saved-key".into());
         editor.password = "new-draft".into();
-        for mode in ["none", "key", "agent"] {
+        editor.agent_endpoint = zzclawterm_core::SshAgentEndpoint::Environment {
+            variable: "FIXTURE_SSH_AGENT".into(),
+        };
+        for mode in ["none", "key", "agent", "password"] {
             editor.auth_mode = mode.into();
             let saved = build_saved_connection_from_editor(&editor).unwrap();
+            assert!(
+                matches!(&saved.config, zzclawterm_core::ConnectionType::Ssh { auth_agent_endpoint: Some(endpoint), .. } if endpoint == &editor.agent_endpoint)
+            );
             let auth = saved.auth.unwrap();
-            assert!(auth.password.is_none());
-            assert_eq!(auth.key_id.is_some(), mode == "key");
+            assert_eq!(auth.mode, mode);
+            assert_eq!(auth.password.as_deref(), Some("existing"));
+            assert_eq!(auth.key_id.as_deref(), Some("saved-key"));
             assert_eq!(editor.password.expose_secret(), "new-draft");
+            editor.password_edit = crate::models::ConnectionPasswordEdit::Replace;
+            assert_eq!(
+                build_saved_connection_from_editor(&editor)
+                    .unwrap()
+                    .auth
+                    .unwrap()
+                    .password
+                    .as_deref(),
+                Some("new-draft")
+            );
+            editor.password_edit = crate::models::ConnectionPasswordEdit::Remove;
+            assert!(
+                build_saved_connection_from_editor(&editor)
+                    .unwrap()
+                    .auth
+                    .unwrap()
+                    .password
+                    .is_none()
+            );
+            editor.password_edit = crate::models::ConnectionPasswordEdit::Keep;
         }
         editor.auth_mode = "password".into();
         editor.password_source = ConnectionEditorPasswordSource::Direct;

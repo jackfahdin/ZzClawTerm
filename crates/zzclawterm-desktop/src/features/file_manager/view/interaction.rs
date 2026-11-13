@@ -14,6 +14,7 @@ use zzclawterm_files::sftp::{RemoteFilePath, SftpFileEntry};
 pub(super) struct FileManagerDragPayload {
     pub manager_id: String,
     pub pane_id: PaneId,
+    pub access_generation: Option<u64>,
     pub endpoint: PaneEndpoint,
     pub entries: Vec<SftpFileEntry>,
     pub feedback: Rc<Cell<FileTransferOperation>>,
@@ -300,8 +301,46 @@ impl FileManagerWorkspace {
             operation,
         };
         let id = self.id.clone();
+        let generation = payload.access_generation;
         self.dispatch_app(window, cx, move |app, _, cx| {
+            if intent
+                .source
+                .session_id()
+                .is_some_and(|id| app.file_access_generation(id) != generation)
+            {
+                return;
+            }
             app.submit_file_transfer(id, intent, cx)
+        });
+    }
+
+    pub(super) fn drop_external_files(
+        &self,
+        paths: &gpui::ExternalPaths,
+        pane: PaneId,
+        directory: RemoteFilePath,
+        writable: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let endpoint = self.pane(pane).endpoint.clone();
+        let paths = paths.paths().to_vec();
+        let disconnected = self.pane(pane).disconnected;
+        self.dispatch_app(window, cx, move |app, _, cx| {
+            if disconnected || !writable {
+                app.report_transfer_entry_error(
+                    "drop-upload",
+                    endpoint.kind(),
+                    &anyhow::Error::new(if disconnected {
+                        zzclawterm_files::file_browser::FileTransferEntryError::Unavailable
+                    } else {
+                        zzclawterm_files::file_browser::FileTransferEntryError::InvalidDestination
+                    }),
+                    cx,
+                );
+            } else {
+                app.upload_external_paths_to_endpoint(endpoint, directory, paths, cx);
+            }
         });
     }
 }

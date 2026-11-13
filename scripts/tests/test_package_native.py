@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import plistlib
 import os
+import io
+import shutil
+import subprocess
 import struct
-import sys
 import tarfile
+from contextlib import contextmanager
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -15,45 +20,413 @@ RELEASE_SCRIPTS = Path(__file__).resolve().parents[1] / "release"
 sys.path.insert(0, str(RELEASE_SCRIPTS))
 
 import package_native  # noqa: E402
+import verify_native_package  # noqa: E402
 
 
-def restamp_tree(root: Path, timestamp: float) -> None:
-    """Give every path in root one mtime, as a fresh checkout would."""
-    for path in [root, *root.rglob("*")]:
-        os.utime(path, (timestamp, timestamp))
+@contextmanager
+def staged_package(target: str):
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        binary = root / "build" / "zzclawterm"
+        binary.parent.mkdir()
+        binary.write_bytes(b"application")
+        suffix = ".exe" if "windows" in target else ""
+        helpers = [binary.parent / f"{name}{suffix}" for name in package_native.helper_bins(target)]
+        for helper in helpers:
+            helper.write_bytes(b"helper")
+        if "windows" in target:
+            for relative in package_native.conpty_files(target):
+                path = root / "staging/resources/windows/conpty" / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"MZ")
 
+        def run(command, **kwargs):
+            if command[0] == "rpmbuild":
+                output = root / "work" / "rpm" / "rpmbuild" / "RPMS" / package_native.linux_rpm_arch(target)
+                output.mkdir(parents=True)
+                (output / "test.rpm").write_bytes(b"rpm")
 
-def make_portable_package(root: Path) -> Path:
-    package = root / "ZzClawTerm-portable"
-    (package / "data").mkdir(parents=True)
-    (package / "vcxsrv" / "fonts").mkdir(parents=True)
-    executable = package / "ZzClawTerm.exe"
-    executable.write_bytes(b"MZ" + b"payload" * 128)
-    package_native.make_executable(executable)
-    (package / "LICENSE").write_bytes(b"Apache-2.0\n")
-    (package / "VERSION").write_text("0.0.1\n", encoding="utf-8")
-    (package / "data" / ".keep").touch()
-    (package / "zzclawterm-portable").touch()
-    (package / "vcxsrv" / "vcxsrv.exe").write_bytes(b"MZ")
-    (package / "vcxsrv" / "fonts" / "fonts.dir").write_text("1\n", encoding="utf-8")
-    return package
-
-
-def make_app_bundle(root: Path) -> Path:
-    bundle = root / "ZzClawTerm.app"
-    macos_dir = bundle / "Contents" / "MacOS"
-    resources_dir = bundle / "Contents" / "Resources"
-    macos_dir.mkdir(parents=True)
-    resources_dir.mkdir(parents=True)
-    binary = macos_dir / "ZzClawTerm"
-    binary.write_bytes(b"\xcf\xfa\xed\xfe" + b"code" * 256)
-    package_native.make_executable(binary)
-    (bundle / "Contents" / "Info.plist").write_bytes(b"<plist/>")
-    (resources_dir / "VERSION").write_text("0.0.1\n", encoding="utf-8")
-    return bundle
+        with (
+            mock.patch.object(package_native, "WORK_DIR", root / "work"),
+            mock.patch.object(package_native, "DIST_DIR", root / "dist"),
+            mock.patch.object(package_native.prepare_conpty, "STAGING", root / "staging"),
+            mock.patch.object(package_native, "helper_binary_paths", return_value=helpers),
+            mock.patch.object(package_native, "require_tool", side_effect=lambda name: name),
+            mock.patch.object(package_native, "find_iscc", return_value="iscc"),
+            mock.patch.object(package_native, "run", side_effect=run),
+            mock.patch.object(package_native, "linux_deb_dependencies", return_value="libc6"),
+        ):
+            package_native.WORK_DIR.mkdir()
+            package_native.DIST_DIR.mkdir()
+            yield root, binary, package_native.target_info(target)
 
 
 class PackageNativeTests(unittest.TestCase):
+    def setUp(self):
+        from scripts.tests.test_verify_native_package import stage_android_fixture
+        patcher = mock.patch.object(package_native, "copy_android_resources", side_effect=stage_android_fixture)
+        patcher.start(); self.addCleanup(patcher.stop)
+
+    @unittest.skipUnless(shutil.which("dpkg-deb"), "dpkg-deb is not installed")
+    def test_real_deb_icons_are_readable_root_owned_and_repaired_on_configure(self) -> None:
+        for version in ("2.0.0", "2.0.0-preview.1"):
+            with self.subTest(version=version), staged_package("x86_64-unknown-linux-gnu") as (root, binary, info):
+                icon_source = root / "icons"
+                shutil.copytree(package_native.ICON_DIR, icon_source)
+                for source in icon_source.glob("*.png"):
+                    source.chmod(0o600)
+                with (
+                    mock.patch.object(package_native, "ICON_DIR", icon_source),
+                    mock.patch.object(package_native, "run", side_effect=lambda command: subprocess.run(
+                        command, check=True, stdout=subprocess.DEVNULL)),
+                ):
+                    package_native.create_linux_deb(binary, info, version, version)
+                identity = package_native.release_identity(version)
+                deb = next((root / "dist").glob("*.deb"))
+                verify_native_package.verify_deb(deb, info.target, version)
+                data = subprocess.check_output(["dpkg-deb", "--fsys-tarfile", str(deb)])
+                with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+                    self.assertTrue(all(member.uid == member.gid == 0 for member in archive))
+                postinst = root / "work/deb/DEBIAN/postinst"
+                self.assertEqual(postinst.stat().st_mode & 0o777, 0o755)
+                subprocess.run(["sh", "-n", str(postinst)], check=True)
+                hicolor = root / "work/deb/usr/share/icons/hicolor"
+                script = root / "postinst-test"
+                script.write_text(postinst.read_text().replace("/usr/share/icons/hicolor", str(hicolor)))
+                icon = hicolor / "128x128/apps" / f"{identity.desktop_id}.png"
+                unrelated = icon.with_name("unrelated.png")
+                unrelated.write_bytes(b"unrelated")
+                unrelated.chmod(0o600)
+                # A removed optional size must not break upgrade/reconfigure.
+                (hicolor / "32x32/apps" / f"{identity.desktop_id}.png").unlink()
+                icon.chmod(0o600)
+                subprocess.run(["sh", str(script), "abort-upgrade"], check=True)
+                self.assertEqual(icon.stat().st_mode & 0o777, 0o600)
+                for _ in range(2):
+                    subprocess.run(["sh", str(script), "configure"], check=True)
+                    self.assertEqual(icon.stat().st_mode & 0o777, 0o644)
+                    self.assertEqual(unrelated.stat().st_mode & 0o777, 0o600)
+                icon.unlink()
+                icon.symlink_to(unrelated)
+                subprocess.run(["sh", str(script), "configure"], check=True)
+                self.assertEqual(unrelated.stat().st_mode & 0o777, 0o600)
+
+    def test_windows_release_builds_use_one_static_crt_and_preserve_existing_flags(self) -> None:
+        for target in ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc", "x86_64-unknown-linux-gnu"):
+            for existing in ({"RUSTFLAGS": "-C debuginfo=1"}, {"CARGO_ENCODED_RUSTFLAGS": "-C\x1fdebuginfo=1"}):
+                with self.subTest(target=target, existing=existing), tempfile.TemporaryDirectory() as directory:
+                    binary = Path(directory) / "binary"
+                    binary.write_bytes(b"fixture")
+                    with (mock.patch.dict(package_native.os.environ, existing, clear=True),
+                          mock.patch.object(package_native, "release_binary_path", return_value=binary),
+                          mock.patch.object(package_native, "run") as run):
+                        self.assertEqual(package_native.build_binary("zzclawterm-app", "zzclawterm", target), binary)
+                    environment = run.call_args.kwargs["env"]
+                    if target.endswith("-windows-msvc"):
+                        self.assertEqual(environment["CARGO_ENCODED_RUSTFLAGS"],
+                                         "-C\x1fdebuginfo=1\x1f-C\x1ftarget-feature=+crt-static")
+                    else:
+                        self.assertIsNone(environment)
+
+    def test_portable_packages_match_shared_contract_for_both_architectures(self) -> None:
+        for target in ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"):
+            with self.subTest(target=target), staged_package(target) as (root, binary, info):
+                package_native.create_windows_packages(binary, info, "2.0.1", "2.0.1")
+                path = root / f"dist/ZzClawTerm_2.0.1_{info.label}_portable.zip"
+                with zipfile.ZipFile(path) as archive:
+                    actual = {entry.filename for entry in archive.infolist()
+                              if not entry.is_dir()}
+                self.assertEqual(actual, package_native.windows_portable.archive_files(target))
+
+    @unittest.skipUnless(shutil.which("makensis"), "NSIS is not installed")
+
+    def test_semver_resolves_application_identity(self) -> None:
+        for version in ("2.0.0", "2.0.1", "2.1.0", "2.0.0+build-with-hyphen"):
+            self.assertEqual(package_native.release_identity(version), package_native.STABLE_IDENTITY)
+        for version in ("2.0.0-preview.1", "2.0.0-preview.2", "2.0.0-beta.1", "2.0.0-rc.1"):
+            self.assertEqual(package_native.release_identity(version), package_native.PREVIEW_IDENTITY)
+        for version in ("02.0.0", "2.0.0-preview.01", "2.0.0-", "2.0.0+", "2.0.0-a..b"):
+            with self.subTest(version=version), self.assertRaises(ValueError):
+                package_native.release_identity(version)
+
+
+    @unittest.skipIf(os.name == "nt", "macOS DMG symlink creation requires POSIX")
+    def test_macos_bundle_and_updater_archive_use_the_same_identity(self) -> None:
+        for version in ("2.0.0", "2.0.0-preview.1"):
+            with self.subTest(version=version), staged_package("aarch64-apple-darwin") as (root, binary, info):
+                identity = package_native.release_identity(version)
+                package_native.create_macos_packages(binary, info, version, version)
+                bundle = root / "work" / identity.macos_bundle_name
+                plist = plistlib.loads((bundle / "Contents" / "Info.plist").read_bytes())
+                self.assertEqual(plist["CFBundleDisplayName"], identity.display_name)
+                self.assertEqual(plist["CFBundleName"], identity.display_name)
+                self.assertEqual(plist["CFBundleIdentifier"], identity.macos_identifier)
+                self.assertEqual(plist["CFBundleURLTypes"][0]["CFBundleURLSchemes"], list(identity.url_schemes))
+                self.assertTrue((root / "work" / "dmg" / identity.macos_bundle_name).is_dir())
+                self.assertEqual((root / "work" / "dmg" / "Applications").readlink().as_posix(), "/Applications")
+                archive = next((root / "dist").glob("*.tar.gz"))
+                with tarfile.open(archive) as handle:
+                    self.assertIn(f"{identity.macos_bundle_name}/Contents/MacOS/ZzClawTerm", handle.getnames())
+
+    def test_run_with_retry_retries_transient_command_failures(self) -> None:
+        failure = subprocess.CalledProcessError(1, ["hdiutil", "create"])
+        with (
+            mock.patch.object(package_native, "run", side_effect=[failure, None]) as run,
+            mock.patch.object(package_native.time, "sleep") as sleep,
+        ):
+            package_native.run_with_retry(
+                ["hdiutil", "create"], attempts=3, delay_seconds=0.5
+            )
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(0.5)
+
+    def test_linux_formats_use_isolated_package_desktop_icons_and_install_paths(self) -> None:
+        for version in ("2.0.0", "2.0.0-preview.1"):
+            with self.subTest(version=version), staged_package("x86_64-unknown-linux-gnu") as (root, binary, info):
+                identity = package_native.release_identity(version)
+                package_native.create_linux_packages(binary, info, version, version)
+                control = (root / "work" / "deb" / "DEBIAN" / "control").read_text()
+                self.assertIn(f"Package: {identity.desktop_id}\n", control)
+                spec = (root / "work" / "rpm" / "rpmbuild" / "SPECS" / "zzclawterm.spec").read_text()
+                self.assertIn(f"Name: {identity.desktop_id}\n", spec)
+                self.assertIn(f"/opt/{identity.desktop_id}\n", spec)
+                for payload in (root / "work" / "deb", root / "work" / "rpm" / "payload", root / "work" / "ZzClawTerm.AppDir"):
+                    desktop = payload / "usr" / "share" / "applications" / identity.linux_desktop_file
+                    executable = "zzclawterm" if payload.name == "ZzClawTerm.AppDir" else f"/opt/{identity.desktop_id}/zzclawterm"
+                    verify_native_package.verify_linux_desktop(desktop.read_text(), executable, str(desktop), identity)
+                    for size in package_native.linux_icons.ICON_SIZES:
+                        icon = payload / "usr/share/icons/hicolor" / size / "apps" / f"{identity.desktop_id}.png"
+                        self.assertTrue(icon.is_file())
+                        if os.name == "posix":
+                            self.assertEqual(icon.stat().st_mode & 0o777, 0o644)
+                    app_root = payload / "usr" / "bin" if payload.name == "ZzClawTerm.AppDir" else payload / "opt" / identity.desktop_id
+                    for name in ("zzclawterm", *package_native.helper_bins("x86_64-unknown-linux-gnu")):
+                        self.assertTrue((app_root / name).is_file())
+
+    def test_release_tag_is_normalized(self) -> None:
+        self.assertEqual(package_native.validate_version("v2.0.0"), "2.0.0")
+        self.assertEqual(
+            package_native.validate_version("2.0.0-preview.1"),
+            "2.0.0-preview.1",
+        )
+
+    def test_invalid_or_mismatched_version_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            package_native.validate_version("release-2")
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            package_native.validate_version("v2.0.1", "2.0.0")
+
+    def test_snapshot_is_only_allowed_as_an_artifact_label(self) -> None:
+        self.assertEqual(
+            package_native.validate_artifact_version("continuous-build"),
+            "continuous-build",
+        )
+        with self.assertRaises(ValueError):
+            package_native.validate_version("continuous-build")
+        with self.assertRaises(ValueError):
+            package_native.validate_artifact_version("nightly")
+        self.assertEqual(
+            package_native.artifact_names(
+                "x86_64-pc-windows-msvc", "continuous-build"
+            ),
+            {
+                "ZzClawTerm_continuous-build_windows_x64_portable.zip",
+                "ZzClawTerm_continuous-build_windows_x64-setup.exe",
+            },
+        )
+
+    def test_all_release_targets_have_expected_artifact_names(self) -> None:
+        expected = {
+            "aarch64-apple-darwin": {
+                "ZzClawTerm_2.0.0_macos_arm64.dmg",
+                "ZzClawTerm_2.0.0_macos_arm64.app.tar.gz",
+            },
+            "x86_64-apple-darwin": {
+                "ZzClawTerm_2.0.0_macos_x64.dmg",
+                "ZzClawTerm_2.0.0_macos_x64.app.tar.gz",
+            },
+            "aarch64-unknown-linux-gnu": {
+                "ZzClawTerm_2.0.0_linux_arm64.AppImage",
+                "ZzClawTerm_2.0.0_linux_arm64.deb",
+                "ZzClawTerm_2.0.0_linux_arm64.rpm",
+            },
+            "x86_64-unknown-linux-gnu": {
+                "ZzClawTerm_2.0.0_linux_x64.AppImage",
+                "ZzClawTerm_2.0.0_linux_x64.deb",
+                "ZzClawTerm_2.0.0_linux_x64.rpm",
+            },
+            "aarch64-pc-windows-msvc": {
+                "ZzClawTerm_2.0.0_windows_arm64_portable.zip",
+                "ZzClawTerm_2.0.0_windows_arm64-setup.exe",
+            },
+            "x86_64-pc-windows-msvc": {
+                "ZzClawTerm_2.0.0_windows_x64_portable.zip",
+                "ZzClawTerm_2.0.0_windows_x64-setup.exe",
+            },
+        }
+        for target, names in expected.items():
+            with self.subTest(target=target):
+                self.assertEqual(package_native.artifact_names(target, "v2.0.0"), names)
+
+    def test_release_binary_always_uses_explicit_target_directory(self) -> None:
+        with mock.patch.dict("os.environ", {}, clear=True):
+            linux = package_native.release_binary_path("x86_64-unknown-linux-gnu")
+            windows = package_native.release_binary_path("aarch64-pc-windows-msvc")
+        self.assertEqual(
+            linux.relative_to(package_native.ROOT_DIR).as_posix(),
+            "target/x86_64-unknown-linux-gnu/release/zzclawterm",
+        )
+        self.assertEqual(
+            windows.relative_to(package_native.ROOT_DIR).as_posix(),
+            "target/aarch64-pc-windows-msvc/release/zzclawterm.exe",
+        )
+
+    def test_helper_binaries_resolve_beside_the_application(self) -> None:
+        self.assertIn("zzclawterm-rdp-helper", package_native.HELPER_BINS)
+        self.assertIn("zzclawterm-mcp", package_native.HELPER_BINS)
+        with mock.patch.dict("os.environ", {}, clear=True):
+            linux = package_native.helper_binary_paths("x86_64-unknown-linux-gnu")
+            windows = package_native.helper_binary_paths("aarch64-pc-windows-msvc")
+        self.assertEqual(
+            [path.name for path in linux], list(package_native.helper_bins("x86_64-unknown-linux-gnu"))
+        )
+        self.assertEqual(
+            [path.name for path in windows],
+            [f"{name}.exe" for name in package_native.helper_bins("aarch64-pc-windows-msvc")],
+        )
+        application = package_native.release_binary_path("x86_64-unknown-linux-gnu")
+        for path in linux:
+            self.assertEqual(path.parent, application.parent)
+
+    def test_copy_helpers_stages_every_helper_beside_the_application(self) -> None:
+        target = "x86_64-unknown-linux-gnu"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sources = root / "build"
+            destination = root / "package"
+            destination.mkdir()
+            staged = []
+            for path in package_native.helper_binary_paths(target):
+                fake = sources / path.name
+                fake.parent.mkdir(parents=True, exist_ok=True)
+                fake.write_bytes(b"helper")
+                staged.append(fake)
+            with mock.patch.object(
+                package_native, "helper_binary_paths", return_value=staged
+            ):
+                copied = package_native.copy_helpers(destination, target)
+            self.assertEqual(
+                sorted(path.name for path in copied),
+                sorted(package_native.helper_bins(target)),
+            )
+            for path in copied:
+                self.assertTrue(path.is_file())
+                self.assertEqual(path.parent, destination)
+
+
+    def test_linux_desktop_registers_stable_protocols(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "zzclawterm.desktop"
+            package_native.write_desktop_file(path, "/opt/zzclawterm/zzclawterm")
+            desktop = path.read_text(encoding="utf-8")
+        self.assertIn("Exec=/opt/zzclawterm/zzclawterm %U\n", desktop)
+        self.assertIn("MimeType=x-scheme-handler/zzclawterm;x-scheme-handler/ssh;x-scheme-handler/telnet;\n", desktop)
+
+    def test_deb_dependencies_cover_helper_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binaries = [root / "zzclawterm", root / "zzclawterm-rdp-helper"]
+            with (
+                mock.patch.object(package_native, "WORK_DIR", root / "work"),
+                mock.patch.object(
+                    package_native, "require_tool", return_value="dpkg-shlibdeps"
+                ),
+                mock.patch.object(
+                    package_native.subprocess,
+                    "check_output",
+                    return_value="shlibs:Depends=libc6, libx11-6\n",
+                ) as check_output,
+            ):
+                dependencies = package_native.linux_deb_dependencies(binaries)
+        self.assertEqual(dependencies, "libc6, libx11-6")
+        command = check_output.call_args.args[0]
+        for binary in binaries:
+            self.assertIn(str(binary), command)
+        self.assertEqual(command.count("-e"), len(binaries))
+
+    def test_release_binary_respects_absolute_cargo_target_dir(self) -> None:
+        # Build the absolute path for the running platform: Path("/cache/cargo") has
+        # no drive letter, so is_absolute() is False on Windows and the assertion
+        # would compare against a path joined onto the repository root instead.
+        target_dir = Path(tempfile.gettempdir(), "zzclawterm-cargo-target").resolve()
+        with mock.patch.dict("os.environ", {"CARGO_TARGET_DIR": str(target_dir)}):
+            path = package_native.release_binary_path("x86_64-unknown-linux-gnu")
+        self.assertEqual(
+            path, target_dir / "x86_64-unknown-linux-gnu" / "release" / "zzclawterm"
+        )
+
+    def test_platform_package_versions_are_normalized(self) -> None:
+        self.assertEqual(package_native.windows_numeric_version("2.4.6-beta.1"), "2.4.6.1")
+        self.assertEqual(package_native.linux_rpm_version("2.4.6"), ("2.4.6", "1"))
+        self.assertEqual(
+            package_native.linux_rpm_version("2.4.6-beta.1"),
+            ("2.4.6", "0.beta.1"),
+        )
+
+    def test_windows_numeric_version_preserves_prerelease_revision(self) -> None:
+        cases = {
+            "2.0.0": "2.0.0.0",
+            "2.0.0-preview.9": "2.0.0.9",
+            "2.0.0-preview.10+build.123": "2.0.0.10",
+            "2.0.0+build.123": "2.0.0.0",
+            "2.0.0-beta": "2.0.0.0",
+            "2.0.0-rc.4.extra": "2.0.0.0",
+            "2.0.0-9": "2.0.0.9",
+            "65535.65535.65535-preview.65535": "65535.65535.65535.65535",
+        }
+        for version, numeric in cases.items():
+            with self.subTest(version=version):
+                self.assertEqual(package_native.windows_numeric_version(version), numeric)
+
+    def test_windows_numeric_version_rejects_word_overflow(self) -> None:
+        for version in ("65536.0.0", "2.65536.0", "2.0.65536", "2.0.0-preview.65536"):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "65535"):
+                package_native.windows_numeric_version(version)
+
+    def test_dpkg_dependency_output_is_parsed(self) -> None:
+        output = "ignored=value\nshlibs:Depends=libc6 (>= 2.34), libx11-6\n"
+        self.assertEqual(
+            package_native.parse_dpkg_dependencies(output),
+            "libc6 (>= 2.34), libx11-6",
+        )
+        with self.assertRaises(RuntimeError):
+            package_native.parse_dpkg_dependencies("shlibs:Depends=\n")
+
+    def test_native_icon_resources_have_expected_formats_and_sizes(self) -> None:
+        expected_png_sizes = {
+            "32x32.png": (32, 32),
+            "64x64.png": (64, 64),
+            "128x128.png": (128, 128),
+            "256x256.png": (256, 256),
+            "512x512.png": (512, 512),
+        }
+        for name, expected_size in expected_png_sizes.items():
+            with self.subTest(name=name):
+                data = (package_native.ICON_DIR / name).read_bytes()
+                self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+                self.assertEqual(struct.unpack(">II", data[16:24]), expected_size)
+
+        self.assertEqual(
+            (package_native.ICON_DIR / "icon.icns").read_bytes()[:4], b"icns"
+        )
+        self.assertEqual(
+            (package_native.ICON_DIR / "icon.ico").read_bytes()[:4], b"\0\0\1\0"
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
+
     def test_inno_setup_7_compiler_is_found_in_program_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             compiler = Path(temporary) / "Inno Setup 7" / "ISCC.exe"
@@ -79,126 +452,6 @@ class PackageNativeTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "Inno Setup 7"):
                     package_native.find_iscc()
-
-    def test_release_tag_is_normalized(self) -> None:
-        self.assertEqual(package_native.validate_version("v0.0.1"), "0.0.1")
-        self.assertEqual(
-            package_native.validate_version("0.0.1-preview.1"),
-            "0.0.1-preview.1",
-        )
-
-    def test_invalid_or_mismatched_version_is_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            package_native.validate_version("release-2")
-        with self.assertRaisesRegex(ValueError, "does not match"):
-            package_native.validate_version("v0.0.2", "0.0.1")
-
-    def test_snapshot_is_only_allowed_as_an_artifact_label(self) -> None:
-        self.assertEqual(
-            package_native.validate_artifact_version("continuous-build"),
-            "continuous-build",
-        )
-        with self.assertRaises(ValueError):
-            package_native.validate_version("continuous-build")
-        with self.assertRaises(ValueError):
-            package_native.validate_artifact_version("nightly")
-        self.assertEqual(
-            package_native.artifact_names(
-                "x86_64-pc-windows-msvc", "continuous-build"
-            ),
-            {
-                "ZzClawTerm_continuous-build_windows_x64_portable.zip",
-                "ZzClawTerm_continuous-build_windows_x64-setup.exe",
-            },
-        )
-
-    def test_all_release_targets_have_expected_artifact_names(self) -> None:
-        expected = {
-            "aarch64-apple-darwin": {
-                "ZzClawTerm_0.0.1_macos_arm64.dmg",
-                "ZzClawTerm_0.0.1_macos_arm64.app.tar.gz",
-            },
-            "x86_64-apple-darwin": {
-                "ZzClawTerm_0.0.1_macos_x64.dmg",
-                "ZzClawTerm_0.0.1_macos_x64.app.tar.gz",
-            },
-            "aarch64-unknown-linux-gnu": {
-                "ZzClawTerm_0.0.1_linux_arm64.AppImage",
-                "ZzClawTerm_0.0.1_linux_arm64.deb",
-                "ZzClawTerm_0.0.1_linux_arm64.rpm",
-            },
-            "x86_64-unknown-linux-gnu": {
-                "ZzClawTerm_0.0.1_linux_x64.AppImage",
-                "ZzClawTerm_0.0.1_linux_x64.deb",
-                "ZzClawTerm_0.0.1_linux_x64.rpm",
-            },
-            "aarch64-pc-windows-msvc": {
-                "ZzClawTerm_0.0.1_windows_arm64_portable.zip",
-                "ZzClawTerm_0.0.1_windows_arm64-setup.exe",
-            },
-            "x86_64-pc-windows-msvc": {
-                "ZzClawTerm_0.0.1_windows_x64_portable.zip",
-                "ZzClawTerm_0.0.1_windows_x64-setup.exe",
-            },
-        }
-        for target, names in expected.items():
-            with self.subTest(target=target):
-                self.assertEqual(package_native.artifact_names(target, "v0.0.1"), names)
-
-    def test_release_binary_always_uses_explicit_target_directory(self) -> None:
-        with mock.patch.dict("os.environ", {}, clear=True):
-            linux = package_native.release_binary_path("x86_64-unknown-linux-gnu")
-            windows = package_native.release_binary_path("aarch64-pc-windows-msvc")
-        self.assertEqual(
-            linux.relative_to(package_native.ROOT_DIR).as_posix(),
-            "target/x86_64-unknown-linux-gnu/release/zzclawterm",
-        )
-        self.assertEqual(
-            windows.relative_to(package_native.ROOT_DIR).as_posix(),
-            "target/aarch64-pc-windows-msvc/release/zzclawterm.exe",
-        )
-
-    def test_helper_binaries_resolve_beside_the_application(self) -> None:
-        self.assertIn("zzclawterm-rdp-helper", package_native.HELPER_BINS)
-        self.assertIn("zzclawterm-mcp", package_native.HELPER_BINS)
-        with mock.patch.dict("os.environ", {}, clear=True):
-            linux = package_native.helper_binary_paths("x86_64-unknown-linux-gnu")
-            windows = package_native.helper_binary_paths("aarch64-pc-windows-msvc")
-        self.assertEqual(
-            [path.name for path in linux], list(package_native.HELPER_BINS)
-        )
-        self.assertEqual(
-            [path.name for path in windows],
-            [f"{name}.exe" for name in package_native.HELPER_BINS],
-        )
-        application = package_native.release_binary_path("x86_64-unknown-linux-gnu")
-        for path in linux:
-            self.assertEqual(path.parent, application.parent)
-
-    def test_copy_helpers_stages_every_helper_beside_the_application(self) -> None:
-        target = "x86_64-unknown-linux-gnu"
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            sources = root / "build"
-            destination = root / "package"
-            destination.mkdir()
-            staged = []
-            for path in package_native.helper_binary_paths(target):
-                fake = sources / path.name
-                fake.parent.mkdir(parents=True, exist_ok=True)
-                fake.write_bytes(b"helper")
-                staged.append(fake)
-            with mock.patch.object(
-                package_native, "helper_binary_paths", return_value=staged
-            ):
-                copied = package_native.copy_helpers(destination, target)
-            self.assertEqual(
-                sorted(path.name for path in copied),
-                sorted(package_native.HELPER_BINS),
-            )
-            for path in copied:
-                self.assertTrue(path.is_file())
-                self.assertEqual(path.parent, destination)
 
     def test_windows_installer_invokes_iscc_with_release_parameters(self) -> None:
         target = "x86_64-pc-windows-msvc"
@@ -636,98 +889,3 @@ class PackageNativeTests(unittest.TestCase):
             "x-scheme-handler/telnet;\n",
             desktop,
         )
-
-    def test_deb_dependencies_cover_helper_binaries(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            binaries = [root / "zzclawterm", root / "zzclawterm-rdp-helper"]
-            with (
-                mock.patch.object(package_native, "WORK_DIR", root / "work"),
-                mock.patch.object(
-                    package_native, "require_tool", return_value="dpkg-shlibdeps"
-                ),
-                mock.patch.object(
-                    package_native.subprocess,
-                    "check_output",
-                    return_value="shlibs:Depends=libc6, libx11-6\n",
-                ) as check_output,
-            ):
-                dependencies = package_native.linux_deb_dependencies(binaries)
-        self.assertEqual(dependencies, "libc6, libx11-6")
-        command = check_output.call_args.args[0]
-        for binary in binaries:
-            self.assertIn(str(binary), command)
-        self.assertEqual(command.count("-e"), len(binaries))
-
-    def test_release_binary_respects_absolute_cargo_target_dir(self) -> None:
-        # Build the absolute path for the running platform: Path("/cache/cargo") has
-        # no drive letter, so is_absolute() is False on Windows and the assertion
-        # would compare against a path joined onto the repository root instead.
-        target_dir = Path(tempfile.gettempdir(), "zzclawterm-cargo-target").resolve()
-        with mock.patch.dict("os.environ", {"CARGO_TARGET_DIR": str(target_dir)}):
-            path = package_native.release_binary_path("x86_64-unknown-linux-gnu")
-        self.assertEqual(
-            path, target_dir / "x86_64-unknown-linux-gnu" / "release" / "zzclawterm"
-        )
-
-    def test_platform_package_versions_are_normalized(self) -> None:
-        self.assertEqual(package_native.windows_numeric_version("2.4.6-beta.1"), "2.4.6.1")
-        self.assertEqual(package_native.linux_rpm_version("2.4.6"), ("2.4.6", "1"))
-        self.assertEqual(
-            package_native.linux_rpm_version("2.4.6-beta.1"),
-            ("2.4.6", "0.beta.1"),
-        )
-
-    def test_windows_numeric_version_preserves_prerelease_revision(self) -> None:
-        cases = {
-            "2.0.0": "2.0.0.0",
-            "2.0.0-preview.9": "2.0.0.9",
-            "2.0.0-preview.10+build.123": "2.0.0.10",
-            "2.0.0+build.123": "2.0.0.0",
-            "2.0.0-beta": "2.0.0.0",
-            "2.0.0-rc.4.extra": "2.0.0.0",
-            "2.0.0-9": "2.0.0.9",
-            "65535.65535.65535-preview.65535": "65535.65535.65535.65535",
-        }
-        for version, numeric in cases.items():
-            with self.subTest(version=version):
-                self.assertEqual(package_native.windows_numeric_version(version), numeric)
-
-    def test_windows_numeric_version_rejects_word_overflow(self) -> None:
-        for version in ("65536.0.0", "2.65536.0", "2.0.65536", "2.0.0-preview.65536"):
-            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "65535"):
-                package_native.windows_numeric_version(version)
-
-    def test_dpkg_dependency_output_is_parsed(self) -> None:
-        output = "ignored=value\nshlibs:Depends=libc6 (>= 2.34), libx11-6\n"
-        self.assertEqual(
-            package_native.parse_dpkg_dependencies(output),
-            "libc6 (>= 2.34), libx11-6",
-        )
-        with self.assertRaises(RuntimeError):
-            package_native.parse_dpkg_dependencies("shlibs:Depends=\n")
-
-    def test_native_icon_resources_have_expected_formats_and_sizes(self) -> None:
-        expected_png_sizes = {
-            "32x32.png": (32, 32),
-            "64x64.png": (64, 64),
-            "128x128.png": (128, 128),
-            "256x256.png": (256, 256),
-            "512x512.png": (512, 512),
-        }
-        for name, expected_size in expected_png_sizes.items():
-            with self.subTest(name=name):
-                data = (package_native.ICON_DIR / name).read_bytes()
-                self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
-                self.assertEqual(struct.unpack(">II", data[16:24]), expected_size)
-
-        self.assertEqual(
-            (package_native.ICON_DIR / "icon.icns").read_bytes()[:4], b"icns"
-        )
-        self.assertEqual(
-            (package_native.ICON_DIR / "icon.ico").read_bytes()[:4], b"\0\0\1\0"
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -10,13 +10,14 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 use zzclawterm_core::sync_schema::{
-    SyncFieldId, SyncProjection, SyncScope, SyncValues, apply_record, encryption, project_entities,
-    project_record,
+    FIXED_CLOUD_SYNC_SCOPE, SyncFieldId, SyncProjection, SyncScope, SyncValues, apply_record,
+    encryption, project_entities, project_record,
 };
 use zzclawterm_core::{Group, NotesSnapshot, SessionsConfig};
 use zzclawterm_sync::application::{SyncApplication, isolate_changes};
 use zzclawterm_sync::engine::{SyncReplica, digest};
 
+use super::maintenance::ReplicaMigrationPreparation;
 use super::notes::{replace_notes_snapshot_in_txn, validate_notes_snapshot};
 use super::{
     CONNECTION_PASSWORD_PREFIX, CONNECTION_PREFIX, CONNECTIONS_TABLE, CREDENTIALS_TABLE,
@@ -212,7 +213,243 @@ fn record_secret_edit(txn: &redb::WriteTransaction, key: &str) -> Result<(), Sto
     Ok(())
 }
 
+/// Drops journal rows already covered by the generation that was applied.
+/// Callers pass the transaction that commits the apply itself, so a failed
+/// apply can never leave the journal partially cleaned. The generation
+/// counter is untouched and repeated calls are harmless.
+fn purge_consumed_edits(
+    txn: &redb::WriteTransaction,
+    applied_generation: u64,
+) -> Result<usize, StorageError> {
+    let mut consumed = Vec::new();
+    {
+        let edits = txn.open_table(EDITS)?;
+        for row in edits.iter()? {
+            let (key, value) = row?;
+            if value.value() <= applied_generation {
+                consumed.push(key.value().to_owned());
+            }
+        }
+    }
+    if consumed.is_empty() {
+        return Ok(0);
+    }
+    let count = consumed.len();
+    let mut edits = txn.open_table(EDITS)?;
+    for key in consumed {
+        edits.remove(key.as_str())?;
+    }
+    Ok(count)
+}
+
+/// An unreadable or unsupported destination cannot prove that shared edits
+/// were consumed. Validate every record before the visitor's prepared bytes
+/// can be committed, and derive the watermark from this same transaction.
+fn visit_local_replicas(
+    txn: &redb::WriteTransaction,
+    password: &str,
+    just_applied: Option<(&str, u64)>,
+    mut visit: impl FnMut(&str, &[u8], &[u8]) -> Result<(), StorageError>,
+) -> Result<Option<u64>, StorageError> {
+    let current_generation = generation(txn)?;
+    let mut watermark = None::<u64>;
+    for row in txn.open_table(REPLICAS)?.iter()? {
+        let (destination, raw) = row?;
+        if let Some((applied_destination, applied_generation)) = just_applied
+            && destination.value() == applied_destination
+        {
+            // The caller just sealed and inserted this validated record in
+            // this transaction. Avoid another password KDF for the usual
+            // single-destination Apply.
+            watermark = Some(watermark.map_or(applied_generation, |previous| {
+                previous.min(applied_generation)
+            }));
+            continue;
+        }
+        let Ok(plaintext) =
+            encryption::open(password, "local-replica", destination.value(), raw.value())
+        else {
+            return Ok(None);
+        };
+        let Ok(record) = serde_json::from_slice::<LocalReplica>(&plaintext) else {
+            return Ok(None);
+        };
+        if record.schema != 4 || record.applied_generation > current_generation {
+            return Ok(None);
+        }
+        watermark = Some(watermark.map_or(record.applied_generation, |previous| {
+            previous.min(record.applied_generation)
+        }));
+        visit(destination.value(), raw.value(), &plaintext)?;
+    }
+    Ok(watermark)
+}
+
+const LOCAL_REPLICA_MIGRATION: &str = "sync_v4/local_replica_compression";
+const MIGRATION_RECORDS: &str = "records";
+const MIGRATION_DONE: &str = "done";
+
 impl ConnectionStore {
+    /// Compatibility facade for explicit migration callers. Runtime startup
+    /// uses the unified, deferred maintenance operation instead.
+    pub fn migrate_local_replica_storage(&mut self) -> Result<bool, StorageError> {
+        let preparation = self.prepare_local_replica_migration()?;
+        if !preparation.pending_compaction {
+            return Ok(false);
+        }
+        if self.db.compact().is_err() {
+            return Ok(false);
+        }
+        self.finish_local_replica_migration()?;
+        Ok(true)
+    }
+
+    pub(super) fn prepare_local_replica_migration(
+        &self,
+    ) -> Result<ReplicaMigrationPreparation, StorageError> {
+        // Ciphertext hashes are part of a durable password-rotation ticket.
+        // Rewriting them would invalidate its exact-byte restart recovery.
+        if self.has_staged_v4_password_rotation()? {
+            return Ok(ReplicaMigrationPreparation::default());
+        }
+        match self.local_replica_migration_state()?.as_deref() {
+            Some(MIGRATION_DONE) => return Ok(ReplicaMigrationPreparation::default()),
+            Some(MIGRATION_RECORDS) => {
+                return Ok(ReplicaMigrationPreparation {
+                    pending_compaction: true,
+                    ..Default::default()
+                });
+            }
+            // A future maintenance stage is not permission to rewrite its
+            // records or replace its durable marker with this build's state.
+            Some(_) => return Ok(ReplicaMigrationPreparation::default()),
+            None => {}
+        }
+        let Some(password) = self.load_cloud_sync_master_password()? else {
+            return Ok(ReplicaMigrationPreparation::default());
+        };
+        let txn = self.db.begin_write()?;
+        let mut rewrites = Vec::new();
+        let watermark = visit_local_replicas(
+            &txn,
+            password.expose_secret(),
+            None,
+            |destination, raw, plaintext| {
+                if encryption::is_legacy_envelope(raw) {
+                    rewrites.push((
+                        destination.to_owned(),
+                        encryption::seal_compressed(
+                            password.expose_secret(),
+                            "local-replica",
+                            destination,
+                            plaintext,
+                        )?,
+                    ));
+                }
+                Ok(())
+            },
+        )?;
+        let Some(watermark) = watermark else {
+            // Missing or unreadable replicas leave all bytes and markers intact.
+            return Ok(ReplicaMigrationPreparation::default());
+        };
+        {
+            let mut table = txn.open_table(REPLICAS)?;
+            for (destination, sealed) in &rewrites {
+                table.insert(destination.as_str(), sealed.as_slice())?;
+            }
+        }
+        let journal_rows_removed = purge_consumed_edits(&txn, watermark)?;
+        let pending_compaction = !rewrites.is_empty() || journal_rows_removed > 0;
+        txn.open_table(META_TABLE)?.insert(
+            LOCAL_REPLICA_MIGRATION,
+            if pending_compaction {
+                MIGRATION_RECORDS
+            } else {
+                MIGRATION_DONE
+            },
+        )?;
+        txn.commit()?;
+        Ok(ReplicaMigrationPreparation {
+            replicas_rewritten: rewrites.len(),
+            journal_rows_removed,
+            pending_compaction,
+        })
+    }
+
+    pub(super) fn finish_local_replica_migration(&self) -> Result<(), StorageError> {
+        self.set_local_replica_migration_state(MIGRATION_DONE)
+    }
+
+    fn local_replica_migration_state(&self) -> Result<Option<String>, StorageError> {
+        let txn = self.db.begin_read()?;
+        Ok(txn
+            .open_table(META_TABLE)?
+            .get(LOCAL_REPLICA_MIGRATION)?
+            .map(|value| value.value().to_owned()))
+    }
+
+    fn set_local_replica_migration_state(&self, state: &str) -> Result<(), StorageError> {
+        let txn = self.db.begin_write()?;
+        txn.open_table(META_TABLE)?
+            .insert(LOCAL_REPLICA_MIGRATION, state)?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn build_fixed_sync_snapshot(
+        &self,
+        device_id: impl Into<String>,
+        app_version: impl Into<String>,
+    ) -> Result<zzclawterm_core::RawPortableSnapshot, StorageError> {
+        let mut source = zzclawterm_core::RawPortableSnapshot::sync(device_id, app_version);
+        source.entities = self.v4_entities()?;
+        Ok(zzclawterm_core::portable_snapshot::project_fixed_sync_snapshot(&source)?)
+    }
+
+    pub(crate) fn apply_fixed_sync_snapshot(
+        &self,
+        snapshot: &zzclawterm_core::RawPortableSnapshot,
+        password: &str,
+    ) -> Result<(), StorageError> {
+        zzclawterm_core::portable_snapshot::validate_raw_snapshot(snapshot)?;
+        // A transient view reuses the same transaction, classified overlay and
+        // credential-binding guards as field merge. It never creates a replica
+        // or restores vault/settings tables from a remote backup.
+        let destination = format!("snapshot-apply/{}", Uuid::new_v4());
+        let view = self.load_v4_view(&destination, password, &FIXED_CLOUD_SYNC_SCOPE)?;
+        let incoming = zzclawterm_core::portable_snapshot::project_fixed_sync_entities(snapshot)?;
+        let mut desired = view.projection.clone();
+        desired.values.retain(|key, _| {
+            SyncFieldId::from_key(key)
+                .is_none_or(|field| !incoming.complete.contains(&field.resource.kind))
+        });
+        desired.values.extend(incoming.values);
+        desired.edited.clear();
+        let plan = zzclawterm_sync::engine::prepare(
+            view.record.writer,
+            None,
+            &view.projection.values,
+            desired,
+            &[],
+            FIXED_CLOUD_SYNC_SCOPE,
+        )
+        .map_err(|_| invalid())?;
+        let prepared = PreparedApply {
+            destination,
+            expected_record: view.record_hash,
+            generation: view.generation,
+            local: view.record,
+            plan: zzclawterm_sync::engine::SyncPlan {
+                expected_local: view.projection,
+                ..plan
+            },
+            trust_approvals: BTreeMap::new(),
+        };
+        self.apply_core_plan(prepared, password, true, |_| {})?;
+        Ok(())
+    }
+
     pub fn project_v4_legacy_trust(
         &self,
         snapshot: &zzclawterm_core::RawPortableSnapshot,
@@ -297,10 +534,22 @@ impl ConnectionStore {
         // history, trust stores, cloud authentication and vault tables are not
         // read just to check whether a portable user field changed.
         let mut entities = BTreeMap::new();
-        entities.insert(
-            "settings".into(),
-            serde_json::to_string(&self.load_settings_value()?)?,
-        );
+        let mut settings = self.load_settings_value()?;
+        // The local settings reader knows an omitted catalog means the empty
+        // default. Legacy transport inputs cannot make that same assumption.
+        if settings.pointer("/appearance/custom_themes").is_none()
+            && settings.get("appearance").is_none_or(Value::is_object)
+        {
+            settings
+                .as_object_mut()
+                .ok_or_else(invalid)?
+                .entry("appearance")
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(invalid)?
+                .insert("custom_themes".into(), json!([]));
+        }
+        entities.insert("settings".into(), serde_json::to_string(&settings)?);
         // load_sessions() performs legacy icon and credential migrations. A
         // preview must not invoke those writes or decrypt an excluded vault.
         // Raw records also retain properties unknown to the typed catalogs.
@@ -448,7 +697,11 @@ impl ConnectionStore {
         password: &str,
     ) -> Result<Option<(LocalReplica, String)>, StorageError> {
         let txn = self.db.begin_read()?;
-        let table = txn.open_table(REPLICAS)?;
+        let table = match txn.open_table(REPLICAS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
         let Some(bytes) = table.get(destination)? else {
             return Ok(None);
         };
@@ -469,7 +722,8 @@ impl ConnectionStore {
         record: &LocalReplica,
     ) -> Result<String, StorageError> {
         let plaintext = Zeroizing::new(serde_json::to_vec(record)?);
-        let bytes = encryption::seal(password, "local-replica", destination, &plaintext)?;
+        let bytes =
+            encryption::seal_compressed(password, "local-replica", destination, &plaintext)?;
         let txn = self.db.begin_write()?;
         let current = txn
             .open_table(REPLICAS)?
@@ -489,13 +743,26 @@ impl ConnectionStore {
         prepared: PreparedApply,
         password: &str,
     ) -> Result<LocalReplica, StorageError> {
+        if prepared.plan.scope != FIXED_CLOUD_SYNC_SCOPE {
+            return Err(invalid());
+        }
         self.apply_v4_plan_observed(prepared, password, |_| {})
     }
 
     fn apply_v4_plan_observed(
         &self,
+        prepared: PreparedApply,
+        password: &str,
+        observe: impl FnMut(ApplyPoint),
+    ) -> Result<LocalReplica, StorageError> {
+        self.apply_core_plan(prepared, password, false, observe)
+    }
+
+    fn apply_core_plan(
+        &self,
         mut prepared: PreparedApply,
         password: &str,
+        snapshot_only: bool,
         mut observe: impl FnMut(ApplyPoint),
     ) -> Result<LocalReplica, StorageError> {
         let current = self.load_v4_view(&prepared.destination, password, &prepared.plan.scope)?;
@@ -506,7 +773,9 @@ impl ConnectionStore {
             return Err(StorageError::CloudSyncLocalChanged);
         }
         let live_settings = self.load_cloud_sync_settings()?;
-        if live_settings.v4_scope != prepared.plan.scope || live_settings.protocol_version != 4 {
+        if prepared.plan.scope != FIXED_CLOUD_SYNC_SCOPE
+            || (!snapshot_only && live_settings.protocol_version != 4)
+        {
             return Err(StorageError::CloudSyncLocalChanged);
         }
         let replica = SyncReplica::load(&prepared.plan.replica, prepared.local.writer)
@@ -622,8 +891,6 @@ impl ConnectionStore {
             if !next_connections.contains(original.id.as_str()) {
                 txn.open_table(CONNECTIONS_TABLE)?
                     .remove(entity_key(CONNECTION_PREFIX, &original.id).as_str())?;
-                txn.open_table(CREDENTIALS_TABLE)?
-                    .remove(entity_key(CONNECTION_PASSWORD_PREFIX, &original.id).as_str())?;
             }
         }
         for (next, connection) in sessions.connections.iter().zip(connections.iter()) {
@@ -665,7 +932,17 @@ impl ConnectionStore {
             let old: Value = serde_json::from_str(&snapshot[entity])?;
             if old != entities[entity] {
                 let next = if wrapped {
-                    json!({"groups":entities[entity]})
+                    // Collection wrappers may carry fields from newer versions.
+                    // Rebase on the locked document before replacing only groups.
+                    let mut document: Value = txn
+                        .open_table(SETTINGS_TABLE)?
+                        .get(key)?
+                        .map(|raw| serde_json::from_slice(raw.value()))
+                        .transpose()?
+                        .unwrap_or_else(|| json!({}));
+                    let fields = document.as_object_mut().ok_or_else(invalid)?;
+                    fields.insert("groups".into(), entities[entity].clone());
+                    document
                 } else {
                     entities[entity].clone()
                 };
@@ -728,10 +1005,25 @@ impl ConnectionStore {
                 }));
         }
         prepared.local.applied_generation = generation(&txn)?;
-        let plaintext = Zeroizing::new(serde_json::to_vec(&prepared.local)?);
-        let bytes = encryption::seal(password, "local-replica", &prepared.destination, &plaintext)?;
-        txn.open_table(REPLICAS)?
-            .insert(prepared.destination.as_str(), bytes.as_slice())?;
+        if !snapshot_only {
+            let plaintext = Zeroizing::new(serde_json::to_vec(&prepared.local)?);
+            let bytes = encryption::seal_compressed(
+                password,
+                "local-replica",
+                &prepared.destination,
+                &plaintext,
+            )?;
+            txn.open_table(REPLICAS)?
+                .insert(prepared.destination.as_str(), bytes.as_slice())?;
+            if let Some(watermark) = visit_local_replicas(
+                &txn,
+                password,
+                Some((&prepared.destination, prepared.local.applied_generation)),
+                |_, _, _| Ok(()),
+            )? {
+                purge_consumed_edits(&txn, watermark)?;
+            }
+        }
         observe(ApplyPoint::Replica);
         // Every mutation here belongs to this one Redb transaction. A process
         // death therefore exposes either the entire apply or none of it.
@@ -1101,12 +1393,18 @@ fn reconstruct(
         }
     }
     let settings = entities.get_mut("settings").ok_or_else(invalid)?;
-    if let Some(themes) = settings
-        .pointer("/appearance/custom_themes")
-        .filter(|value| value.is_array())
-        .cloned()
-    {
-        settings["appearance"]["custom_themes"] = merge_collection(&themes, effective, "theme")?;
+    let themes = settings.pointer("/appearance/custom_themes").cloned();
+    if themes.is_some() || !records(effective, "theme")?.is_empty() {
+        let merged = merge_collection(&themes.unwrap_or_else(|| json!([])), effective, "theme")?;
+        let appearance = settings
+            .as_object_mut()
+            .ok_or_else(invalid)?
+            .entry("appearance")
+            .or_insert_with(|| json!({}));
+        appearance
+            .as_object_mut()
+            .ok_or_else(invalid)?
+            .insert("custom_themes".into(), merged);
     }
     if scope.preferences {
         for (id, value) in records(effective, "preference")? {
@@ -1485,5 +1783,9 @@ fn validate_relationships(entities: &BTreeMap<String, Value>) -> Result<(), Stor
     Ok(())
 }
 
+#[cfg(test)]
+mod journal_tests;
+#[cfg(test)]
+mod maintenance_tests;
 #[cfg(test)]
 mod tests;

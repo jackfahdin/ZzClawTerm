@@ -70,6 +70,37 @@ impl ZzClawTermApp {
         let workspace_split = self.session.start_take_pending_workspace_split();
 
         match metadata.launch_config.clone() {
+            SessionLaunchConfig::AdbShell(config) => {
+                self.open_android_view(
+                    config,
+                    zzclawterm_core::models::android::AndroidViewKind::Shell,
+                    SavedConnectionStartOptions {
+                        custom_name,
+                        tab_color: custom_color,
+                        after_session_id: Some(source_session_id),
+                        workspace_split,
+                        ..Default::default()
+                    },
+                    cx,
+                );
+            }
+            SessionLaunchConfig::AdbFiles(config) | SessionLaunchConfig::AdbScreen(config) => {
+                let kind = match metadata.launch_config {
+                    SessionLaunchConfig::AdbFiles(_) => {
+                        zzclawterm_core::models::android::AndroidViewKind::Files
+                    }
+                    _ => zzclawterm_core::models::android::AndroidViewKind::Screen,
+                };
+                self.open_android_view(
+                    config,
+                    kind,
+                    SavedConnectionStartOptions {
+                        workspace_split,
+                        ..Default::default()
+                    },
+                    cx,
+                );
+            }
             SessionLaunchConfig::Local(mut config) => {
                 if let Some(working_dir) = working_dir {
                     config.working_dir = Some(working_dir);
@@ -268,10 +299,25 @@ impl ZzClawTermApp {
 
         self.session.begin_disconnect_action(session_id.clone());
         // Backend may already be gone (race with Exited); still mark disconnected.
-        if self.remote_desktop.is_session(&session_id) {
+        if matches!(
+            self.android.kind(&session_id),
+            Some(
+                zzclawterm_core::models::android::AndroidViewKind::Files
+                    | zzclawterm_core::models::android::AndroidViewKind::Screen
+            )
+        ) {
+            self.android.release_inputs(&session_id);
+            self.android.stop_screen(&session_id);
+        } else if self.remote_desktop.is_session(&session_id) {
             let _ = self.close_remote_desktop_runtime(&session_id);
-        } else {
-            let _ = self.session.manager().close(&session_id);
+        } else if let Err(error) = self.session.manager().close_detached(&session_id) {
+            self.session.finish_busy_action(&session_id);
+            self.shell.set_status(format!(
+                "could not disconnect {}: {error}",
+                short_id(&session_id)
+            ));
+            cx.notify();
+            return;
         }
         self.disconnect_recording_for_session(&session_id);
         self.mark_session_disconnected(&session_id, cx);
@@ -286,12 +332,15 @@ impl ZzClawTermApp {
         session_id: &str,
         cx: &mut Context<Self>,
     ) {
+        self.cancel_file_sudo_for_sessions(&[session_id.to_owned()], cx);
+        self.cancel_native_runs_for_disconnected_session(session_id, cx);
         self.commands.cancel_staged_quick_command(session_id);
         self.terminal.invalidate_shell_editing_session(session_id);
         self.clear_terminal_mouse_report_for_session(session_id);
         self.terminal.clear_session_pressed_keys(session_id);
         self.transfer.clear_file_clipboard_for_session(session_id);
         let rollback = self.transfer.invalidate_browser_navigation(session_id);
+        self.transfer.cancel_tree_session_requests(session_id);
         if self.session.active_id() == Some(session_id) {
             if let Some(snapshot) = rollback {
                 self.restore_transfer_browser_navigation(snapshot);
@@ -356,7 +405,9 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
-        if self.session.start_reconnect_is_pending(&session_id) {
+        if self.session.start_reconnect_is_pending(&session_id)
+            || self.remote_desktop.start_is_pending(&session_id)
+        {
             self.shell
                 .set_status("session is already reconnecting".to_string());
             cx.notify();
@@ -478,6 +529,18 @@ impl ZzClawTermApp {
                 connection,
                 SavedConnectionStartOptions {
                     ssh_runtime_mode,
+                    android_view: match metadata.launch_config {
+                        SessionLaunchConfig::AdbShell(_) => {
+                            Some(zzclawterm_core::models::android::AndroidViewKind::Shell)
+                        }
+                        SessionLaunchConfig::AdbFiles(_) => {
+                            Some(zzclawterm_core::models::android::AndroidViewKind::Files)
+                        }
+                        SessionLaunchConfig::AdbScreen(_) => {
+                            Some(zzclawterm_core::models::android::AndroidViewKind::Screen)
+                        }
+                        _ => None,
+                    },
                     custom_name,
                     tab_color: custom_color,
                     locked,
@@ -509,6 +572,12 @@ impl ZzClawTermApp {
         let source_connection_id = metadata.source_connection_id;
         let ai_execution_profile = metadata.ai_execution_profile;
         match launch_config {
+            SessionLaunchConfig::AdbShell(_)
+            | SessionLaunchConfig::AdbFiles(_)
+            | SessionLaunchConfig::AdbScreen(_) => {
+                self.shell
+                    .set_status(rust_i18n::t!("android.connectionUnavailable").into_owned());
+            }
             SessionLaunchConfig::Local(mut config) => {
                 self.apply_desired_geometry_to_local_config(&mut config);
                 self.begin_background_session_start(

@@ -3,15 +3,14 @@ use std::time::{Duration, Instant};
 use crate::models::{NavItem, PanelResizeSide, PanelSide};
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, IntoElement, KeyDownEvent, KeyUpEvent,
-    ModifiersChangedEvent, MouseButton, MouseMoveEvent, MouseUpEvent, NavigationDirection,
-    ObjectFit, Render, SharedString, Stateful, Window, canvas, deferred, div, img, prelude::*, px,
-    rgb, rgba, svg,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    NavigationDirection, ObjectFit, Render, SharedString, Stateful, Window, canvas, deferred, div,
+    img, prelude::*, px, rgb, rgba, svg,
 };
 use rust_i18n::t;
 
 use super::ZzClawTermApp;
 use super::ai::AiFullAccessSetting;
-use super::mcp::{McpApprovalDecision, McpApprovalRequest};
 use super::terminal::{FULL_SHELL_PAINT_COUNT, terminal_surface_paint_count};
 use super::view_widgets::{
     full_window_input_layer, full_window_overlay_layer, modal_overlay_layer, modal_scrim_is_drawn,
@@ -87,6 +86,10 @@ pub(in crate::features) struct OverlayFlags {
 impl OverlayFlags {
     #[cfg(any(windows, test))]
     pub(in crate::features) fn obscures_native_surface(self) -> bool {
+        self.blocks_workspace_focus()
+    }
+
+    pub(in crate::features) fn blocks_workspace_focus(self) -> bool {
         let Self {
             tab_actions_open,
             color_picker_open,
@@ -346,6 +349,8 @@ impl ZzClawTermApp {
         self.maybe_autostart_x11_server();
         self.resume_startup_restore_if_unlocked(window, cx);
 
+        self.observe_startup_restore_focus_activation(window, cx);
+
         self.ensure_terminal_focus_reporting(window, cx);
         self.ensure_rdp_focus_reporting(window, cx);
     }
@@ -377,35 +382,27 @@ impl ZzClawTermApp {
             .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
                 this.update_action_link_modifiers(event.modifiers, cx);
             }))
+            // Observe presses before child controls dismiss popups or toggle
+            // panels. Popup dismissal and panel dismissal are separate clicks.
+            .capture_any_mouse_down(cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                this.capture_floating_panel_press(event, window, cx);
+            }))
+            .capture_any_mouse_up(cx.listener(|this, event: &MouseUpEvent, window, cx| {
+                if event.button == MouseButton::Left {
+                    if cx.has_internal_drag() {
+                        this.shell.panels.clear_floating_outside_press();
+                    } else {
+                        this.defer_floating_panel_outside_click(event.position, window, cx);
+                    }
+                }
+            }))
             .on_click(cx.listener(|this, _, _, _| {
                 this.mark_user_activity();
             }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, window, cx| {
-                    let transfer_rename_dismissed = this.dismiss_transfer_rename_if_open(cx);
-                    let remote_menus_open = this.remote_ops.docker_menus_open();
-                    let ai_menus_open = this.ai.transient_menus_are_open();
-                    let changed =
-                        this.shell.close_root_menus() || remote_menus_open || ai_menus_open;
-                    if transfer_rename_dismissed {
-                        // 传输面板独立维护快照；根层点击关闭行内重命名后也要同步它。
-                        this.defer_transfer_panel_snapshot_flush(cx);
-                    }
-                    if changed {
-                        this.remote_ops.close_docker_menus();
-                        if remote_menus_open {
-                            this.defer_remote_panel_snapshot_flush(cx);
-                        }
-                        if ai_menus_open {
-                            if this.ai.history_is_open() {
-                                this.close_ai_history(window, cx);
-                            }
-                            this.ai.close_transient_menus();
-                            this.defer_ai_panel_snapshot_flush(cx);
-                        }
-                        cx.notify();
-                    }
+                    this.dismiss_workspace_menus_on_left_press(window, cx);
                 }),
             )
             .on_mouse_down(
@@ -423,12 +420,16 @@ impl ZzClawTermApp {
                 }
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                this.shell
+                    .panels
+                    .cancel_floating_outside_drag(event.position);
                 this.reconcile_root_pointer_interactions(event, cx);
                 if event.dragging() {
                     this.update_transfer_browser_column_resize(event, cx);
                     this.update_asset_column_resize(f32::from(event.position.x), cx);
                     this.update_panel_resize(event, cx);
                     this.update_transfer_height_resize(event, cx);
+                    this.update_ai_composer_resize(event, cx);
                     this.update_bottom_panel_resize(event, cx);
                     this.update_panel_stack_resize(event, cx);
                     this.update_workspace_split_resize(event, cx);
@@ -449,6 +450,7 @@ impl ZzClawTermApp {
                     this.finish_asset_column_resize(cx);
                     this.finish_panel_resize(cx);
                     this.finish_transfer_height_resize(cx);
+                    this.finish_ai_composer_resize(cx);
                     this.finish_bottom_panel_resize(cx);
                     this.finish_panel_stack_resize(cx);
                     this.finish_workspace_split_resize(cx);
@@ -582,6 +584,15 @@ impl ZzClawTermApp {
             // Floating selections are transient and independent from the
             // persisted docked active/open stacks.
             let floating_mode = self.shell.panel_is_floating();
+            // While a native RDP presentation scope exists the ActiveX child
+            // window is composed above the owner's GPUI scene and owns the
+            // pointer inside its rectangle. Panels that overlap it must join the
+            // owned overlay popup instead of the owner scene, or they are both
+            // invisible and unclickable.
+            #[cfg(windows)]
+            let native_presentation = self.remote_desktop.native_presentation_needed();
+            #[cfg(not(windows))]
+            let native_presentation = false;
             let left_floating = floating_mode
                 .then(|| self.shell.floating_panel(PanelSide::Left))
                 .flatten();
@@ -633,54 +644,56 @@ impl ZzClawTermApp {
 
             if let Some(panel) = left_floating {
                 let width = self.shell.left_panel_width();
-                surface = surface.child(
-                    div()
-                        .id("floating-left-panel")
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .left(px(40.))
-                        .w(px(width))
-                        .flex()
-                        .border_r_1()
-                        .border_color(rgb(palette.border))
-                        .bg(self.shell_surface_color(palette.surface))
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(div().flex_1().min_w_0().child(self.floating_side_panel(
-                            PanelSide::Left,
-                            panel,
-                            window,
-                            cx,
-                        )))
-                        .child(self.panel_resize_handle(PanelResizeSide::Left, cx)),
-                );
+                let panel = div()
+                    .id("floating-left-panel")
+                    .debug_selector(|| "floating-left-panel".into())
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(40.))
+                    .w(px(width))
+                    .flex()
+                    .border_r_1()
+                    .border_color(rgb(palette.border))
+                    .bg(self.shell_surface_color(palette.surface))
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(div().flex_1().min_w_0().child(self.floating_side_panel(
+                        PanelSide::Left,
+                        panel,
+                        window,
+                        cx,
+                    )))
+                    .child(self.panel_resize_handle(PanelResizeSide::Left, cx))
+                    .into_any_element();
+                surface = surface.child(floating_panel_layer(native_presentation, panel));
             }
 
             if let Some(panel) = right_floating {
                 let width = self.shell.right_panel_width();
-                surface = surface.child(
-                    div()
-                        .id("floating-right-panel")
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .right(px(40.))
-                        .w(px(width))
-                        .flex()
-                        .border_l_1()
-                        .border_color(rgb(palette.border))
-                        .bg(self.shell_surface_color(palette.surface))
-                        .shadow_lg()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(self.panel_resize_handle(PanelResizeSide::Right, cx))
-                        .child(div().flex_1().min_w_0().child(self.floating_side_panel(
-                            PanelSide::Right,
-                            panel,
-                            window,
-                            cx,
-                        ))),
-                );
+                let panel = div()
+                    .id("floating-right-panel")
+                    .debug_selector(|| "floating-right-panel".into())
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(px(40.))
+                    .w(px(width))
+                    .flex()
+                    .border_l_1()
+                    .border_color(rgb(palette.border))
+                    .bg(self.shell_surface_color(palette.surface))
+                    .shadow_lg()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(self.panel_resize_handle(PanelResizeSide::Right, cx))
+                    .child(div().flex_1().min_w_0().child(self.floating_side_panel(
+                        PanelSide::Right,
+                        panel,
+                        window,
+                        cx,
+                    )))
+                    .into_any_element();
+                surface = surface.child(floating_panel_layer(native_presentation, panel));
             }
 
             if left_drawer_open || right_drawer_open {
@@ -851,6 +864,63 @@ impl ZzClawTermApp {
         }
     }
 
+    fn dismiss_workspace_menus_on_left_press(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let transfer_rename_dismissed = self.dismiss_transfer_rename_if_open(cx);
+        let remote_menus_open = self.remote_ops.docker_menus_open();
+        let ai_menus_open = self.ai.transient_menus_are_open();
+        let changed = self.shell.close_root_menus() || remote_menus_open || ai_menus_open;
+        if transfer_rename_dismissed {
+            // 传输面板独立维护快照；根层点击关闭行内重命名后也要同步它。
+            self.defer_transfer_panel_snapshot_flush(cx);
+        }
+        if changed {
+            if remote_menus_open {
+                self.remote_ops.close_docker_menus();
+                self.defer_remote_panel_snapshot_flush(cx);
+            }
+            if ai_menus_open {
+                if self.ai.history_is_open() {
+                    self.close_ai_history(window, cx);
+                }
+                self.ai.close_transient_menus();
+                self.defer_ai_panel_snapshot_flush(cx);
+            }
+            cx.notify();
+        }
+    }
+
+    /// Observe the original press without consuming or replaying native input.
+    pub(in crate::features) fn handle_native_overlay_outside_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.button == MouseButton::Left {
+            // Snapshot eligibility before closing menus. The same observation
+            // can be followed by owner capture, which must preserve this result.
+            self.defer_native_floating_panel_outside_press(event.position, window, cx);
+            self.dismiss_workspace_menus_on_left_press(window, cx);
+        } else {
+            self.shell.panels.clear_floating_outside_press();
+        }
+        // Keep the existing native outside-menu behavior for auxiliary buttons.
+        self.shell.close_root_menus();
+        self.session.dialog_close_tab_actions();
+        self.close_tab_color_picker(cx);
+        self.close_action_link_menu(cx);
+        self.close_activity_bar_context_menu(cx);
+        self.close_transfer_job_menu(cx);
+        self.close_transfer_browser_favorites_menu(cx);
+        self.close_transfer_browser_path_menu(cx);
+        self.close_transfer_browser_upload_menu(cx);
+        cx.notify();
+    }
+
     fn overlay_host(
         &mut self,
         content: Stateful<Div>,
@@ -858,23 +928,14 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let app = cx.weak_entity();
-        window.on_native_overlay_outside_mouse_down(move |_, _, cx| {
+        window.on_native_overlay_outside_mouse_down(move |event, window, cx| {
             let _ = app.update(cx, |this, cx| {
-                this.shell.close_root_menus();
-                this.session.dialog_close_tab_actions();
-                this.close_tab_color_picker(cx);
-                this.close_action_link_menu(cx);
-                this.close_activity_bar_context_menu(cx);
-                this.close_transfer_job_menu(cx);
-                this.close_transfer_browser_favorites_menu(cx);
-                this.close_transfer_browser_path_menu(cx);
-                this.close_transfer_browser_upload_menu(cx);
-                cx.notify();
+                this.handle_native_overlay_outside_mouse_down(event, window, cx);
             });
         });
         let overlay = self.root_overlay_visibility(cx);
         let full_access_confirmation = self.pending_ai_full_access();
-        let mcp_approval = self.mcp_pending_approval_requests().into_iter().next();
+        self.schedule_mcp_approval_dialog(window, cx);
 
         content
             .when(overlay.tab_actions_open, |this| {
@@ -908,15 +969,15 @@ impl ZzClawTermApp {
                 ))
             })
             .when(overlay.favorites_menu_open, |this| {
-                this.child(regional_overlay_layer(
+                this.child(full_window_overlay_layer(
                     "transfer-favorites-menu-input-layer",
                     self.transfer_browser_favorites_menu_overlay(cx),
                 ))
             })
             .when(overlay.path_menu_open, |this| {
-                this.child(regional_overlay_layer(
+                this.child(full_window_overlay_layer(
                     "transfer-path-menu-input-layer",
-                    self.transfer_browser_path_menu_overlay(cx),
+                    self.transfer_browser_path_menu_overlay(window, cx),
                 ))
             })
             .when(overlay.upload_menu_open, |this| {
@@ -1023,15 +1084,6 @@ impl ZzClawTermApp {
                     ))
                 },
             )
-            .when_some(
-                overlay.mcp_approval_open.then_some(mcp_approval).flatten(),
-                |this, request| {
-                    this.child(full_window_overlay_layer(
-                        "mcp-approval-input-layer",
-                        self.mcp_approval_overlay(request, cx),
-                    ))
-                },
-            )
             // Below the lock screen on purpose: both layers share
             // `APP_OVERLAY_PRIORITY`, so insertion order decides, and a layer
             // painted above the lock screen would swallow the pointer input the
@@ -1135,128 +1187,6 @@ impl ZzClawTermApp {
             )
     }
 
-    fn mcp_approval_overlay(
-        &mut self,
-        request: McpApprovalRequest,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let palette = self.theme_palette();
-        let deny_id = request.request_id.clone();
-        let once_id = request.request_id.clone();
-        let session_id = request.request_id.clone();
-        let backdrop_id = request.request_id.clone();
-        let escape_id = request.request_id.clone();
-        div()
-            .id("mcp-approval-overlay")
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x00000080))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.respond_to_mcp_approval(&backdrop_id, McpApprovalDecision::Deny, cx)
-            }))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, _, cx| {
-                if event.keystroke.key == "escape" {
-                    this.respond_to_mcp_approval(&escape_id, McpApprovalDecision::Deny, cx);
-                    cx.stop_propagation();
-                }
-            }))
-            .child(
-                div()
-                    .id("mcp-approval-card")
-                    .w(px(520.))
-                    .p_5()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(rgb(if request.destructive {
-                        palette.danger
-                    } else {
-                        palette.warning
-                    }))
-                    .bg(rgb(palette.surface))
-                    .shadow_lg()
-                    .on_click(|_, _, cx| cx.stop_propagation())
-                    .child(
-                        div()
-                            .text_size(px(16.))
-                            .text_color(rgb(if request.destructive {
-                                palette.danger
-                            } else {
-                                palette.warning
-                            }))
-                            .child(t!("ai.mcp.approvalTitle")),
-                    )
-                    .child(mcp_detail_row(t!("ai.mcp.client"), request.client))
-                    .child(mcp_detail_row(t!("ai.mcp.capability"), request.capability))
-                    .when_some(request.target, |this, target| {
-                        this.child(mcp_detail_row(t!("ai.mcp.target"), target))
-                    })
-                    .child(mcp_detail_row(
-                        t!("ai.mcp.parameters"),
-                        request.parameter_summary,
-                    ))
-                    .child(mcp_detail_row(t!("ai.mcp.risk"), request.risk_level))
-                    .when(request.destructive, |this| {
-                        this.child(
-                            div()
-                                .text_color(rgb(palette.danger))
-                                .child(t!("ai.mcp.destructiveWarning")),
-                        )
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .justify_end()
-                            .gap_2()
-                            .child(overlay_button(
-                                "mcp-approval-deny",
-                                t!("ai.mcp.deny"),
-                                palette,
-                                true,
-                                cx.listener(move |this, _, _, cx| {
-                                    this.respond_to_mcp_approval(
-                                        &deny_id,
-                                        McpApprovalDecision::Deny,
-                                        cx,
-                                    )
-                                }),
-                            ))
-                            .child(overlay_button(
-                                "mcp-approval-once",
-                                t!("ai.mcp.allowOnce"),
-                                palette,
-                                false,
-                                cx.listener(move |this, _, _, cx| {
-                                    this.respond_to_mcp_approval(
-                                        &once_id,
-                                        McpApprovalDecision::AllowOnce,
-                                        cx,
-                                    )
-                                }),
-                            ))
-                            .when(request.allow_session, |this| {
-                                this.child(overlay_button(
-                                    "mcp-approval-session",
-                                    t!("ai.mcp.allowSession"),
-                                    palette,
-                                    false,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.respond_to_mcp_approval(
-                                            &session_id,
-                                            McpApprovalDecision::AllowSession,
-                                            cx,
-                                        )
-                                    }),
-                                ))
-                            }),
-                    ),
-            )
-    }
-
     fn reconcile_root_pointer_interactions(
         &mut self,
         event: &MouseMoveEvent,
@@ -1266,6 +1196,7 @@ impl ZzClawTermApp {
         if event.dragging() {
             return;
         }
+        self.shell.panels.clear_floating_outside_press();
         self.finish_transfer_browser_column_resize(cx);
         self.finish_asset_column_resize(cx);
         self.finish_panel_resize(cx);
@@ -1284,6 +1215,7 @@ impl ZzClawTermApp {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        self.shell.panels.clear_floating_outside_press();
         if let Some(controller) = &self.desktop_controller {
             let _ = controller.update(cx, |controller, _| {
                 controller.update_tab_drag(|drag| drag.cancel());
@@ -1304,6 +1236,7 @@ impl ZzClawTermApp {
         if self.transfer.finish_browser_drag_selection() {
             cx.notify();
         }
+        self.transfer.cancel_browser_selection_click();
     }
 
     /// Whether the main window should be held back for a modal child window.
@@ -1318,7 +1251,7 @@ impl ZzClawTermApp {
     /// The pending state counts: a child window is opened from a deferred
     /// callback, and without it the main window would be live for the frames in
     /// between.
-    fn modal_child_window_is_open_or_pending(&self) -> bool {
+    pub(in crate::features) fn modal_child_window_is_open_or_pending(&self) -> bool {
         self.connection_state.editor_window_is_open_or_pending()
             || self.commands.quick_editor_window_is_open_or_pending()
             || self.sync_input.window_is_open_or_pending()
@@ -1395,6 +1328,21 @@ impl ZzClawTermApp {
     }
 }
 
+/// Presents a floating workspace panel above a native child window.
+///
+/// The panel keeps its layout slot, ids, focus handles and event tree; only its
+/// primitives and input regions move into the owned overlay popup, which is the
+/// only GPUI surface composed above the ActiveX RDP child. Painting it in the
+/// owner scene instead would leave it behind the child window: invisible, and
+/// with every click inside the RDP rectangle going to the remote session.
+fn floating_panel_layer(present_above_native: bool, panel: AnyElement) -> AnyElement {
+    if present_above_native {
+        zzclawterm_ui::nya_region_overlay(panel).into_any_element()
+    } else {
+        panel
+    }
+}
+
 fn wallpaper_tile_grid(viewport: (f32, f32), tile: (f32, f32)) -> (usize, usize) {
     let columns = ((viewport.0.max(1.) / tile.0.max(WALLPAPER_TILE_MIN_SIZE)).ceil() as usize)
         .clamp(1, WALLPAPER_TILE_ELEMENT_LIMIT);
@@ -1425,6 +1373,10 @@ fn fit_wallpaper_tile_size(viewport: (f32, f32), intrinsic: (f32, f32)) -> (f32,
 
 impl Render for ZzClawTermApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_android_visibility(cx);
+        for texture in self.android.retired_textures.drain(..) {
+            window.remove_dynamic_texture(texture);
+        }
         let render_started_at = Instant::now();
         // Reconcile viewport size and cell metrics here rather than on the runtime
         // tick. `render` already holds the window, and the chrome built below reads
@@ -1451,6 +1403,7 @@ impl Render for ZzClawTermApp {
         let root_duration = root_started_at.elapsed();
         let overlay_started_at = Instant::now();
         let output = self.overlay_host(content, window, cx);
+        self.ensure_startup_restore_focus_handoff(window, cx);
         let overlay_duration = overlay_started_at.elapsed();
         let render_duration = render_started_at.elapsed();
         record_gpui_perf_sample(
@@ -1512,22 +1465,6 @@ fn overlay_button(
         .hover(|this| this.opacity(0.85))
         .on_click(on_click)
         .child(label.into())
-}
-
-fn mcp_detail_row(
-    label: impl Into<SharedString>,
-    value: impl Into<SharedString>,
-) -> impl IntoElement {
-    div()
-        .flex()
-        .gap_2()
-        .child(
-            div()
-                .w(px(112.))
-                .text_color(rgba(0xffffff88))
-                .child(label.into()),
-        )
-        .child(div().flex_1().min_w_0().child(value.into()))
 }
 
 #[cfg(test)]

@@ -26,7 +26,8 @@ impl ZzClawTermApp {
             lines = normalized.split('\n').count(),
             chars = draft_text.chars().count()
         );
-        let can_send = !draft_text.is_empty();
+        let can_send = !draft_text.is_empty() && !self.suggestion_paste_cannot_replace_input();
+        let needs_bracketed_shell = self.suggestion_paste_needs_bracketed_shell();
         let preview_height = (viewport_h - 160.).clamp(128., 288.);
 
         div()
@@ -73,6 +74,15 @@ impl ZzClawTermApp {
                             .text_color(rgb(palette.text_muted))
                             .child(stats),
                     )
+                    .when(needs_bracketed_shell, |this| {
+                        this.child(
+                            div()
+                                .mt_1()
+                                .text_xs()
+                                .text_color(rgb(palette.text_muted))
+                                .child(t!("terminal.multiLineSuggestionRequiresBracketedPaste")),
+                        )
+                    })
                     .child(
                         div()
                             .id(SharedString::from("multi-line-paste-text"))
@@ -88,7 +98,7 @@ impl ZzClawTermApp {
                             } else {
                                 rgb(0x7f1d1d)
                             })
-                            .bg(rgb(palette.input))
+                            .bg(rgb(palette.input_surface()))
                             .child(ZzClawDocumentEditor::new(&editor)),
                     )
                     .child(
@@ -116,7 +126,7 @@ impl ZzClawTermApp {
                                 .autofocus()
                                 .small()
                                 .compact()
-                                .disabled(!can_send)
+                                .disabled(!can_send || needs_bracketed_shell)
                                 .on_click(cx.listener(
                                     |this, _, window, cx| {
                                         this.direct_multi_line_paste(window, cx);

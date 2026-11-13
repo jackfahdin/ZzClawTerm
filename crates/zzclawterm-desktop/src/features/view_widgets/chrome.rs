@@ -1,6 +1,7 @@
 use gpui::{
     AnyElement, App, ClickEvent, FontWeight, IntoElement, MouseButton, SharedString, Stateful,
-    TitlebarOptions, Window, WindowControlArea, deferred, div, prelude::*, px, rgb, rgba, svg,
+    TextOverflow, TitlebarOptions, Window, WindowControlArea, deferred, div, prelude::*, px, rgb,
+    rgba, svg,
 };
 
 use super::child_window::ChildWindowChrome;
@@ -19,77 +20,10 @@ pub(in crate::features) fn logo_mark(palette: ThemePalette) -> impl IntoElement 
         .child(super::icons::zzclawterm_app_icon(palette, 22.))
 }
 
-pub(in crate::features) fn vertical_resize_handle_visual(
-    palette: ThemePalette,
-    dragging: bool,
-    highlighted: bool,
-) -> gpui::Div {
-    div()
-        .relative()
-        .w(px(5.))
-        .ml(px(-2.))
-        .mr(px(-2.))
-        .h_full()
-        .flex_none()
-        .child(
-            div()
-                .absolute()
-                .left(px(2.))
-                .top_0()
-                .bottom_0()
-                .w(px(1.))
-                .bg(rgb(palette.border)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(1.))
-                .top_0()
-                .bottom_0()
-                .w(px(3.))
-                .bg(if dragging || highlighted {
-                    rgb(palette.primary)
-                } else {
-                    rgba(0x00000000)
-                }),
-        )
-}
-
-pub(in crate::features) fn horizontal_resize_handle_visual(
-    palette: ThemePalette,
-    dragging: bool,
-    highlighted: bool,
-) -> gpui::Div {
-    div()
-        .relative()
-        .h(px(5.))
-        .mt(px(-2.))
-        .mb(px(-2.))
-        .w_full()
-        .flex_none()
-        .child(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(px(2.))
-                .h(px(1.))
-                .bg(rgb(palette.border)),
-        )
-        .child(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(px(1.))
-                .h(px(3.))
-                .bg(if dragging || highlighted {
-                    rgb(palette.primary)
-                } else {
-                    rgba(0x00000000)
-                }),
-        )
-}
+pub(in crate::features) use zzclawterm_ui::resize_handle::{
+    horizontal_resize_handle_borderless, horizontal_resize_handle_visual,
+    vertical_resize_handle_visual,
+};
 
 pub(in crate::features) fn window_control_button(
     palette: ThemePalette,
@@ -283,10 +217,65 @@ pub(in crate::features) fn panel_header_with_actions(
     background: gpui::Rgba,
     actions: Option<AnyElement>,
 ) -> impl IntoElement {
-    // Keep controls in flow; narrow panels may need another row for actions.
     let title = title.into();
     let meta = meta.into();
     let show_meta = !meta.is_empty();
+    let heading = div()
+        .min_w_0()
+        .flex_1()
+        .overflow_hidden()
+        .flex()
+        .items_baseline()
+        .gap_2()
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(11.))
+                .font_weight(FontWeight(700.))
+                .text_color(rgb(palette.text_muted))
+                .child(title.to_uppercase()),
+        )
+        .when(show_meta, |this| {
+            this.child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(11.))
+                    .text_color(rgb(palette.text_muted))
+                    .opacity(0.85)
+                    .child(meta),
+            )
+        });
+    panel_header_shell(heading.into_any_element(), palette, background, actions)
+}
+
+pub(in crate::features) fn conversation_panel_header_with_actions(
+    title: impl Into<SharedString>,
+    palette: ThemePalette,
+    background: gpui::Rgba,
+    actions: Option<AnyElement>,
+) -> impl IntoElement {
+    let heading = div()
+        .debug_selector(|| "ai-conversation-title".into())
+        .min_w_0()
+        .flex_1()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_overflow(TextOverflow::Truncate("...".into()))
+        .text_size(px(11.))
+        .text_color(rgb(palette.text_muted))
+        .child(title.into());
+    panel_header_shell(heading.into_any_element(), palette, background, actions)
+}
+
+fn panel_header_shell(
+    heading: AnyElement,
+    palette: ThemePalette,
+    background: gpui::Rgba,
+    actions: Option<AnyElement>,
+) -> gpui::Div {
+    // Keep controls in flow; narrow panels may need another row for actions.
     div()
         .min_h(px(36.))
         .flex_none()
@@ -300,35 +289,7 @@ pub(in crate::features) fn panel_header_with_actions(
         .border_b_1()
         .border_color(rgb(palette.border))
         .bg(background)
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .overflow_hidden()
-                .flex()
-                .items_baseline()
-                .gap_2()
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(11.))
-                        .font_weight(FontWeight(700.))
-                        .text_color(rgb(palette.text_muted))
-                        .child(title.to_uppercase()),
-                )
-                .when(show_meta, |this| {
-                    this.child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(11.))
-                            .text_color(rgb(palette.text_muted))
-                            .opacity(0.85)
-                            .child(meta),
-                    )
-                }),
-        )
+        .child(heading)
         .when_some(actions, |this, actions| {
             this.child(
                 div()

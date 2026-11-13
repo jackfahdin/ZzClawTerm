@@ -5,8 +5,8 @@ use crate::local_shell::LocalShellPathStyle;
 use crate::session_event_queue::SessionEventQueue;
 use crate::ssh_services::SshSessionServices;
 use crate::ssh_worker::{SshCommand, TmuxCommandSender, run_ssh_worker};
-use crate::telnet_codec::maybe_build_naws;
 use crate::telnet_input::TelnetInputState;
+use crate::transport_io::telnet_naws::TelnetNawsWriter;
 use crate::transport_io::{
     QueuedTransportWriter, TelnetAutoLoginState, TelnetWriterLifecycle, TelnetWriterPolicy,
     WriteCapacity, WriterFlushPolicy, open_serial_port, spawn_serial_reader_thread,
@@ -43,6 +43,7 @@ pub struct SessionManager {
 }
 
 pub(crate) enum ManagedSession {
+    Adb(crate::adb_shell::AdbTerminalTransport),
     Local(LocalPtyTransport),
     Ssh(SshChannelTransport),
     Tcp(Box<TelnetTransport>),
@@ -123,6 +124,41 @@ pub(crate) fn should_use_interactive_login_args(program: &str) -> bool {
 }
 
 impl SessionManager {
+    pub fn create_adb_session(
+        &self,
+        config: crate::adb_shell::AdbShellConfig,
+    ) -> Result<SessionInfo, SessionError> {
+        self.create_adb_session_with_cancel(config, || Ok(()))
+    }
+
+    pub fn create_adb_session_with_cancel(
+        &self,
+        config: crate::adb_shell::AdbShellConfig,
+        mut check: impl FnMut() -> zzclawterm_android::error::AdbResult<()>,
+    ) -> Result<SessionInfo, SessionError> {
+        check().map_err(|error| SessionError::Adb(error.into()))?;
+        self.ensure_reaper()?;
+        let info = SessionInfo {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: config.name,
+            kind: SessionKind::AdbShell,
+            working_dir: None,
+            cols: config.cols,
+            rows: config.rows,
+        };
+        let transport = crate::adb_shell::AdbTerminalTransport::open(
+            info.clone(),
+            &config.binding,
+            self.event_queue.clone(),
+            &mut check,
+        )
+        .map_err(SessionError::Adb)?;
+        self.sessions
+            .lock()
+            .map_err(|_| SessionError::LockPoisoned)?
+            .insert(info.id.clone(), ManagedSession::Adb(transport));
+        Ok(info)
+    }
     pub fn new() -> Self {
         Self::with_ssh_services(SshSessionServices::default())
     }
@@ -183,6 +219,7 @@ impl SessionManager {
                 // Clear pending input before waiting behind other cleanup jobs.
                 // Native cancellation and joins remain on the reaper worker.
                 match &session {
+                    ManagedSession::Adb(adb) => adb.stop(),
                     ManagedSession::Local(local) => local.writer.command_tx.stop(),
                     ManagedSession::Tcp(tcp) => tcp.writer.command_tx.stop(),
                     ManagedSession::Serial(serial) => serial.writer.command_tx.stop(),
@@ -462,10 +499,30 @@ impl SessionManager {
             stream.set_nonblocking(false)?;
             Ok(stream)
         };
-        let stream = connect().map_err(|source| SessionError::ConnectTcp {
-            addr: addr.clone(),
-            source,
-        })?;
+        let (stream, route) = if config.proxy.is_some() || config.proxy_jump.is_some() {
+            let (stream, route) = crate::network_route::NetworkRoute::connect_with_attempt(
+                crate::network_route::NetworkRouteConfig {
+                    host: config.host.clone(),
+                    port: config.port,
+                    proxy: config.proxy.clone(),
+                    jump: config.proxy_jump.as_deref().cloned(),
+                },
+                attempt.clone(),
+            )
+            .map_err(|source| SessionError::ConnectRoute {
+                addr: addr.clone(),
+                source,
+            })?;
+            (stream, Some(route))
+        } else {
+            (
+                connect().map_err(|source| SessionError::ConnectTcp {
+                    addr: addr.clone(),
+                    source,
+                })?,
+                None,
+            )
+        };
         stream.set_nodelay(true).ok();
         stream
             .set_read_timeout(Some(Duration::from_millis(250)))
@@ -530,15 +587,22 @@ impl SessionManager {
             }),
         )
         .map_err(SessionError::Worker)?;
-        if let Some(naws) = maybe_build_naws(config.cols, config.rows, &config) {
-            let _ = writer.write_telnet_control(naws);
-        }
+        let naws = TelnetNawsWriter::new(writer.command_tx.clone(), &config);
+        naws.offer().map_err(|error| {
+            lifecycle.stop();
+            writer.close();
+            if let Some(route) = &route {
+                route.close();
+            }
+            SessionError::Worker(error)
+        })?;
         let reader_thread = spawn_tcp_reader_thread(
             session_id.clone(),
             reader_stream,
             writer.command_tx.clone(),
             lifecycle.clone(),
             config.clone(),
+            naws.clone(),
             auto_login.clone(),
             self.event_queue.clone(),
         )
@@ -549,6 +613,7 @@ impl SessionManager {
         })?;
 
         let session = TelnetTransport {
+            route,
             info: info.clone(),
             writer,
             reader_stream: stream,
@@ -558,6 +623,7 @@ impl SessionManager {
                 == zzclawterm_core::terminal::connection_input::BackspaceMode::Backspace,
             input: TelnetInputState::default(),
             auto_login,
+            naws,
             event_queue: self.event_queue.clone(),
             config,
             reader_thread: Some(reader_thread),
@@ -618,10 +684,6 @@ impl SessionManager {
                 source: anyhow::Error::msg(message),
             })?;
         self.ensure_reaper()?;
-        let mut sessions = self
-            .sessions
-            .lock()
-            .map_err(|_| SessionError::LockPoisoned)?;
         let session_id = uuid::Uuid::new_v4().to_string();
         let addr = format!("{}:{}", config.host, config.port);
         validate_ssh_algorithm_preferences(config.ssh_algorithms.as_ref()).map_err(|source| {
@@ -638,6 +700,7 @@ impl SessionManager {
         // every command lands on one ordered control channel.
         let worker_tmux_tx = tmux_tx.clone();
         let (ready_tx, ready_rx) = mpsc::channel();
+        let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
         let event_queue = self.event_queue.clone();
         let attempt = multiplex
             .as_ref()
@@ -656,6 +719,7 @@ impl SessionManager {
                     worker_config,
                     command_rx,
                     ready_tx,
+                    registered_rx,
                     event_queue,
                     multiplex,
                     shell_environment,
@@ -672,6 +736,7 @@ impl SessionManager {
         match ready_rx.recv() {
             Ok(Ok(())) => {}
             Ok(Err(message)) => {
+                drop(registered_tx);
                 let _ = worker_thread.join();
                 return Err(SessionError::CreateSsh {
                     addr,
@@ -679,6 +744,7 @@ impl SessionManager {
                 });
             }
             Err(error) => {
+                drop(registered_tx);
                 let _ = worker_thread.join();
                 return Err(SessionError::CreateSsh {
                     addr,
@@ -695,7 +761,8 @@ impl SessionManager {
             cols: config.cols,
             rows: config.rows,
         };
-        let session = SshChannelTransport {
+        let request_attempt = config.attempt.clone();
+        let mut session = SshChannelTransport {
             info: info.clone(),
             shell_enabled: config.runtime_mode
                 != zzclawterm_core::models::ssh_runtime::SshRuntimeMode::Sftp,
@@ -710,8 +777,34 @@ impl SessionManager {
             worker_thread: Some(worker_thread),
         };
 
-        sessions.insert(session_id, ManagedSession::Ssh(session));
-
+        if let Err(message) = request_attempt.check() {
+            drop(registered_tx);
+            let _ = session.close();
+            return Err(SessionError::CreateSsh {
+                addr,
+                source: anyhow::anyhow!(message),
+            });
+        }
+        // Dialling and readiness above are independent of the registry. A worker
+        // cannot publish tmux panes until the short registration commit succeeds.
+        match self.sessions.lock() {
+            Ok(mut sessions) => {
+                sessions.insert(session_id.clone(), ManagedSession::Ssh(session));
+            }
+            Err(error) => {
+                drop(error);
+                drop(registered_tx);
+                let _ = session.close();
+                return Err(SessionError::LockPoisoned);
+            }
+        }
+        if registered_tx.send(()).is_err() {
+            let _ = self.close(&session_id);
+            return Err(SessionError::CreateSsh {
+                addr,
+                source: anyhow::anyhow!("SSH worker exited before registration"),
+            });
+        }
         Ok(info)
     }
 
@@ -824,7 +917,7 @@ impl SessionManager {
             // Output already queued by an exited session still needs protocol filtering.
             // Session existence is checked by the eventual writer, not this policy gate.
             match sessions.get(session_id) {
-                Some(ManagedSession::TmuxPane(_)) => false,
+                Some(ManagedSession::TmuxPane(_) | ManagedSession::Adb(_)) => false,
                 Some(ManagedSession::Ssh(ssh)) if ssh.tmux_active.load(Ordering::Acquire) => false,
                 Some(ManagedSession::Serial(serial)) => {
                     serial.flow_control
@@ -845,7 +938,7 @@ impl SessionManager {
             Some(ManagedSession::Serial(s)) => s.writer.command_tx.peak_bytes(),
             Some(ManagedSession::Ssh(s)) => s.command_tx.peak_bytes(),
             Some(ManagedSession::TmuxPane(pane)) => pane.tmux_tx.peak_bytes(),
-            None => 0,
+            Some(ManagedSession::Adb(_)) | None => 0,
         }
     }
 
@@ -944,7 +1037,7 @@ impl SessionManager {
                             Some(ManagedSession::Ssh(s)) => {
                                 WriteCapacity::Ssh(s.command_tx.clone())
                             }
-                            Some(ManagedSession::TmuxPane(_)) => {
+                            Some(ManagedSession::TmuxPane(_) | ManagedSession::Adb(_)) => {
                                 return Err(SessionError::Write {
                                     session_id: session_id.into(),
                                     source: tmux_modem_unsupported().into(),
@@ -1226,6 +1319,7 @@ impl SessionManager {
 impl ManagedSession {
     pub(crate) fn info(&self) -> SessionInfo {
         match self {
+            Self::Adb(session) => session.info.clone(),
             Self::Local(session) => session.info.clone(),
             Self::Ssh(session) => session.info.clone(),
             Self::Tcp(session) => session.info.clone(),
@@ -1236,6 +1330,7 @@ impl ManagedSession {
 
     pub(crate) fn write(&mut self, data: &[u8]) -> anyhow::Result<()> {
         match self {
+            Self::Adb(session) => session.write(data),
             Self::Local(session) => session.write(data),
             Self::Tcp(session) => session.write(data),
             Self::Ssh(session) => session.write(data),
@@ -1246,6 +1341,7 @@ impl ManagedSession {
 
     pub(crate) fn write_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
         match self {
+            Self::Adb(session) => session.write_raw(data),
             Self::Local(session) => session.write_raw(data),
             Self::Tcp(session) => session.write_raw(data),
             Self::Ssh(session) => session.write_raw(data),
@@ -1262,6 +1358,7 @@ impl ManagedSession {
         pixel_height: u16,
     ) -> anyhow::Result<()> {
         match self {
+            Self::Adb(session) => session.resize(cols, rows, pixel_width, pixel_height),
             Self::Local(session) => session.resize(cols, rows, pixel_width, pixel_height),
             Self::Tcp(session) => session.resize(cols, rows, pixel_width, pixel_height),
             Self::Ssh(session) => session.resize(cols, rows, pixel_width, pixel_height),
@@ -1272,6 +1369,9 @@ impl ManagedSession {
 
     pub(crate) fn close(&mut self) {
         match self {
+            Self::Adb(session) => {
+                let _ = session.close();
+            }
             Self::Local(session) => {
                 let _ = session.close();
             }

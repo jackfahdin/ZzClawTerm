@@ -1,3 +1,4 @@
+use crate::models::android::{AdbDeviceSelector, AndroidScreenSettings, default_android_directory};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -396,12 +397,9 @@ pub fn migrate_legacy_ssh_agent_settings(connection: &mut SavedConnection) -> bo
     if legacy_agent_forwarding.take().is_some() {
         changed = true;
     }
-    if auth_mode == Some("agent") {
-        if auth_agent_endpoint.is_none() {
-            auth_agent_endpoint.replace(SshAgentEndpoint::Auto);
-            changed = true;
-        }
-    } else if auth_agent_endpoint.take().is_some() {
+    // Authentication selection must not discard a saved endpoint for later reuse.
+    if auth_mode == Some("agent") && auth_agent_endpoint.is_none() {
+        auth_agent_endpoint.replace(SshAgentEndpoint::Auto);
         changed = true;
     }
     changed
@@ -499,6 +497,13 @@ impl Default for TelnetAutoLoginConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConnectionType {
+    Adb {
+        device: AdbDeviceSelector,
+        #[serde(default = "default_android_directory")]
+        directory: String,
+        #[serde(default)]
+        screen: AndroidScreenSettings,
+    },
     Ssh {
         host: String,
         #[serde(default = "default_ssh_port")]

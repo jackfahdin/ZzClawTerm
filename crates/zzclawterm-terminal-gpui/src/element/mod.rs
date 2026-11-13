@@ -13,7 +13,7 @@ use gpui::{
 use zzclawterm_core::ResolvedKeywordHighlightRule;
 use zzclawterm_terminal::selection::{
     TerminalBufferCellPos, TerminalCellSide, TerminalSelection, TerminalSelectionEndpoint,
-    expand_selection_range,
+    TerminalSelectionMode, expand_selection_range,
 };
 use zzclawterm_terminal::{
     TerminalLineId, TerminalSnapshot, terminal_cell_count, terminal_char_cell_width,
@@ -29,7 +29,8 @@ use crate::glyphs::{
 };
 use crate::keywords::{
     TerminalKeywordHighlightLookup, TerminalKeywordHighlightSnapshot, TerminalKeywordRowReuseKey,
-    terminal_keyword_row_reuse_key, terminal_keyword_row_reuse_keys, terminal_keyword_rules_key,
+    terminal_keyword_row_reuse_key, terminal_keyword_row_reuse_keys_for_rows,
+    terminal_keyword_rules_key,
 };
 use crate::paint::{
     apply_search_ranges, line_strike_color, push_col_range_bg, terminal_cell_text_at_col,
@@ -83,6 +84,7 @@ pub struct TerminalGridSelection {
     pub anchor_side: TerminalCellSide,
     pub head_side: TerminalCellSide,
     pub all_buffer: bool,
+    pub mode: TerminalSelectionMode,
 }
 
 impl TerminalGridSelection {
@@ -114,6 +116,7 @@ impl TerminalGridSelection {
             anchor_side: selection.anchor.side,
             head_side: selection.head.side,
             all_buffer: selection.all_buffer,
+            mode: selection.mode,
         }
     }
 
@@ -128,6 +131,7 @@ impl TerminalGridSelection {
                 self.head_side,
             ),
             all_buffer: self.all_buffer,
+            mode: self.mode,
         }
         .cols_for_absolute_line(line)
     }
@@ -416,7 +420,6 @@ pub struct ZzClawTerminalElement {
     snapshot: Arc<TerminalSnapshot>,
     keyword_rules: Arc<Vec<ResolvedKeywordHighlightRule>>,
     keyword_highlights: Option<Arc<TerminalKeywordHighlightSnapshot>>,
-    input_keyword_highlights: Option<Arc<TerminalKeywordHighlightSnapshot>>,
     decorations: Arc<[TerminalLineDecorations]>,
     selection: Option<TerminalGridSelection>,
     layout_cache: Option<Arc<Mutex<ZzClawTerminalLayoutCache>>>,
@@ -518,7 +521,6 @@ impl ZzClawTerminalElement {
             snapshot,
             keyword_rules,
             keyword_highlights: None,
-            input_keyword_highlights: None,
             decorations: decorations.into(),
             selection: None,
             layout_cache: None,
@@ -608,50 +610,17 @@ impl ZzClawTerminalElement {
 
     /// Exact input-row results travel with the text frame and take precedence
     /// over output batches. A known-empty result also suppresses stale colors.
-    pub fn with_input_keyword_highlights(
-        mut self,
-        highlights: Arc<TerminalKeywordHighlightSnapshot>,
-    ) -> Self {
-        self.input_keyword_highlights = Some(highlights);
-        self
-    }
-
     fn keyword_highlight_lookup(
         &self,
         row: usize,
         reuse_key: Option<TerminalKeywordRowReuseKey>,
     ) -> Option<TerminalKeywordHighlightLookup<'_>> {
-        if self.input_keyword_highlights.is_none() && self.keyword_highlights.is_none() {
-            return None;
-        }
-        let reuse_key = reuse_key.or_else(|| {
-            self.snapshot.logical_lines.as_ref()?;
-            // A new row buffer does not invalidate unchanged logical lines.
-            // Prefer context already prepared with this frame by the worker;
-            // without it, inspect only this row's bounded keyword group, never
-            // build reuse keys for the entire retained logical viewport here.
-            self.input_keyword_highlights
-                .as_ref()
-                .and_then(|highlights| highlights.frame_row_reuse_key(row, &self.snapshot))
-                .or_else(|| {
-                    self.keyword_highlights
-                        .as_ref()
-                        .and_then(|highlights| highlights.frame_row_reuse_key(row, &self.snapshot))
-                })
-                .or_else(|| terminal_keyword_row_reuse_key(&self.snapshot, row))
-        });
-        self.input_keyword_highlights
-            .as_ref()
-            .and_then(|highlights| highlights.lookup_with_reuse_key(row, &self.snapshot, reuse_key))
-            .or_else(|| {
-                self.keyword_highlights.as_ref().and_then(|highlights| {
-                    highlights
-                        .lookup_with_reuse_key(row, &self.snapshot, reuse_key)
-                        .or_else(|| {
-                            highlights.stale_lookup_with_reuse_key(row, &self.snapshot, reuse_key)
-                        })
-                })
-            })
+        // One snapshot holds every row, including the live input row.
+        self.keyword_highlights.as_ref().and_then(|highlights| {
+            highlights
+                .lookup_with_reuse_key(row, &self.snapshot, reuse_key)
+                .or_else(|| highlights.stale_lookup_with_reuse_key(row, &self.snapshot, reuse_key))
+        })
     }
 
     pub fn with_unwrapped_layout(mut self, layout: Option<Arc<TerminalUnwrappedLayout>>) -> Self {
@@ -787,13 +756,10 @@ impl ZzClawTerminalElement {
     }
 
     fn keyword_rules_key(&self) -> u64 {
-        self.input_keyword_highlights
-            .as_ref()
-            .or(self.keyword_highlights.as_ref())
-            .map_or_else(
-                || terminal_keyword_rules_key(&self.keyword_rules),
-                |highlights| highlights.rules_key(),
-            )
+        self.keyword_highlights.as_ref().map_or_else(
+            || terminal_keyword_rules_key(&self.keyword_rules),
+            |highlights| highlights.rules_key(),
+        )
     }
 
     fn contrast_overlays<'a>(
@@ -1352,6 +1318,34 @@ fn push_terminal_background_ranges(
     }
 }
 
+fn push_command_navigation_highlight(
+    snapshot: &TerminalSnapshot,
+    row: usize,
+    target: Option<TerminalLineId>,
+    palette: zzclawterm_ui::ThemePalette,
+    geometry: TerminalPaintGeometry,
+    out: &mut Vec<PaintQuad>,
+) {
+    if target.is_none()
+        || !snapshot
+            .row(row)
+            .is_some_and(|data| !data.cleared && data.line_id == target)
+    {
+        return;
+    }
+    out.push(fill(
+        Bounds::new(
+            point(
+                geometry.bounds.left(),
+                geometry.bounds.top()
+                    + px(geometry.visual_y_offset + row as f32 * geometry.cell_height),
+            ),
+            size(geometry.bounds.size.width, px(geometry.cell_height)),
+        ),
+        rgb(palette.terminal_line_highlight),
+    ));
+}
+
 fn push_terminal_zebra_stripes(
     snapshot: &TerminalSnapshot,
     visible_rows: std::ops::Range<usize>,
@@ -1522,7 +1516,8 @@ fn terminal_selection_cols_for_snapshot_row(
         start.min(snapshot.cols),
         end.min(snapshot.cols),
     )?;
-    if (!selection.all_buffer && selection.anchor_line == selection.head_line)
+    if selection.mode == TerminalSelectionMode::Block
+        || (!selection.all_buffer && selection.anchor_line == selection.head_line)
         || snapshot_row.wraps_to_next
     {
         return Some((start, expanded_end));
@@ -1678,11 +1673,7 @@ impl Element for ZzClawTerminalElement {
         let mut base_font = font(SharedString::from(self.font_family.clone()));
         base_font.fallbacks = self.font_fallbacks.clone();
         base_font.features = terminal_font_features();
-        let keyword_rules_key = if let Some(highlights) = self
-            .input_keyword_highlights
-            .as_ref()
-            .or(self.keyword_highlights.as_ref())
-        {
+        let keyword_rules_key = if let Some(highlights) = self.keyword_highlights.as_ref() {
             highlights.rules_key()
         } else if self.keyword_rules.is_empty() {
             0
@@ -1751,6 +1742,9 @@ impl Element for ZzClawTerminalElement {
             && let Some(layout) = self.unwrapped.as_ref()
         {
             for display_row in 0..layout.viewport_rows {
+                if layout.summary(display_row).is_some() {
+                    continue;
+                }
                 let row = layout.first_source_row(display_row);
                 if row >= self.snapshot.row_count() {
                     break;
@@ -1764,13 +1758,49 @@ impl Element for ZzClawTerminalElement {
                     self.snapshot.as_ref(),
                     row..row + 1,
                     target,
-                    TerminalStripeMode::new(self.zebra_stripes_by_row, true),
+                    TerminalStripeMode::new(self.zebra_stripes_by_row, layout.unwrapped),
                     self.palette,
                     TerminalPaintGeometry {
                         visual_y_offset: (display_row as f32 - row as f32) * cell_h,
                         ..paint_geometry
                     },
                     &mut plan.zebra_stripes,
+                );
+            }
+        }
+        // Navigation feedback is independent of zebra stripes and glyph layout.
+        if let Some(layout) = self.unwrapped.as_ref() {
+            for display_row in 0..layout.viewport_rows {
+                if layout.summary(display_row).is_some() {
+                    continue;
+                }
+                let row = layout.first_source_row(display_row);
+                let target = layout.target_line_for_display_row(
+                    &self.snapshot,
+                    display_row,
+                    self.snapshot.command_navigation_target,
+                );
+                push_command_navigation_highlight(
+                    &self.snapshot,
+                    row,
+                    target,
+                    self.palette,
+                    TerminalPaintGeometry {
+                        visual_y_offset: (display_row as f32 - row as f32) * cell_h,
+                        ..paint_geometry
+                    },
+                    &mut plan.decoration_backgrounds,
+                );
+            }
+        } else {
+            for row in visible_rows.clone() {
+                push_command_navigation_highlight(
+                    &self.snapshot,
+                    row,
+                    self.snapshot.command_navigation_target,
+                    self.palette,
+                    paint_geometry,
+                    &mut plan.decoration_backgrounds,
                 );
             }
         }
@@ -1788,11 +1818,15 @@ impl Element for ZzClawTerminalElement {
                 .iter()
                 .any(|row| row.wrapped);
         let keyword_row_reuse_keys = self
-            .input_keyword_highlights
+            .keyword_highlights
             .as_ref()
-            .or(self.keyword_highlights.as_ref())
             .filter(|_| visible_has_wrapped_group)
-            .map(|_| terminal_keyword_row_reuse_keys(self.snapshot.as_ref()));
+            .map(|_| {
+                terminal_keyword_row_reuse_keys_for_rows(
+                    self.snapshot.as_ref(),
+                    wrapped_scan_start..wrapped_scan_end,
+                )
+            });
         // Follow the editor model: once the visible viewport is entirely hot,
         // spend at most one subsequent frame shaping the nearest retained row.
         // Any changed visible row suppresses this work, keeping input/output
@@ -1807,7 +1841,10 @@ impl Element for ZzClawTerminalElement {
                     |row| {
                         let keyword_reuse_key = keyword_row_reuse_keys
                             .as_deref()
-                            .and_then(|keys| keys.get(row))
+                            .and_then(|keys| {
+                                row.checked_sub(wrapped_scan_start)
+                                    .and_then(|index| keys.get(index))
+                            })
                             .copied()
                             .flatten()
                             .or_else(|| {
@@ -1871,7 +1908,10 @@ impl Element for ZzClawTerminalElement {
             let row_revision = snapshot_row.map(|row| row.revision);
             let keyword_reuse_key = keyword_row_reuse_keys
                 .as_deref()
-                .and_then(|keys| keys.get(row))
+                .and_then(|keys| {
+                    row.checked_sub(wrapped_scan_start)
+                        .and_then(|index| keys.get(index))
+                })
                 .copied()
                 .flatten()
                 .or_else(|| {
@@ -2278,11 +2318,23 @@ impl Element for ZzClawTerminalElement {
             if image_row_end <= visible_row_start || image.row >= visible_row_end {
                 continue;
             }
-            let x = px(f32::from(bounds.left())
-                + (image.col as f32 - image.source_col_cells as f32) * cell_w);
+            let mapped = self
+                .unwrapped
+                .as_ref()
+                .map(|layout| layout.display_position(image.row, image.col));
+            if mapped == Some(None) {
+                continue;
+            }
+            let (image_row, image_col) = mapped.flatten().unwrap_or((image.row, image.col as f32));
+            let x =
+                px(f32::from(bounds.left()) + (image_col - image.source_col_cells as f32) * cell_w);
             let y = px(f32::from(bounds.top())
-                + visual_y_offset
-                + (image.row as f32 - image.source_row_cells as f32) * cell_h);
+                + if self.unwrapped.is_some() {
+                    0.0
+                } else {
+                    visual_y_offset
+                }
+                + (image_row as f32 - image.source_row_cells as f32) * cell_h);
             let w = px(image.image_width_cells as f32 * cell_w);
             let h = px(image.image_height_cells as f32 * cell_h);
             let rect = Bounds::new(point(x, y), size(w, h));

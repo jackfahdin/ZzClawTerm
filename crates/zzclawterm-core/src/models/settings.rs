@@ -410,6 +410,8 @@ pub enum RecordingRotationPolicy {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettingsSummary {
+    #[serde(default)]
+    pub android_adb_path: String,
     pub theme: String,
     #[serde(default)]
     pub custom_themes: crate::themes::ThemeCatalog,
@@ -560,6 +562,10 @@ pub struct AppSettingsSummary {
     pub ui_file_explorer_view_mode: TransferBrowserViewMode,
     #[serde(default)]
     pub ui_file_explorer_auto_sync_cwd_connection_ids: Vec<String>,
+    /// Highlight recognised command output (ip addr / ls -l / ps aux / git status /
+    /// docker ps / systemctl) by parsing fields instead of running generic rules.
+    #[serde(default = "default_true")]
+    pub ui_highlight_line_roles: bool,
     #[serde(default)]
     pub ui_file_explorer_favorite_dirs_by_connection_id: HashMap<String, Vec<String>>,
     /// Dual-pane file manager layout. Independent of the sidebar explorer.
@@ -781,6 +787,7 @@ impl Default for AppSettingsSummary {
             terminal_font_weight: default_terminal_font_weight(),
             terminal_font_weight_bold: default_terminal_font_weight_bold(),
             bold_default_foreground: false,
+            android_adb_path: String::new(),
             x11_display: String::new(),
             x11_server_autostart: true,
             x11_server_on_demand: true,
@@ -825,6 +832,7 @@ impl Default for AppSettingsSummary {
             ui_file_explorer_show_hidden_files: true,
             ui_file_explorer_view_mode: TransferBrowserViewMode::List,
             ui_file_explorer_auto_sync_cwd_connection_ids: Vec::new(),
+            ui_highlight_line_roles: true,
             ui_file_explorer_favorite_dirs_by_connection_id: HashMap::new(),
             ui_file_manager: FileManagerUiSettings::default(),
             ui_left_panel_width: 256,
@@ -1173,6 +1181,25 @@ mod tests {
             summary.ui_file_explorer_view_mode,
             TransferBrowserViewMode::List
         );
+    }
+
+    #[test]
+    fn host_tools_are_absent_from_new_and_legacy_default_activity_layouts() {
+        let defaults = AppSettingsSummary::default();
+        let mut legacy = serde_json::to_value(&defaults).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("ui_activity_bar_right_top");
+        let restored: AppSettingsSummary = serde_json::from_value(legacy).unwrap();
+        for summary in [defaults, restored] {
+            assert!(
+                !summary
+                    .ui_activity_bar_right_top
+                    .iter()
+                    .any(|id| matches!(id.as_str(), "portsManager" | "servicesManager"))
+            );
+        }
     }
 
     #[test]

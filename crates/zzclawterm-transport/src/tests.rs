@@ -1254,8 +1254,8 @@ fn run_bash_injection_history_probe(
         let ready = output
             .lock()
             .expect("bash history probe output lock")
-            .windows(b"__ZZCLAWTERM_PTY_READY__".len())
-            .any(|window| window == b"__ZZCLAWTERM_PTY_READY__");
+            .windows(b"__ZZCLAWTERM_PTY_READY__\r\n".len())
+            .any(|window| window == b"__ZZCLAWTERM_PTY_READY__\r\n");
         if ready {
             break;
         }
@@ -1383,6 +1383,18 @@ enum UploadedHistoryProbeState {
     Default,
     BashHistoryDisabled,
     FishPrivate,
+    ZshSavedHistory,
+    ZshSharedHistory,
+    ZshIgnoreSpace,
+    ZshUnprivileged,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum HistoryProbeDelivery {
+    Uploaded,
+    Inline,
+    RcActivation,
 }
 
 #[cfg(unix)]
@@ -1390,6 +1402,16 @@ fn run_uploaded_shell_history_probe(
     shell: crate::ssh_shell_integration::ShellKind,
     mode: super::ShellIntegrationMode,
     initial_state: UploadedHistoryProbeState,
+) -> Option<(String, std::path::PathBuf)> {
+    run_shell_history_probe(shell, mode, initial_state, HistoryProbeDelivery::Uploaded)
+}
+
+#[cfg(unix)]
+fn run_shell_history_probe(
+    shell: crate::ssh_shell_integration::ShellKind,
+    mode: super::ShellIntegrationMode,
+    initial_state: UploadedHistoryProbeState,
+    delivery: HistoryProbeDelivery,
 ) -> Option<(String, std::path::PathBuf)> {
     let executable = match shell {
         crate::ssh_shell_integration::ShellKind::Bash => "bash",
@@ -1416,16 +1438,59 @@ fn run_uploaded_shell_history_probe(
     std::fs::create_dir(&remote_dir).expect("create uploaded integration probe directory");
     std::fs::create_dir(&state_dir).expect("create shell history probe state directory");
 
+    let history_file = state_dir.join("original-history");
+    std::fs::write(&history_file, "print -r -- '__ZZCLAWTERM_FILE_BEFORE__'\n")
+        .expect("history fixture");
+    if matches!(initial_state, UploadedHistoryProbeState::ZshUnprivileged) {
+        use std::os::unix::fs::PermissionsExt as _;
+        for dir in [&state_dir, &remote_dir] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        }
+        std::fs::set_permissions(&history_file, std::fs::Permissions::from_mode(0o666)).unwrap();
+    }
+    if matches!(initial_state, UploadedHistoryProbeState::ZshUnprivileged)
+        && unsafe { libc::geteuid() } == 0
+        && std::path::Path::new("/usr/sbin/runuser").exists()
+    {
+        assert!(
+            std::process::Command::new("chown")
+                .arg("nobody")
+                .arg(&remote_dir)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
     let ready = crate::ssh_shell_integration::build_ssh_ready_marker("uploaded-history-probe");
     let integration =
         super::prepare_shell_integration(shell, &ready, mode).expect("prepared shell integration");
     std::fs::write(&remote_path, integration.upload_payload())
         .expect("write uploaded integration probe script");
-    let injected = String::from_utf8(integration.uploaded_script(
-        remote_path.to_str().expect("utf8 uploaded script path"),
-        remote_dir.to_str().expect("utf8 uploaded script directory"),
-    ))
-    .expect("utf8 uploaded integration command");
+    let injected = match delivery {
+        HistoryProbeDelivery::Uploaded => String::from_utf8(integration.uploaded_script(
+            remote_path.to_str().expect("utf8 uploaded script path"),
+            remote_dir.to_str().expect("utf8 uploaded script directory"),
+        ))
+        .expect("utf8 uploaded integration command"),
+        HistoryProbeDelivery::Inline => String::from_utf8(integration.inline_script()).unwrap(),
+        HistoryProbeDelivery::RcActivation => {
+            assert!(matches!(
+                shell,
+                crate::ssh_shell_integration::ShellKind::Zsh
+            ));
+            std::fs::write(
+                &remote_path,
+                crate::ssh_shell_integration::persistent_script(shell).unwrap(),
+            )
+            .unwrap();
+            crate::ssh_shell_integration::activation_script(shell, &ready, mode)
+                .unwrap()
+                .replace(
+                    "$HOME/.config/zzclawterm/shell-integration.zsh",
+                    remote_path.to_str().unwrap(),
+                )
+        }
+    };
 
     let pty = native_pty_system()
         .openpty(PtySize {
@@ -1435,7 +1500,17 @@ fn run_uploaded_shell_history_probe(
             pixel_height: 0,
         })
         .expect("open uploaded shell history probe pty");
-    let mut command = CommandBuilder::new(executable);
+    let unprivileged = matches!(initial_state, UploadedHistoryProbeState::ZshUnprivileged);
+    let mut command = if unprivileged && unsafe { libc::geteuid() } == 0 {
+        if !std::path::Path::new("/usr/sbin/runuser").exists() {
+            return None;
+        }
+        let mut command = CommandBuilder::new("/usr/sbin/runuser");
+        command.args(["-u", "nobody", "--", executable]);
+        command
+    } else {
+        CommandBuilder::new(executable)
+    };
     match shell {
         crate::ssh_shell_integration::ShellKind::Bash => {
             command.args(["--noprofile", "--norc", "-i"]);
@@ -1446,9 +1521,15 @@ fn run_uploaded_shell_history_probe(
         }
         crate::ssh_shell_integration::ShellKind::Zsh => {
             command.args(["-f", "-i"]);
-            command.env("HISTFILE", "/dev/null");
+            if matches!(initial_state, UploadedHistoryProbeState::Default) {
+                command.env("HISTFILE", "/dev/null");
+            } else {
+                command.env("HISTFILE", history_file.to_string_lossy().to_string());
+            }
             command.env("PROMPT", "");
             command.env("RPROMPT", "");
+            // Any accidental history scratch files must remain inside the fixture.
+            command.env("TMPDIR", state_dir.to_string_lossy().to_string());
         }
         crate::ssh_shell_integration::ShellKind::Fish => {
             if matches!(initial_state, UploadedHistoryProbeState::FishPrivate) {
@@ -1513,8 +1594,8 @@ fn run_uploaded_shell_history_probe(
         let ready = output
             .lock()
             .expect("uploaded shell history probe output lock")
-            .windows(b"__ZZCLAWTERM_PTY_READY__".len())
-            .any(|window| window == b"__ZZCLAWTERM_PTY_READY__");
+            .windows(b"__ZZCLAWTERM_PTY_READY__\r\n".len())
+            .any(|window| window == b"__ZZCLAWTERM_PTY_READY__\r\n");
         if ready {
             break;
         }
@@ -1530,7 +1611,10 @@ fn run_uploaded_shell_history_probe(
             "history -c\nprintf '__ZZCLAWTERM_USER_BEFORE__\\n'\n".to_string()
         }
         crate::ssh_shell_integration::ShellKind::Zsh => {
-            "HISTSIZE=0\nHISTSIZE=1000\nprint -r -- '__ZZCLAWTERM_USER_BEFORE__'\n".to_string()
+            // -f suppresses user startup files and unsets RCS; re-enable exit history saving
+            // after startup so the fixture exercises a normal persistent history context.
+            "setopt RCS\nHISTSIZE=0\nHISTSIZE=1000\nprint -r -- '__ZZCLAWTERM_USER_BEFORE__'\n"
+                .to_string()
         }
         crate::ssh_shell_integration::ShellKind::Fish => {
             "printf '__ZZCLAWTERM_USER_BEFORE__\\n'\n".to_string()
@@ -1542,14 +1626,23 @@ fn run_uploaded_shell_history_probe(
         UploadedHistoryProbeState::Default => {}
         UploadedHistoryProbeState::BashHistoryDisabled => commands.push_str("set +o history\n"),
         UploadedHistoryProbeState::FishPrivate => {}
+        UploadedHistoryProbeState::ZshSavedHistory | UploadedHistoryProbeState::ZshUnprivileged => commands.push_str("SAVEHIST=1000\nunsetopt HIST_IGNORE_SPACE SHARE_HISTORY INC_APPEND_HISTORY\nfc -R \"$HISTFILE\"\n"),
+        UploadedHistoryProbeState::ZshSharedHistory => commands.push_str("SAVEHIST=1000\nunsetopt HIST_IGNORE_SPACE\nsetopt SHARE_HISTORY\nfc -R \"$HISTFILE\"\n"),
+        UploadedHistoryProbeState::ZshIgnoreSpace => commands.push_str("SAVEHIST=1000\nsetopt HIST_IGNORE_SPACE INC_APPEND_HISTORY\nfc -R \"$HISTFILE\"\n"),
+    }
+    if matches!(shell, crate::ssh_shell_integration::ShellKind::Zsh) {
+        commands.push_str("printf '__ZZCLAWTERM_OPTIONS_BEFORE__:%s:%s:%s\\n' $options[histignorespace] $options[sharehistory] $options[incappendhistory]\n");
     }
     commands.push_str(&injected);
+    if matches!(shell, crate::ssh_shell_integration::ShellKind::Zsh) {
+        commands.push_str("printf '__ZZCLAWTERM_OPTIONS_AFTER__:%s:%s:%s\\n' $options[histignorespace] $options[sharehistory] $options[incappendhistory]\n");
+    }
     match shell {
         crate::ssh_shell_integration::ShellKind::Bash => commands.push_str(
             "if [[ -o history ]]; then printf '__ZZCLAWTERM_HISTORY_STATE__:enabled\\n'; else printf '__ZZCLAWTERM_HISTORY_STATE__:disabled\\n'; fi\nprintf '__ZZCLAWTERM_HISTORY_BEGIN__\\n'\nHISTTIMEFORMAT= builtin history\nprintf '__ZZCLAWTERM_HISTORY_END__\\n'\nexit\n",
         ),
         crate::ssh_shell_integration::ShellKind::Zsh => commands.push_str(
-            "fc -P 2>/dev/null\nprintf '__ZZCLAWTERM_HISTORY_STACK__:%s\\n' $?\nprintf '__ZZCLAWTERM_HISTORY_BEGIN__\\n'\nfc -l 1\nprintf '__ZZCLAWTERM_HISTORY_END__\\n'\nexit\n",
+            "print -r -- '__ZZCLAWTERM_USER_AFTER__'\nprintf '__ZZCLAWTERM_UID__:%s\\n' $(id -u)\nfc -P 2>/dev/null\nprintf '__ZZCLAWTERM_HISTORY_STACK__:%s\\n' $?\nprintf '__ZZCLAWTERM_HISTORY_BEGIN__\\n'\nfc -l 1\nprintf '__ZZCLAWTERM_HISTORY_END__\\n'\nexit\n",
         ),
         crate::ssh_shell_integration::ShellKind::Fish => commands.push_str(
             "if set -q fish_private_mode; printf '__ZZCLAWTERM_PRIVATE_STATE__:enabled\\n'; else; printf '__ZZCLAWTERM_PRIVATE_STATE__:disabled\\n'; end\nprintf '__ZZCLAWTERM_HISTORY_BEGIN__\\n'\nhistory\nprintf '__ZZCLAWTERM_HISTORY_END__\\n'\nexit\n",
@@ -1587,7 +1680,69 @@ fn run_uploaded_shell_history_probe(
     let captured =
         String::from_utf8_lossy(&output.lock().expect("uploaded history probe output lock"))
             .into_owned();
+    if matches!(shell, crate::ssh_shell_integration::ShellKind::Zsh) {
+        let option_value = |prefix: &str| {
+            captured
+                .lines()
+                .filter_map(|line| {
+                    line.find(prefix)
+                        .map(|start| line[start + prefix.len()..].trim())
+                })
+                .find(|value| {
+                    value.split(':').all(|part| part == "on" || part == "off")
+                        || (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+                })
+                .expect("shell probe result, excluding command echo and history entries")
+        };
+        assert_eq!(
+            option_value("__ZZCLAWTERM_OPTIONS_BEFORE__:"),
+            option_value("__ZZCLAWTERM_OPTIONS_AFTER__:")
+        );
+        if unprivileged {
+            assert_ne!(option_value("__ZZCLAWTERM_UID__:"), "0");
+        }
+    }
+    if matches!(shell, crate::ssh_shell_integration::ShellKind::Zsh) {
+        let leftovers: Vec<String> = std::fs::read_dir(&state_dir)
+            .expect("read zsh history probe state directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("zzclawterm-hist."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "zsh history guard left temporary files behind: {leftovers:?}"
+        );
+    }
+    if matches!(
+        initial_state,
+        UploadedHistoryProbeState::ZshSavedHistory
+            | UploadedHistoryProbeState::ZshSharedHistory
+            | UploadedHistoryProbeState::ZshIgnoreSpace
+            | UploadedHistoryProbeState::ZshUnprivileged
+    ) {
+        let history = std::fs::read_to_string(&history_file).unwrap();
+        assert!(history.contains("__ZZCLAWTERM_FILE_BEFORE__"));
+        assert!(
+            history.contains("__ZZCLAWTERM_USER_AFTER__"),
+            "saved history missing post-injection command for {mode:?}: {history:?}; PTY: {captured:?}"
+        );
+        for leaked in [
+            "ZZCLAWTERM_INJ",
+            "__zzclawterm_",
+            ".zzclawterm_inj_",
+            "ZzClawTermReady:",
+        ] {
+            assert!(
+                !history.contains(leaked),
+                "injection leaked into history file: {leaked}"
+            );
+        }
+    }
     let _ = std::fs::remove_dir_all(&state_dir);
+    if !matches!(delivery, HistoryProbeDelivery::Uploaded) {
+        std::fs::remove_dir_all(&remote_dir).unwrap();
+    }
     Some((captured, remote_dir))
 }
 
@@ -1690,6 +1845,32 @@ fn zsh_uploaded_shell_integration_restores_history_stack_without_pollution() {
             output.contains("__ZZCLAWTERM_HISTORY_STACK__:1\r\n"),
             "injection left an extra Zsh history stack for {mode:?}: {output:?}"
         );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn zsh_saved_history_and_options_survive_injection_including_unprivileged_shell() {
+    for state in [
+        UploadedHistoryProbeState::ZshSavedHistory,
+        UploadedHistoryProbeState::ZshSharedHistory,
+        UploadedHistoryProbeState::ZshIgnoreSpace,
+        UploadedHistoryProbeState::ZshUnprivileged,
+    ] {
+        for mode in [
+            super::ShellIntegrationMode::Full,
+            super::ShellIntegrationMode::CwdOnly,
+        ] {
+            let Some(output) = assert_uploaded_integration_is_private(
+                crate::ssh_shell_integration::ShellKind::Zsh,
+                mode,
+                state,
+            ) else {
+                return;
+            };
+            assert!(output.contains("__ZZCLAWTERM_HISTORY_STACK__:1\r\n"));
+            assert!(uploaded_history_probe_section(&output).contains("__ZZCLAWTERM_USER_AFTER__"));
+        }
     }
 }
 
@@ -3122,7 +3303,7 @@ fn telnet_writer_resets_idle_after_application_control_and_login_sends() {
             Err(mpsc::RecvTimeoutError::Timeout)
         ));
         if control {
-            writer.write_telnet_control(payload.clone()).unwrap();
+            crate::transport_io::queue_telnet_control(&writer.command_tx, payload.clone()).unwrap();
         } else {
             writer.write(payload.clone()).unwrap();
         }
@@ -3392,17 +3573,29 @@ fn telnet_single_writer_keeps_naws_negotiation_login_and_escaped_input_intact() 
         ..Default::default()
     };
     let manager = SessionManager::new();
-    let info = manager.create_telnet_session(config.clone()).unwrap();
+    let info = manager.create_telnet_session(config).unwrap();
     let (mut peer, _) = listener.accept().unwrap();
     peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+
+    let mut offer = [0; 3];
+    peer.read_exact(&mut offer).unwrap();
+    assert_eq!(offer, [IAC, WILL, crate::telnet_codec::OPT_NAWS]);
+    peer.write_all(&[IAC, DO, crate::telnet_codec::OPT_NAWS])
+        .unwrap();
+    let mut negotiated = [0; 9];
+    peer.read_exact(&mut negotiated).unwrap();
+    assert_eq!(
+        negotiated,
+        crate::telnet_codec::naws_subnegotiation(80, 24)[..]
+    );
+
     peer.write_all(&[IAC, WILL, OPT_SUPPRESS_GO_AHEAD]).unwrap();
     peer.write_all(b"Username: ").unwrap();
     manager.write_raw(&info.id, b"a\xffb").unwrap();
     manager.resize(&info.id, 100, 40).unwrap();
 
     let mut packets = vec![
-        crate::telnet_codec::maybe_build_naws(80, 24, &config).unwrap(),
-        crate::telnet_codec::maybe_build_naws(100, 40, &config).unwrap(),
+        crate::telnet_codec::naws_subnegotiation(100, 40),
         vec![IAC, DO, OPT_SUPPRESS_GO_AHEAD],
         b"operator\r".to_vec(),
         b"a\xff\xffb".to_vec(),
@@ -3418,6 +3611,48 @@ fn telnet_single_writer_keeps_naws_negotiation_login_and_escaped_input_intact() 
         remaining = &remaining[packets.remove(index).len()..];
     }
     assert!(packets.is_empty());
+    manager.close(&info.id).unwrap();
+}
+
+#[test]
+fn telnet_resize_waits_for_naws_acceptance_and_reports_the_latest_size() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let manager = SessionManager::new();
+    let info = manager
+        .create_telnet_session(TelnetSessionConfig {
+            host: "127.0.0.1".into(),
+            port: listener.local_addr().unwrap().port(),
+            keep_alive_interval_secs: 0,
+            auto_login: crate::TelnetAutoLoginConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .unwrap();
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let mut offer = [0; 3];
+    peer.read_exact(&mut offer).unwrap();
+    assert_eq!(offer, [IAC, WILL, crate::telnet_codec::OPT_NAWS]);
+
+    manager.resize(&info.id, 100, 40).unwrap();
+    peer.set_read_timeout(Some(Duration::from_millis(200)))
+        .unwrap();
+    assert!(
+        peer.read(&mut [0; 9]).is_err(),
+        "resize must not send NAWS before the peer accepts the offer"
+    );
+    peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+
+    peer.write_all(&[IAC, DO, crate::telnet_codec::OPT_NAWS])
+        .unwrap();
+    let mut negotiated = [0; 9];
+    peer.read_exact(&mut negotiated).unwrap();
+    assert_eq!(
+        negotiated,
+        crate::telnet_codec::naws_subnegotiation(100, 40)[..]
+    );
     manager.close(&info.id).unwrap();
 }
 
@@ -3816,4 +4051,32 @@ fn manager_drop_wakes_pane_output_and_unlocks_registry_before_joining_ssh() {
         result.recv_timeout(Duration::from_secs(3)).unwrap(),
         "Drop held sessions while joining the tmux worker"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn zsh_inline_and_rc_activation_preserve_saved_history_and_pop_their_stack() {
+    for delivery in [
+        HistoryProbeDelivery::Inline,
+        HistoryProbeDelivery::RcActivation,
+    ] {
+        for mode in [
+            super::ShellIntegrationMode::Full,
+            super::ShellIntegrationMode::CwdOnly,
+        ] {
+            let Some((output, _)) = run_shell_history_probe(
+                crate::ssh_shell_integration::ShellKind::Zsh,
+                mode,
+                UploadedHistoryProbeState::ZshSavedHistory,
+                delivery,
+            ) else {
+                return;
+            };
+            assert!(output.contains("__ZZCLAWTERM_HISTORY_STACK__:1\r\n"));
+            let history = uploaded_history_probe_section(&output);
+            assert!(history.contains("__ZZCLAWTERM_USER_BEFORE__"));
+            assert!(history.contains("__ZZCLAWTERM_USER_AFTER__"));
+            assert!(!history.contains("ZZCLAWTERM_INJ"));
+        }
+    }
 }

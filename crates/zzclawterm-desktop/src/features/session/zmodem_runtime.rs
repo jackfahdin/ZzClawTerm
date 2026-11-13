@@ -644,6 +644,18 @@ impl ZzClawTermApp {
                 self.shell.set_status(format!(
                     "ZMODEM {dir} complete ({file_count} file(s)) [{session_id}]"
                 ));
+                // Surface completion in the top-right notification stack; the
+                // transfer queue row alone is easy to miss when it is collapsed.
+                self.notify_background_operation(
+                    if direction == ZmodemDirection::Upload {
+                        "zmodem-upload-complete"
+                    } else {
+                        "zmodem-download-complete"
+                    },
+                    zzclawterm_ui::notification::ZzClawNotificationKind::Success,
+                    rust_i18n::t!("zmodem.complete").to_string(),
+                    cx,
+                );
                 self.finish_zmodem_transfer_jobs(session_id, true, None, cx);
                 if let Some(state) = self.session.zmodem_state_mut(session_id) {
                     state.finish_transfer();
@@ -686,6 +698,7 @@ impl ZzClawTermApp {
             },
         };
         let progress = SftpTransferProgress {
+            phase: None,
             remote_path: format!("zmodem://{short}/{file_name}"),
             local_path: PathBuf::from(file_name),
             bytes_transferred,
@@ -1089,7 +1102,10 @@ mod tests {
         cx.update_entity(&app, |app, cx| {
             let (passthrough, dirty) =
                 app.process_zmodem_output(SESSION_ID, b"\x18z waiting to receive.**\x18B01", cx);
-            assert_eq!(passthrough, b"\x18z waiting to receive.");
+            assert!(
+                passthrough.is_empty(),
+                "the lrzsz receive banner must not reach the terminal"
+            );
             assert!(dirty);
             assert!(
                 app.session

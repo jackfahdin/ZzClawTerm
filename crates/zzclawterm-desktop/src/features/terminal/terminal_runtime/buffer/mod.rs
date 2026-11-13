@@ -23,6 +23,7 @@ use crate::models::{
     terminal_snapshot_matches_grid_geometry,
 };
 
+use super::TerminalScrollVisualState;
 use super::view_io::terminal_visual_display_offset;
 
 const MAX_OSC52_REPLY_CHARS: usize = 1_048_576;
@@ -323,14 +324,16 @@ impl ZzClawTermApp {
         {
             return false;
         }
-        self.terminal.view.frame_pipeline.request_snapshot(
+        self.terminal.view.frame_pipeline.request_anchored_snapshot(
             session_id.to_string(),
             offset,
+            view.history_state(),
             self.settings.summary().terminal_action_links_enabled,
             self.settings
                 .summary()
                 .terminal_action_links_matchers
                 .clone(),
+            false,
         );
         true
     }
@@ -383,14 +386,16 @@ impl ZzClawTermApp {
         if !view.pending_snapshot_offsets.insert(offset) {
             return false;
         }
-        self.terminal.view.frame_pipeline.request_snapshot(
+        self.terminal.view.frame_pipeline.request_anchored_snapshot(
             session_id.to_string(),
             offset,
+            view.history_state(),
             false,
             self.settings
                 .summary()
                 .terminal_action_links_matchers
                 .clone(),
+            false,
         );
         true
     }
@@ -483,24 +488,28 @@ impl ZzClawTermApp {
                 priority,
                 self.settings.summary().terminal_action_links_enabled,
             );
-            self.terminal.view.frame_pipeline.request_priority_snapshot(
+            self.terminal.view.frame_pipeline.request_anchored_snapshot(
                 session_id.to_string(),
                 offset,
+                view.history_state(),
                 action_links_enabled,
                 self.settings
                     .summary()
                     .terminal_action_links_matchers
                     .clone(),
+                true,
             );
         } else {
-            self.terminal.view.frame_pipeline.request_snapshot(
+            self.terminal.view.frame_pipeline.request_anchored_snapshot(
                 session_id.to_string(),
                 offset,
+                view.history_state(),
                 false,
                 self.settings
                     .summary()
                     .terminal_action_links_matchers
                     .clone(),
+                false,
             );
         }
         true
@@ -543,14 +552,16 @@ impl ZzClawTermApp {
         }
         view.pending_snapshot_offsets.insert(offset);
         view.priority_pending_snapshot_offsets.insert(offset);
-        self.terminal.view.frame_pipeline.request_priority_snapshot(
+        self.terminal.view.frame_pipeline.request_anchored_snapshot(
             session_id.to_string(),
             offset,
+            view.history_state(),
             true,
             self.settings
                 .summary()
                 .terminal_action_links_matchers
                 .clone(),
+            true,
         );
         true
     }
@@ -872,18 +883,41 @@ impl ZzClawTermApp {
             TerminalFrameEvent::Snapshot(snapshot) => {
                 self.apply_terminal_snapshot_frame(snapshot, cx)
             }
-            TerminalFrameEvent::CommandNavigation { session_id, result } => {
-                if self.session.active_id() == Some(session_id.as_str()) {
-                    self.clear_terminal_selection(cx);
+            TerminalFrameEvent::CommandNavigation {
+                session_id,
+                result,
+                frame,
+            } => {
+                let stale = self
+                    .terminal
+                    .view
+                    .views
+                    .get(&session_id)
+                    .is_some_and(|view| {
+                        frame.revision < view.screen_revision
+                            && view.frame_snapshot.as_ref().is_some_and(|live| {
+                                live.command_navigation_revision
+                                    != frame.snapshot.command_navigation_revision
+                                    || live.command_navigation_target
+                                        != frame.snapshot.command_navigation_target
+                            })
+                    });
+                if !stale && self.session.active_id() == Some(session_id.as_str()) {
+                    if result.selection.is_some() {
+                        self.clear_terminal_selection(cx);
+                    }
                     self.clear_terminal_scroll_residual_for_session(Some(&session_id));
                     self.set_terminal_scroll_offset_for_session_state_only(
                         Some(&session_id),
-                        result.display_offset,
+                        self.terminal.view.views.get(&session_id).map_or(
+                            result.display_offset,
+                            |view| {
+                                view.history_state()
+                                    .reanchor_offset(frame.snapshot.history, result.display_offset)
+                            },
+                        ),
                     );
-                    self.request_terminal_frame_snapshot_for_user_scroll(
-                        &session_id,
-                        result.display_offset,
-                    );
+                    self.apply_terminal_snapshot_frame(frame, cx);
                     if let Some((start, end)) = result.selection {
                         self.terminal.selection.session_id = Some(session_id.clone());
                         self.terminal.selection.selection =
@@ -929,7 +963,6 @@ impl ZzClawTermApp {
             session_id,
             visible_text,
             recording_text_bytes,
-            input_highlights,
             snapshot,
             action_links,
             protocol_state,
@@ -1050,9 +1083,9 @@ impl ZzClawTermApp {
                     revision,
                 );
             }
-            view.frame_input_highlights = view.frame_snapshot.as_ref().and(input_highlights);
             (unread_changed, view.scroll_offset)
         };
+        self.reanchor_terminal_selection_for_session(&session_id, cx);
         if shell_edit_snapshot_available {
             if let Some(state) = self.terminal.editing.sessions.get_mut(&session_id) {
                 state.awaiting_snapshot = false;
@@ -1192,7 +1225,7 @@ impl ZzClawTermApp {
 
     fn apply_terminal_snapshot_frame(
         &mut self,
-        frame: TerminalFrameSnapshotEvent,
+        mut frame: TerminalFrameSnapshotEvent,
         cx: &mut Context<Self>,
     ) -> TerminalFrameApplyResult {
         let current_revision = {
@@ -1209,17 +1242,80 @@ impl ZzClawTermApp {
             }
             view.screen_revision
         };
-        if frame.revision < current_revision {
-            if self.should_log_slow_diagnostic("terminal_stale_snapshot", Instant::now()) {
-                tracing::warn!(
-                    diagnostic = "terminal_stale_snapshot",
-                    session_id = %frame.session_id,
-                    offset = frame.offset,
-                    snapshot_revision = frame.revision,
-                    current_revision,
-                    "dropped stale terminal frame snapshot"
-                );
+        if frame.offset > 0 {
+            let view = self
+                .terminal
+                .view
+                .views
+                .get(&frame.session_id)
+                .expect("snapshot session exists");
+            let history = view.history_state();
+            let stale_live_rows = frame.revision < current_revision
+                && frame
+                    .snapshot
+                    .total_rows
+                    .saturating_sub(frame.snapshot.display_offset)
+                    > frame.snapshot.history.scrollback_len;
+            if frame.snapshot.history != history || stale_live_rows {
+                let Some(change) = history.changes_since(frame.snapshot.history) else {
+                    return TerminalFrameApplyResult::default();
+                };
+                let rebased = (!stale_live_rows)
+                    .then(|| frame.snapshot.reanchored_history(history))
+                    .flatten();
+                let Some(rebased) = rebased else {
+                    let residual =
+                        self.terminal_scroll_residual_for_session(Some(&frame.session_id));
+                    let state = TerminalScrollVisualState {
+                        session_id: frame.session_id.clone(),
+                        history,
+                        scroll_offset: view.scroll_offset,
+                        scroll_residual_lines: residual,
+                        display_offset: terminal_visual_display_offset(
+                            view.scroll_offset,
+                            residual,
+                            history.scrollback_len,
+                        ),
+                        scrollback_len: history.scrollback_len,
+                        viewport_rows: history.viewport_rows,
+                        has_new_while_scrolled: view.has_new_while_scrolled,
+                        performance_overlay: view.performance_overlay,
+                        skipped_output_chars: view.skipped_output_chars,
+                    };
+                    if let Some(surface) =
+                        self.terminal.view.surfaces.get(&frame.session_id).cloned()
+                    {
+                        surface.update(cx, |surface, cx| {
+                            let changed = if frame.snapshot.logical_lines.is_some() {
+                                surface.apply_retained_logical_frame(frame.snapshot.clone(), &state)
+                            } else {
+                                surface.advance_history(history);
+                                surface.retain_surviving_prefetched_rows(&frame.snapshot);
+                                surface.apply_scroll_visual_state(state.clone())
+                            };
+                            if changed {
+                                cx.notify();
+                            }
+                        });
+                    }
+                    return TerminalFrameApplyResult::default();
+                };
+                frame.offset = history.reanchor_offset(frame.snapshot.history, frame.offset);
+                if let Some(links) = frame.action_links.as_mut() {
+                    if let (Some(start), Some(end)) = (
+                        links.absolute_start_row.checked_sub(change.evicted),
+                        links.absolute_end_row.checked_sub(change.evicted),
+                    ) {
+                        links.absolute_start_row = start;
+                        links.absolute_end_row = end;
+                    } else {
+                        frame.action_links = None;
+                    }
+                }
+                frame.snapshot = std::sync::Arc::new(rebased);
+                // Row-relative highlights remain valid; no matching work is repeated.
             }
+        } else if frame.revision < current_revision {
             return TerminalFrameApplyResult::default();
         }
         if terminal_geometry_diagnostics_enabled() {
@@ -1244,6 +1340,14 @@ impl ZzClawTermApp {
         let Some(view) = self.terminal.view.views.get_mut(&frame.session_id) else {
             return TerminalFrameApplyResult::default();
         };
+        if frame.offset > 0
+            && frame.revision < view.screen_revision
+            && let Some(live) = view.frame_snapshot.as_ref()
+        {
+            let snapshot = std::sync::Arc::make_mut(&mut frame.snapshot);
+            snapshot.command_navigation_target = live.command_navigation_target;
+            snapshot.command_navigation_revision = live.command_navigation_revision;
+        }
         if frame.offset == 0 {
             // Live viewport recovery for sessions that had worker snapshot skipped.
             view.apply_terminal_live_snapshot_frame(
@@ -1251,7 +1355,6 @@ impl ZzClawTermApp {
                 frame.action_links,
                 frame.revision,
             );
-            view.frame_input_highlights = frame.input_highlights;
         } else {
             if !view
                 .history_state()
@@ -1268,6 +1371,7 @@ impl ZzClawTermApp {
             }
             view.prune_scrollback_snapshot_cache(frame.offset);
         }
+        self.reanchor_terminal_selection_for_session(&frame.session_id, cx);
         if frame.offset == 0 {
             if let Some(state) = self.terminal.editing.sessions.get_mut(&frame.session_id) {
                 state.awaiting_snapshot = false;
@@ -2073,6 +2177,196 @@ fn collect_workspace_pane_node_visible_session_ids<'a>(
 
 #[cfg(test)]
 mod frame_event_queue_tests {
+    use zzclawterm_terminal::action_links::prepare_terminal_frame_action_links;
+    #[test]
+    fn manual_wheel_at_live_bottom_and_input_end_same_screen_navigation() {
+        use crate::features::test_support::app_with_visible_local_session;
+        use crate::test_support::{TestAppCleanup, TestConfigDir};
+        use gpui::{AppContext as _, TestAppContext};
+        use zzclawterm_terminal::command_navigation::CommandNavigationAction;
+        let dir = TestConfigDir::new("zzclawterm-navigation-reset-input-wheel");
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+        cx.update_entity(&app, |app, cx| {
+            let text =
+                "\x1b]133;A\x07$ \x1b]133;B\x07echo\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07"
+                    .repeat(5);
+            app.terminal
+                .seed_session_view("s1".into(), text.clone(), "UTF-8");
+            app.terminal
+                .ensure_frame_session("s1".into(), "UTF-8".into(), 10000);
+            app.terminal
+                .view
+                .frame_pipeline
+                .append_local_text("s1", text);
+            for wheel in [true, false] {
+                app.navigate_terminal_command(CommandNavigationAction::Previous, cx);
+                app.terminal.view.frame_pipeline.flush_for_test();
+                app.drain_terminal_frame_events(cx);
+                let view = app.terminal.view.views.get("s1").unwrap();
+                assert_eq!(view.scroll_offset, 0);
+                assert!(
+                    view.frame_snapshot
+                        .as_ref()
+                        .unwrap()
+                        .command_navigation_target
+                        .is_some()
+                );
+                if wheel {
+                    assert!(
+                        app.terminal_scroll_wheel_state_for_session(
+                            "s1",
+                            -20.0,
+                            gpui::Point::default(),
+                            gpui::Modifiers::default(),
+                            cx,
+                        )
+                        .handled
+                    );
+                } else {
+                    app.note_shell_editing_input(b"x", cx);
+                }
+                app.terminal.view.frame_pipeline.flush_for_test();
+                app.drain_terminal_frame_events(cx);
+                assert_eq!(
+                    app.terminal
+                        .view
+                        .views
+                        .get("s1")
+                        .unwrap()
+                        .frame_snapshot
+                        .as_ref()
+                        .unwrap()
+                        .command_navigation_target,
+                    None
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn late_navigation_reply_cannot_override_a_newer_manual_scroll_reset() {
+        use crate::features::test_support::app_with_visible_local_session;
+        use crate::models::{
+            TerminalFrameEvent, TerminalFrameSnapshotEvent, TerminalFrameSnapshotPurpose,
+        };
+        use crate::test_support::{TestAppCleanup, TestConfigDir};
+        use gpui::{AppContext as _, TestAppContext};
+        use std::sync::Arc;
+        use std::time::Duration;
+        use zzclawterm_terminal::TerminalCore;
+        use zzclawterm_terminal::command_navigation::CommandNavigationAction;
+        let dir = TestConfigDir::new("zzclawterm-late-navigation");
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+        cx.update_entity(&app, |app, cx| {
+            let mut screen = TerminalCore::new(20, 3);
+            for _ in 0..5 {
+                screen.advance(
+                    b"\x1b]133;A\x07$ \x1b]133;B\x07echo\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07",
+                );
+            }
+            let result = screen
+                .navigate_command(CommandNavigationAction::Previous)
+                .unwrap();
+            let snapshot = Arc::new(screen.viewport_snapshot(result.display_offset));
+            screen.reset_command_navigation();
+            let view = app.terminal.view.views.get_mut("s1").unwrap();
+            view.screen.resize(20, 3);
+            view.frame_snapshot = Some(Arc::new(screen.snapshot()));
+            view.screen_revision = 2;
+            view.scroll_offset = 4;
+            let frame = TerminalFrameSnapshotEvent {
+                session_id: "s1".into(),
+                offset: result.display_offset,
+                snapshot,
+                action_links: None,
+                revision: 1,
+                purpose: TerminalFrameSnapshotPurpose::Paint,
+                snapshot_duration: Duration::ZERO,
+                snapshot_stats: Default::default(),
+                action_link_stats: Default::default(),
+                process_duration: Duration::ZERO,
+            };
+            app.apply_terminal_frame_event(
+                TerminalFrameEvent::CommandNavigation {
+                    session_id: "s1".into(),
+                    result,
+                    frame,
+                },
+                cx,
+            );
+            let view = app.terminal.view.views.get("s1").unwrap();
+            assert_eq!(view.scroll_offset, 4);
+            assert_eq!(
+                view.frame_snapshot
+                    .as_ref()
+                    .unwrap()
+                    .command_navigation_target,
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn stale_revision_history_frame_reuses_surviving_rows_but_live_frame_is_rejected() {
+        use crate::features::test_support::app_with_visible_local_session;
+        use crate::test_support::{TestAppCleanup, TestConfigDir};
+        use gpui::{AppContext as _, TestAppContext};
+        use std::sync::Arc;
+        use std::time::Duration;
+        use zzclawterm_terminal::TerminalScreen;
+        let dir = TestConfigDir::new("zzclawterm-stale-history-frame");
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+        cx.update_entity(&app, |app, cx| {
+            let mut screen = TerminalScreen::new(16, 3);
+            screen.set_scrollback_limit(128);
+            for i in 0..134 {
+                screen.advance_decoded_text(&format!("line {i}\r\n"));
+            }
+            let old = Arc::new(screen.viewport_snapshot(40));
+            let old_live = Arc::new(screen.viewport_snapshot(0));
+            screen.advance(b"new\r\nnew\r\n");
+            let current = Arc::new(screen.viewport_snapshot(0));
+            let view = app.terminal.view.views.get_mut("s1").unwrap();
+            view.screen.resize(16, 3);
+            view.frame_snapshot = Some(current.clone());
+            view.screen_revision = 2;
+            view.scroll_offset = 42;
+            let event = |snapshot: Arc<zzclawterm_terminal::TerminalSnapshot>, offset| {
+                crate::models::TerminalFrameSnapshotEvent {
+                    session_id: "s1".into(),
+                    offset,
+                    snapshot,
+                    action_links: None,
+                    revision: 1,
+                    purpose: crate::models::TerminalFrameSnapshotPurpose::Paint,
+                    snapshot_duration: Duration::ZERO,
+                    snapshot_stats: Default::default(),
+                    action_link_stats: Default::default(),
+                    process_duration: Duration::ZERO,
+                }
+            };
+            app.apply_terminal_snapshot_frame(event(old.clone(), 40), cx);
+            let view = app.terminal.view.views.get("s1").unwrap();
+            let retained = &view.scrollback_snapshots[&42];
+            assert_eq!(retained.history, current.history);
+            assert!(Arc::ptr_eq(&retained.row_data, &old.row_data));
+            app.apply_terminal_snapshot_frame(event(old_live, 0), cx);
+            assert!(Arc::ptr_eq(
+                app.terminal.view.views["s1"]
+                    .frame_snapshot
+                    .as_ref()
+                    .unwrap(),
+                &current
+            ));
+        });
+    }
+
     use std::collections::{HashMap, VecDeque};
     use std::time::Duration;
 
@@ -2082,7 +2376,7 @@ mod frame_event_queue_tests {
         TerminalFrameActionLinks, TerminalFrameEvent, TerminalFrameOutputEvent,
         TerminalFrameSearchEvent, TerminalFrameSearchKey, TerminalFrameSearchPurpose,
         TerminalFrameSearchResult, TerminalFrameSnapshotEvent, TerminalFrameSnapshotPurpose,
-        TerminalProtocolState, TerminalViewState, prepare_terminal_frame_action_links,
+        TerminalProtocolState, TerminalViewState,
     };
     use zzclawterm_core::ActionLinksMatcherSettings;
 
@@ -2104,7 +2398,6 @@ mod frame_event_queue_tests {
 
     fn output_frame(session_id: &str, revision: u64) -> TerminalFrameEvent {
         TerminalFrameEvent::Output(TerminalFrameOutputEvent {
-            input_highlights: None,
             session_id: session_id.to_string(),
             visible_text: format!("rev-{revision}"),
             recording_text_bytes: 0,
@@ -2150,7 +2443,6 @@ mod frame_event_queue_tests {
 
     fn snapshot_frame(session_id: &str, offset: usize) -> TerminalFrameEvent {
         TerminalFrameEvent::Snapshot(TerminalFrameSnapshotEvent {
-            input_highlights: None,
             session_id: session_id.to_string(),
             offset,
             snapshot: std::sync::Arc::new(

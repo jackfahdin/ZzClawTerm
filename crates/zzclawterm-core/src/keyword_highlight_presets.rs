@@ -29,9 +29,27 @@ pub fn builtin_keyword_matcher(id: &str) -> Option<BuiltinKeywordMatcher> {
     Some(match id {
         "builtin-error" | "builtin-warn" | "builtin-success" | "builtin-info" | "builtin-debug"
         | "builtin-constant" => BuiltinKeywordMatcher::LiteralWords,
-        "builtin-command" | "builtin-path" | "builtin-permissions" | "builtin-prompt" => {
-            BuiltinKeywordMatcher::Structured
-        }
+        "builtin-command"
+        | "builtin-path"
+        | "builtin-permissions"
+        | "builtin-prompt"
+        // Network-device configuration vocabulary. These exist only as colour
+        // sources for the line-role parser; they never match text on their own.
+        | "builtin-net-keyword"
+        | "builtin-net-port"
+        | "builtin-net-address"
+        | "builtin-net-vlan"
+        | "builtin-net-secondary"
+        // Semantic classes used only by the line-role parser.
+        | "builtin-keyword"
+        | "builtin-comment"
+        | "builtin-link"
+        | "builtin-weekday"
+        | "builtin-month"
+        | "builtin-perm-read"
+        | "builtin-perm-write"
+        | "builtin-perm-execute"
+        | "builtin-perm-special" => BuiltinKeywordMatcher::Structured,
         _ => BuiltinKeywordMatcher::Regex,
     })
 }
@@ -60,7 +78,170 @@ pub fn builtin_keyword_rule_ids() -> &'static [&'static str] {
         "builtin-number",
         "builtin-prompt",
         "builtin-operator",
+        "builtin-net-keyword",
+        "builtin-net-port",
+        "builtin-net-address",
+        "builtin-net-vlan",
+        "builtin-net-secondary",
+        "builtin-keyword",
+        "builtin-variable",
+        "builtin-comment",
+        "builtin-link",
+        "builtin-weekday",
+        "builtin-month",
+        "builtin-perm-read",
+        "builtin-perm-write",
+        "builtin-perm-execute",
+        "builtin-perm-special",
     ]
+}
+
+/// Rules that exist only as colour sources for the line-role parser.
+///
+/// Unlike these rules, `builtin-variable` also colours shell parameter
+/// expansion and remains active when command-output highlighting is disabled.
+pub fn builtin_keyword_rule_is_specialized(id: &str) -> bool {
+    matches!(
+        id,
+        "builtin-net-keyword"
+            | "builtin-net-port"
+            | "builtin-net-address"
+            | "builtin-net-vlan"
+            | "builtin-net-secondary"
+            | "builtin-keyword"
+            | "builtin-comment"
+            | "builtin-link"
+            | "builtin-weekday"
+            | "builtin-month"
+            | "builtin-perm-read"
+            | "builtin-perm-write"
+            | "builtin-perm-execute"
+            | "builtin-perm-special"
+    )
+}
+
+/// ANSI palette index (0..=15) used by a built-in rule.
+///
+/// Used by palette-based categories and as a fallback for invalid colours.
+/// `builtin_keyword_rule_swatch_ansi` preserves v2.0.2 light/dark swatches for
+/// the original 21 categories; newer categories follow the terminal palette.
+pub fn builtin_keyword_rule_ansi(id: &str) -> u8 {
+    match id {
+        "builtin-command" => 2,
+        "builtin-path" => 4,
+        "builtin-permissions" => 14,
+        "builtin-url" => 14,
+        "builtin-version" => 6,
+        "builtin-address" => 10,
+        "builtin-size" => 6,
+        "builtin-string" => 3,
+        "builtin-option" => 6,
+        "builtin-uuid" => 13,
+        "builtin-datetime" => 2,
+        "builtin-error" => 9,
+        "builtin-warn" => 11,
+        "builtin-success" => 10,
+        "builtin-info" => 12,
+        "builtin-debug" => 8,
+        "builtin-duration" => 3,
+        "builtin-constant" => 13,
+        "builtin-number" => 5,
+        "builtin-prompt" => 2,
+        "builtin-operator" => 11,
+        "builtin-net-keyword" => 2,
+        "builtin-net-port" => 4,
+        "builtin-net-address" => 10,
+        "builtin-net-vlan" => 10,
+        "builtin-net-secondary" => 8,
+        "builtin-keyword" => 13,
+        "builtin-variable" => 12,
+        "builtin-comment" => 8,
+        "builtin-link" => 14,
+        "builtin-weekday" => 6,
+        "builtin-month" => 3,
+        "builtin-perm-read" => 6,
+        "builtin-perm-write" => 3,
+        "builtin-perm-execute" => 2,
+        "builtin-perm-special" => 5,
+        _ => 7,
+    }
+}
+
+/// Resolve a built-in swatch, preserving all v2.0.2 light/dark colours.
+pub fn builtin_keyword_rule_swatch_ansi(id: &str, ansi: [u32; 16], is_dark: bool) -> String {
+    if matches!(
+        id,
+        "builtin-command"
+            | "builtin-path"
+            | "builtin-permissions"
+            | "builtin-url"
+            | "builtin-version"
+            | "builtin-address"
+            | "builtin-size"
+            | "builtin-string"
+            | "builtin-option"
+            | "builtin-uuid"
+            | "builtin-datetime"
+            | "builtin-error"
+            | "builtin-warn"
+            | "builtin-success"
+            | "builtin-info"
+            | "builtin-debug"
+            | "builtin-duration"
+            | "builtin-constant"
+            | "builtin-number"
+            | "builtin-prompt"
+            | "builtin-operator"
+    ) {
+        return builtin_keyword_rule_swatch(id, is_dark).to_string();
+    }
+    let index = usize::from(builtin_keyword_rule_ansi(id).min(15));
+    format!("#{:06x}", ansi[index])
+}
+
+/// Built-in rules with legacy light/dark swatches and terminal ANSI colours.
+pub fn get_builtin_keyword_rules_with_ansi(
+    ansi: [u32; 16],
+    is_dark: bool,
+) -> Vec<ResolvedKeywordHighlightRule> {
+    builtin_keyword_rule_ids()
+        .iter()
+        .map(|id| ResolvedKeywordHighlightRule {
+            id: (*id).to_string(),
+            name: builtin_keyword_rule_label(id).to_string(),
+            patterns: builtin_patterns(id),
+            color: builtin_keyword_rule_swatch_ansi(id, ansi, is_dark),
+            enabled: true,
+        })
+        .collect()
+}
+
+/// Merge user rules then built-ins, preserving each category's colour policy.
+pub fn merge_keyword_highlight_rules_for_paint_with_ansi(
+    user_rules: &[KeywordHighlightRule],
+    builtin_settings: &HashMap<String, bool>,
+    is_dark: bool,
+    ansi: [u32; 16],
+) -> Vec<ResolvedKeywordHighlightRule> {
+    let mut out = Vec::new();
+    for rule in user_rules {
+        out.push(ResolvedKeywordHighlightRule {
+            id: rule.id.clone(),
+            name: rule.name.clone(),
+            patterns: rule.patterns.clone(),
+            color: if is_dark {
+                rule.color_dark.clone()
+            } else {
+                rule.color_light.clone()
+            },
+            enabled: rule.enabled,
+        });
+    }
+    for builtin in get_builtin_keyword_rules_with_ansi(ansi, is_dark) {
+        let enabled = builtin_settings.get(&builtin.id).copied().unwrap_or(true);
+        out.push(ResolvedKeywordHighlightRule { enabled, ..builtin });
+    }
+    out
 }
 
 pub fn builtin_keyword_rule_label(id: &str) -> &'static str {
@@ -76,6 +257,21 @@ pub fn builtin_keyword_rule_label(id: &str) -> &'static str {
         "builtin-option" => "Option",
         "builtin-uuid" => "UUID",
         "builtin-datetime" => "DateTime",
+        "builtin-keyword" => "Keyword",
+        "builtin-variable" => "Variable",
+        "builtin-comment" => "Comment",
+        "builtin-link" => "Link",
+        "builtin-weekday" => "Weekday",
+        "builtin-month" => "Month",
+        "builtin-perm-read" => "Permission read",
+        "builtin-perm-write" => "Permission write",
+        "builtin-perm-execute" => "Permission execute",
+        "builtin-perm-special" => "Permission special",
+        "builtin-net-keyword" => "Network keyword",
+        "builtin-net-port" => "Network port",
+        "builtin-net-address" => "Network address",
+        "builtin-net-vlan" => "Network VLAN",
+        "builtin-net-secondary" => "Network secondary",
         "builtin-error" => "Error",
         "builtin-warn" => "Warning",
         "builtin-success" => "Success",
@@ -105,6 +301,113 @@ pub fn builtin_keyword_rule_swatch(id: &str, is_dark: bool) -> &'static str {
                 "#cd9731"
             } else {
                 "#9a6700"
+            }
+        }
+        "builtin-keyword" => {
+            if is_dark {
+                "#d2a8ff"
+            } else {
+                "#8250df"
+            }
+        }
+        "builtin-variable" => {
+            if is_dark {
+                "#56d4dd"
+            } else {
+                "#0a7d8c"
+            }
+        }
+        "builtin-comment" => {
+            if is_dark {
+                "#8b949e"
+            } else {
+                "#57606a"
+            }
+        }
+        "builtin-link" => {
+            if is_dark {
+                "#79c0ff"
+            } else {
+                "#0969da"
+            }
+        }
+        "builtin-weekday" => {
+            if is_dark {
+                "#e3b341"
+            } else {
+                "#a58900"
+            }
+        }
+        "builtin-month" => {
+            if is_dark {
+                "#e3b341"
+            } else {
+                "#a58900"
+            }
+        }
+        "builtin-perm-read" => {
+            if is_dark {
+                "#79c0ff"
+            } else {
+                "#0969da"
+            }
+        }
+        "builtin-perm-write" => {
+            if is_dark {
+                "#ffa657"
+            } else {
+                "#b04a00"
+            }
+        }
+        "builtin-perm-execute" => {
+            if is_dark {
+                "#7ee787"
+            } else {
+                "#1a7f37"
+            }
+        }
+        "builtin-perm-special" => {
+            if is_dark {
+                "#ff7b72"
+            } else {
+                "#cf222e"
+            }
+        }
+        // Network configuration palette: one meaning per colour, so an address
+        // never borrows the "info" hue or a VLAN id the "success" hue.
+        "builtin-net-keyword" => {
+            if is_dark {
+                "#79c0ff"
+            } else {
+                "#0969da"
+            }
+        }
+        "builtin-net-port" => {
+            if is_dark {
+                "#a5d6ff"
+            } else {
+                "#0550ae"
+            }
+        }
+        "builtin-net-address" => {
+            if is_dark {
+                "#56d4dd"
+            } else {
+                "#0a7d8c"
+            }
+        }
+        "builtin-net-vlan" => {
+            if is_dark {
+                "#7ee787"
+            } else {
+                "#1a7f37"
+            }
+        }
+        "builtin-net-secondary" => {
+            if is_dark {
+                "#8b949e"
+            } else {
+                "#57606a"
             }
         }
         "builtin-success" => {
@@ -355,7 +658,6 @@ fn builtin_patterns(id: &str) -> Vec<String> {
             "connected",
             "uploaded",
             "downloaded",
-            "created",
             "saved",
             "finished",
         ]),
@@ -392,6 +694,13 @@ fn builtin_patterns(id: &str) -> Vec<String> {
             format!(
                 r"[-+]?(?:{DECIMAL_NUMBER}{HORIZONTAL_SPACE}*%|(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?|\d+[eE][-+]?\d+|\d{{2,}})"
             ),
+        ],
+        // `$VAR` / `${VAR}` / `$1` — also matched outside shell integration so
+        // the command line is coloured even without OSC 133.
+        "builtin-variable" => vec![
+            r"\$\{[^}]*\}".into(),
+            r"\$[A-Za-z_][A-Za-z0-9_]*".into(),
+            r"\$[0-9]+".into(),
         ],
         "builtin-prompt" => Vec::new(),
         "builtin-operator" => vec![r"[-:;=+&*()$\[\]<>?|{}]+".into()],
@@ -458,14 +767,16 @@ pub fn keyword_highlight_color_palette(is_dark: bool) -> &'static [&'static str]
 #[cfg(test)]
 mod tests {
     use super::{
-        KeywordHighlightRule, get_builtin_keyword_rules, merge_keyword_highlight_rules_for_paint,
+        KeywordHighlightRule, builtin_keyword_rule_ids, builtin_keyword_rule_is_specialized,
+        get_builtin_keyword_rules, merge_keyword_highlight_rules_for_paint,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn builtin_catalog_is_stable() {
         let rules = get_builtin_keyword_rules(true);
-        assert_eq!(rules.len(), 21);
+        // 22 general + 14 command-output-only colour classes.
+        assert_eq!(rules.len(), 36);
         assert!(rules.iter().all(|rule| rule.id.starts_with("builtin-")));
         assert!(
             rules
@@ -473,6 +784,24 @@ mod tests {
                 .find(|r| r.id == "builtin-url")
                 .is_some_and(|r| !r.patterns.is_empty())
         );
+    }
+
+    #[test]
+    fn builtin_groups_cover_the_catalog_and_keep_shell_variables_general() {
+        let ids = builtin_keyword_rule_ids();
+        let unique: HashSet<_> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), 36);
+        let (specialized, general): (Vec<_>, Vec<_>) = ids
+            .iter()
+            .copied()
+            .partition(|id| builtin_keyword_rule_is_specialized(id));
+        assert_eq!(general.len(), 22);
+        assert_eq!(specialized.len(), 14);
+        assert!(general.contains(&"builtin-variable"));
+        assert!(specialized.contains(&"builtin-perm-read"));
+        assert!(specialized.contains(&"builtin-net-address"));
+        assert!(general.iter().all(|id| !specialized.contains(id)));
+        assert_eq!(general.len() + specialized.len(), ids.len());
     }
 
     #[test]
@@ -587,6 +916,93 @@ mod tests {
             );
             let rule = rules.iter().find(|r| r.id == id).unwrap();
             assert!(rule.patterns.iter().all(|p| !p.contains(['(', '[', '\\'])));
+        }
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::{
+        builtin_keyword_rule_ansi, get_builtin_keyword_rules_with_ansi,
+        merge_keyword_highlight_rules_for_paint_with_ansi,
+    };
+    use crate::models::settings::KeywordHighlightRule;
+    use std::collections::HashMap;
+
+    #[test]
+    fn all_v2_0_2_categories_keep_their_colours_while_new_builtins_follow_ansi() {
+        let legacy_swatches = [
+            ("builtin-command", "#66D9EF", "#007197"),
+            ("builtin-path", "#E6DB74", "#8a6700"),
+            ("builtin-permissions", "#b267e6", "#8250df"),
+            ("builtin-url", "#8be9fd", "#2aa198"),
+            ("builtin-version", "#ff9e64", "#b04a00"),
+            ("builtin-address", "#A6E22E", "#1a7f37"),
+            ("builtin-size", "#2ac3de", "#007197"),
+            ("builtin-string", "#E6DB74", "#1a8c8c"),
+            ("builtin-option", "#FD971F", "#b04a00"),
+            ("builtin-uuid", "#ffb86c", "#bc4c00"),
+            ("builtin-datetime", "#A6E22E", "#a58900"),
+            ("builtin-error", "#f44747", "#cf222e"),
+            ("builtin-warn", "#cd9731", "#9a6700"),
+            ("builtin-success", "#32cd32", "#116329"),
+            ("builtin-info", "#6796e6", "#0969da"),
+            ("builtin-debug", "#b267e6", "#8250df"),
+            ("builtin-duration", "#E6DB74", "#859900"),
+            ("builtin-constant", "#ffb86c", "#cb4b16"),
+            ("builtin-number", "#AE81FF", "#6f42c1"),
+            ("builtin-prompt", "#f92672", "#e00862"),
+            ("builtin-operator", "#A6E22E", "#008573"),
+        ];
+        for base in [0x123400, 0xabcdef] {
+            let ansi = std::array::from_fn(|index| base + index as u32);
+            for dark in [true, false] {
+                for rule in get_builtin_keyword_rules_with_ansi(ansi, dark) {
+                    let expected = legacy_swatches
+                        .iter()
+                        .find(|(id, _, _)| *id == rule.id)
+                        .map_or_else(
+                            || {
+                                format!(
+                                    "#{:06x}",
+                                    ansi[usize::from(builtin_keyword_rule_ansi(&rule.id))]
+                                )
+                            },
+                            |(_, color_dark, color_light)| {
+                                if dark { color_dark } else { color_light }.to_string()
+                            },
+                        );
+                    assert_eq!(rule.color, expected, "{} (dark={dark})", rule.id);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn changing_palette_keeps_user_colours_and_disabled_builtin_choices() {
+        let user = KeywordHighlightRule {
+            id: "custom".into(),
+            name: "Custom".into(),
+            patterns: vec!["hello".into()],
+            color_dark: "#123456".into(),
+            color_light: "#654321".into(),
+            enabled: true,
+        };
+        let disabled = HashMap::from([
+            ("builtin-info".to_string(), false),
+            ("builtin-prompt".to_string(), false),
+        ]);
+        for (dark, expected) in [(true, "#123456"), (false, "#654321")] {
+            let rules = merge_keyword_highlight_rules_for_paint_with_ansi(
+                std::slice::from_ref(&user),
+                &disabled,
+                dark,
+                [0xabcdef; 16],
+            );
+            assert_eq!(rules[0].color, expected);
+            for id in disabled.keys() {
+                assert!(!rules.iter().find(|rule| &rule.id == id).unwrap().enabled);
+            }
         }
     }
 }

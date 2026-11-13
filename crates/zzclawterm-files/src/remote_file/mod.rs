@@ -157,6 +157,44 @@ impl std::fmt::Debug for RemoteFileService {
 }
 
 impl RemoteFileService {
+    pub fn with_sudo(
+        config: SshSessionConfig,
+        multiplex: SshMultiplexHandle,
+        lease: crate::sftp::sudo::SftpSudoLease,
+    ) -> anyhow::Result<Self> {
+        let sftp_service = SftpService::with_sudo(config.clone(), multiplex.clone(), lease)?;
+        let mut service = Self::from_parts(config, Some(multiplex), None);
+        service.sftp_service = sftp_service;
+        *service.selected.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(RemoteFileBackendKind::Sftp);
+        Ok(service)
+    }
+
+    pub fn access_mode(&self) -> crate::sftp::sudo::FileAccessMode {
+        if self.sftp_service.sudo_lease().is_some() {
+            crate::sftp::sudo::FileAccessMode::SudoRoot
+        } else {
+            crate::sftp::sudo::FileAccessMode::LoginUser
+        }
+    }
+
+    pub fn authorization_is_valid(&self) -> bool {
+        self.sftp_service
+            .sudo_lease()
+            .is_none_or(|lease| !lease.is_revoked())
+    }
+
+    pub fn same_execution_identity(&self, other: &Self) -> bool {
+        match (
+            self.sftp_service.sudo_lease(),
+            other.sftp_service.sudo_lease(),
+        ) {
+            (Some(left), Some(right)) => left.same_authorization(right),
+            (None, None) => self.endpoint_key() == other.endpoint_key(),
+            _ => false,
+        }
+    }
+
     /// Join using the destination's filename encoding, retaining an opaque parent.
     pub fn child_path(
         &self,
@@ -325,6 +363,10 @@ impl RemoteFileService {
     }
 
     fn backend(&self) -> anyhow::Result<RemoteFileBackendKind> {
+        if let Some(lease) = self.sftp_service.sudo_lease() {
+            lease.check()?;
+            return Ok(RemoteFileBackendKind::Sftp);
+        }
         let mut selected = self
             .selected
             .lock()
@@ -593,6 +635,31 @@ impl RemoteFileService {
                 let old = shell_quote(&source.display_path);
                 let new = shell_quote(&destination.display_path);
                 self.shell(kind).exec_ok(format!("if [ -e {new} ] || [ -L {new} ]; then exit 1; fi; mv -nT -- {old} {new} && [ ! -e {old} ] && [ ! -L {old} ]"), None)?;
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn set_modified_remote_path(
+        &self,
+        path: &RemoteFilePath,
+        modified: u32,
+    ) -> anyhow::Result<()> {
+        match self.backend()? {
+            RemoteFileBackendKind::Sftp => self.sftp()?.set_modified_remote_path(path, modified),
+            kind => {
+                self.require_display_path(path)?;
+                self.shell(kind).exec_ok(
+                    format!(
+                        "touch -m -d '@{modified}' -- {}",
+                        shell_quote(&path.display_path)
+                    ),
+                    None,
+                )?;
+                anyhow::ensure!(
+                    self.remote_file_properties(path)?.modified_at == Some(modified),
+                    "remote timestamp could not be preserved"
+                );
                 Ok(())
             }
         }
@@ -1158,6 +1225,7 @@ impl RemoteFileService {
                     skipped: false,
                 };
                 progress(SftpTransferProgress {
+                    phase: None,
                     remote_path: summary.remote_path.clone(),
                     local_path: summary.local_path.clone(),
                     bytes_transferred: summary.bytes,
@@ -1231,6 +1299,10 @@ impl RemoteFileService {
 #[derive(Debug, Clone)]
 pub enum FileTransferEndpoint {
     Local(PathBuf),
+    Adb {
+        service: Arc<crate::adb::AdbFileService>,
+        path: RemoteFilePath,
+    },
     Remote {
         service: Arc<RemoteFileService>,
         path: RemoteFilePath,
@@ -1265,6 +1337,11 @@ impl FileCopyRequest {
     where
         F: FnMut(SftpTransferProgress) + Send + 'static,
     {
+        if matches!(self.source, FileTransferEndpoint::Adb { .. })
+            || matches!(self.destination, FileTransferEndpoint::Adb { .. })
+        {
+            return crate::adb::copy::execute(self, progress).map_err(crate::adb::file_error);
+        }
         let browser_endpoint = |endpoint: &FileTransferEndpoint| match endpoint {
             FileTransferEndpoint::Local(path) => (
                 crate::file_browser::FileBrowserService::local(),
@@ -1272,6 +1349,10 @@ impl FileCopyRequest {
             ),
             FileTransferEndpoint::Remote { service, path } => (
                 crate::file_browser::FileBrowserService::Remote(service.clone()),
+                path.clone(),
+            ),
+            FileTransferEndpoint::Adb { service, path } => (
+                crate::file_browser::FileBrowserService::Adb(service.clone()),
                 path.clone(),
             ),
         };
@@ -1319,6 +1400,9 @@ impl FileCopyRequest {
         let control = self.control;
         let options = self.options;
         match (self.source, self.destination) {
+            (FileTransferEndpoint::Adb { .. }, _) | (_, FileTransferEndpoint::Adb { .. }) => {
+                unreachable!("Android copies use the isolated copy adapter")
+            }
             (FileTransferEndpoint::Local(source), FileTransferEndpoint::Local(destination)) => {
                 let Some(destination) = resolve_copy_local_target(
                     &source,
@@ -1789,6 +1873,7 @@ where
                 control.clone(),
                 move |current| {
                     report.lock().expect("shell progress lock")(SftpTransferProgress {
+                        phase: None,
                         remote_path: remote_name.clone(),
                         local_path: local_name.clone(),
                         bytes_transferred: offset.saturating_add(current),
@@ -1801,6 +1886,7 @@ where
         }
         completed = completed.saturating_add(1);
         callback.lock().expect("shell progress lock")(SftpTransferProgress {
+            phase: None,
             remote_path: remote,
             local_path: local,
             bytes_transferred: bytes,
@@ -1810,6 +1896,7 @@ where
         });
     }
     callback.lock().expect("shell progress lock")(SftpTransferProgress {
+        phase: None,
         remote_path: remote_path.to_string(),
         local_path: local_path.to_path_buf(),
         bytes_transferred: bytes,
@@ -1880,6 +1967,7 @@ where
                 transfer_options,
                 move |current| {
                     report.lock().expect("shell progress lock")(SftpTransferProgress {
+                        phase: None,
                         remote_path: remote_name.clone(),
                         local_path: local_name.clone(),
                         bytes_transferred: offset.saturating_add(current),
@@ -1892,6 +1980,7 @@ where
         }
         completed = completed.saturating_add(1);
         callback.lock().expect("shell progress lock")(SftpTransferProgress {
+            phase: None,
             remote_path: remote,
             local_path: local,
             bytes_transferred: bytes,
@@ -1901,6 +1990,7 @@ where
         });
     }
     callback.lock().expect("shell progress lock")(SftpTransferProgress {
+        phase: None,
         remote_path: remote_path.to_string(),
         local_path: local_path.to_path_buf(),
         bytes_transferred: bytes,

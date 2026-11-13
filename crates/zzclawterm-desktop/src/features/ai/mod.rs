@@ -4,8 +4,8 @@ pub(in crate::features) mod agent_management;
 mod ai_agent_runtime;
 mod ai_jobs;
 mod ai_runtime;
-mod claude_code_runtime;
-mod codex_runtime;
+pub(in crate::features) mod claude_code_runtime;
+pub(in crate::features) mod codex_runtime;
 mod harness_runtime;
 mod helper_resolver;
 mod native_jobs;
@@ -16,7 +16,7 @@ mod state;
 
 pub(in crate::features) use ai_jobs::{ai_active_profile_drafts, is_agent_command_card};
 pub(in crate::features) use helper_resolver::{McpHelperStatus, mcp_helper_status};
-pub(in crate::features) use panel::AiPanel;
+pub(in crate::features) use panel::{AI_COMPOSER_RESIZE_HANDLE_ID, AiPanel};
 pub(in crate::features) use state::{
     AiFeatureFocus, AiFeatureInit, AiFeatureState, AiFullAccessSetting, AiSettingsMutation,
     ConnectionStatus, ProviderSettingsView,

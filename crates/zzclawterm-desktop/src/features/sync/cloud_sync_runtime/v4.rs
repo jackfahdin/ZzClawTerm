@@ -15,7 +15,6 @@ enum JobResult {
 
 enum PreviewDecision {
     Conflict(usize, usize),
-    Trust(String, String),
 }
 
 impl ZzClawTermApp {
@@ -112,69 +111,11 @@ impl ZzClawTermApp {
         cx.notify();
         true
     }
-    pub(in crate::features) fn select_cloud_sync_v3(&mut self, cx: &mut Context<Self>) {
-        if !self.cloud_sync_form_enabled() {
-            return;
-        }
-        self.cloud_sync.select_v4();
-        self.request_settings_panel_refresh(cx);
-        cx.notify();
-    }
-
-    pub(in crate::features) fn toggle_cloud_sync_v3_preferences(&mut self, cx: &mut Context<Self>) {
-        if !self.cloud_sync_form_enabled() {
-            return;
-        }
-        self.cloud_sync.toggle_v4_preferences();
-        self.request_settings_panel_refresh(cx);
-        cx.notify();
-    }
-
     pub(in crate::features) fn run_cloud_sync_v3_preview(&mut self, cx: &mut Context<Self>) {
         self.run_cloud_sync_v3_job(false, None, cx);
     }
-    pub(in crate::features) fn toggle_cloud_sync_v3_keybindings(&mut self, cx: &mut Context<Self>) {
-        if !self.cloud_sync_form_enabled() {
-            return;
-        }
-        self.cloud_sync.toggle_v4_keybindings();
-        self.request_settings_panel_refresh(cx);
-        cx.notify();
-    }
-    pub(in crate::features) fn toggle_cloud_sync_v3_ai(&mut self, cx: &mut Context<Self>) {
-        if !self.cloud_sync_form_enabled() {
-            return;
-        }
-        self.cloud_sync.toggle_v4_ai();
-        self.request_settings_panel_refresh(cx);
-        cx.notify();
-    }
-    pub(in crate::features) fn toggle_cloud_sync_v3_secrets(&mut self, cx: &mut Context<Self>) {
-        if !self.cloud_sync_form_enabled() {
-            return;
-        }
-        self.cloud_sync.toggle_v4_secrets();
-        self.request_settings_panel_refresh(cx);
-        cx.notify();
-    }
     pub(in crate::features) fn apply_cloud_sync_v3_preview(&mut self, cx: &mut Context<Self>) {
         self.run_cloud_sync_v3_job(true, None, cx);
-    }
-    pub(in crate::features) fn confirm_cloud_sync_v3_trust(
-        &mut self,
-        key: String,
-        token: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.run_cloud_sync_v3_job(false, Some(PreviewDecision::Trust(key, token)), cx);
-    }
-    pub(in crate::features) fn toggle_cloud_sync_v3_trust(&mut self, cx: &mut Context<Self>) {
-        if !self.cloud_sync_form_enabled() {
-            return;
-        }
-        self.cloud_sync.toggle_v4_trust();
-        self.request_settings_panel_refresh(cx);
-        cx.notify();
     }
     pub(in crate::features) fn resolve_cloud_sync_v3_preview(
         &mut self,
@@ -263,12 +204,6 @@ impl ZzClawTermApp {
                         options.master_password.expose_secret(),
                         conflict,
                         candidate,
-                    )?,
-                    PreviewDecision::Trust(key, token) => preview.confirm_trust(
-                        &store,
-                        options.master_password.expose_secret(),
-                        &key,
-                        &token,
                     )?,
                 }
                 return Ok(JobResult::Preview(Box::new(preview)));

@@ -53,6 +53,7 @@ __pycache__/
 target/
 /artifacts/
 /data/
-nyaterm-portable
+zzclawterm-portable
 /gen/schemas
 /src-tauri
+docs/

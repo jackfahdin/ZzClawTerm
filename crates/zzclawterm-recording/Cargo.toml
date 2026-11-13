@@ -6,7 +6,14 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# Blocking test conveniences; application builds keep these disabled.
+test-support = []
+
 [dependencies]
+futures.workspace = true
+tracing.workspace = true
 zzclawterm-core.workspace = true
 zzclawterm-terminal.workspace = true
 regex.workspace = true

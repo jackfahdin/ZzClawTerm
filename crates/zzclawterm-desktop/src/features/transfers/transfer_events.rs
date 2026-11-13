@@ -13,7 +13,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use zzclawterm_core::{AiAction, truncate_preview};
-use zzclawterm_files::sftp::{SFTP_TRANSFER_CANCELLED, SftpFileEntry, SftpFileType};
+use zzclawterm_files::sftp::{
+    RemoteFilePath, SFTP_TRANSFER_CANCELLED, SftpFileEntry, SftpFileType,
+};
 use zzclawterm_files::sftp_transfer_types::SftpTransferProgress;
 use zzclawterm_ui::ZzClawDialogWindowExt as _;
 
@@ -34,7 +36,7 @@ type ExternalEditorWatchStart = (
     String,
     Option<String>,
     PathBuf,
-    crate::models::external_editor::ExternalEditorFileVersion,
+    zzclawterm_files::local_revision::LocalFileVersion,
 );
 
 use super::state::{TransferEditorSaveOutcome, TransferFeatureState};
@@ -108,12 +110,37 @@ impl TransferFeatureState {
 }
 
 impl ZzClawTermApp {
+    /// Picker results belong to their captured session even after a tab switch.
+    pub(super) fn with_transfer_browser_session(
+        &mut self,
+        session_id: Option<&str>,
+        apply: impl FnOnce(&mut Self),
+    ) {
+        let inactive = session_id.filter(|id| self.session.active_id() != Some(*id));
+        let snapshot = inactive.map(|id| {
+            let snapshot = self.transfer.browser_event_snapshot();
+            self.load_transfer_browser_event_session(id);
+            snapshot
+        });
+        apply(self);
+        if let (Some(id), Some(snapshot)) = (inactive, snapshot) {
+            self.cache_transfer_browser_session(id);
+            self.transfer.restore_browser_event_snapshot(snapshot);
+        }
+    }
+
     fn load_transfer_browser_event_session(&mut self, session_id: &str) {
+        self.validate_android_browser_cache(session_id);
         let Some(cache) = self.transfer.browser.session_cache.get(session_id).cloned() else {
-            self.transfer.set_remote_path(".");
-            self.transfer.browser.path = ".".to_string();
+            let path = self
+                .android_file_initial_directory(session_id)
+                .unwrap_or_else(|| ".".into());
+            self.transfer.set_remote_path(path.clone());
+            self.transfer.browser.path = path;
             self.transfer.browser.raw_path_token = None;
-            self.transfer.browser.home_dir.clear();
+            self.transfer.browser.home_dir = self
+                .android_file_initial_directory(session_id)
+                .unwrap_or_default();
             self.transfer.browser.home_dir_pending = false;
             self.transfer.browser.entries = Arc::new(Vec::new());
             self.transfer.browser.loading = false;
@@ -271,6 +298,111 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if let TransferJobEvent::FileRefreshFailed(error) = &event.event {
+            if crate::features::android::labels::file_error_code(error) != "Cancelled" {
+                let message = t!(
+                    "fileExplorer.transferRefreshFailed",
+                    error = crate::features::android::labels::file_error_message(error)
+                )
+                .to_string();
+                self.shell.set_status(message.clone());
+                self.notify_background_operation(
+                    "file-transfer-refresh-error",
+                    zzclawterm_ui::notification::ZzClawNotificationKind::Warning,
+                    message,
+                    cx,
+                );
+            }
+            return true;
+        }
+        if let TransferJobEvent::Finished(Err(error)) = &event.event
+            && error != SFTP_TRANSFER_CANCELLED
+            && self.transfer.transfer_job(&event.id).is_some_and(|job| {
+                matches!(
+                    job.kind,
+                    TransferJobKind::Upload { .. } | TransferJobKind::Download { .. }
+                )
+            })
+        {
+            let backend = self
+                .transfer
+                .promised_download_source(&event.id)
+                .map(|source| source.kind())
+                .unwrap_or_else(|| {
+                    if self.transfer.transfer_job_is_local(&event.id) {
+                        zzclawterm_files::file_browser::FileBrowserBackendKind::Local
+                    } else {
+                        zzclawterm_files::file_browser::FileBrowserBackendKind::Remote
+                    }
+                });
+            crate::features::android::labels::log_file_error(
+                "transfer-worker",
+                backend,
+                &event.id,
+                &anyhow::anyhow!("transfer worker failed"),
+            );
+        }
+        let event = TransferJobResult {
+            id: event.id,
+            event: match event.event {
+                TransferJobEvent::FileFinished(result) => {
+                    TransferJobEvent::Finished(result.map_err(|error| {
+                        if crate::features::android::labels::file_error_code(&error) == "Cancelled"
+                        {
+                            SFTP_TRANSFER_CANCELLED.into()
+                        } else {
+                            crate::features::android::labels::file_error_message(&error)
+                        }
+                    }))
+                }
+                event => event,
+            },
+        };
+        let upload_parent = match &event.event {
+            TransferJobEvent::Finished(Ok(TransferJobOutput::Uploaded { parent_path, .. })) => {
+                Some(parent_path.clone())
+            }
+            TransferJobEvent::Finished(Ok(TransferJobOutput::Summary(summary)))
+                if !summary.skipped
+                    && self
+                        .transfer
+                        .transfer_job(&event.id)
+                        .is_some_and(|job| matches!(job.kind, TransferJobKind::Upload { .. })) =>
+            {
+                let backend = self
+                    .transfer
+                    .promised_download_source(&event.id)
+                    .map(|source| source.kind())
+                    .unwrap_or(zzclawterm_files::file_browser::FileBrowserBackendKind::Local);
+                Some(zzclawterm_files::file_browser::file_browser_parent(
+                    backend,
+                    &summary.remote_path,
+                ))
+            }
+            _ => None,
+        };
+        let uploaded_directory = if let Some(parent_path) = upload_parent {
+            let endpoint = match self.transfer.promised_download_source(&event.id) {
+                Some(zzclawterm_files::file_browser::WeakFileBrowserService::Adb(service)) => self
+                    .android
+                    .key_for_file_service(&service)
+                    .map(crate::features::file_manager::PaneEndpoint::Adb),
+                Some(zzclawterm_files::file_browser::WeakFileBrowserService::Remote(_)) => self
+                    .transfer
+                    .transfer_job(&event.id)
+                    .and_then(|job| job.session_id.clone())
+                    .map(crate::features::file_manager::PaneEndpoint::Session),
+                None => Some(crate::features::file_manager::PaneEndpoint::Local),
+            };
+            endpoint.map(|endpoint| {
+                (
+                    endpoint,
+                    zzclawterm_files::sftp::RemoteFilePath::new(parent_path),
+                )
+            })
+        } else {
+            None
+        };
         if let TransferJobEvent::DragExportOpened {
             session_id,
             remote_path,
@@ -278,10 +410,8 @@ impl ZzClawTermApp {
             destination,
         } = event.event
         {
-            if self.session.metadata(&session_id).is_none() {
-                control.cancel();
-                return false;
-            }
+            // Native consumers can submit after the originating view closed.
+            // The captured service/device lease owns cancellation, not the view.
             let kind = match destination {
                 Some(destination) => {
                     self.transfer.bind_promised_download(
@@ -314,10 +444,19 @@ impl ZzClawTermApp {
                 });
             return true;
         }
+        let event_finished = matches!(event.event, TransferJobEvent::Finished(_));
+        if event_finished {
+            self.transfer.browser.navigation_handles.remove(&event.id);
+        }
         let Some((job_index, mut job)) = self.transfer.take_transfer_job_for_event(&event.id)
         else {
-            // The job was cancelled or removed while its worker was still running.
-            return false;
+            // A removed job must release both its slot and its node's pending generation.
+            let tree_slot_released =
+                event_finished && self.transfer.discard_tree_listing(&event.id);
+            if tree_slot_released {
+                self.request_missing_expanded_tree_listings(cx);
+            }
+            return tree_slot_released;
         };
         if self.transfer.file_operation(&event.id).is_some() {
             let cancelled_without_running = job.status == TransferJobStatus::Cancelling
@@ -327,6 +466,9 @@ impl ZzClawTermApp {
             match event.event {
                 TransferJobEvent::Started { detail } => job.detail = detail,
                 TransferJobEvent::Progress(progress) => {
+                    if job.status == TransferJobStatus::Running {
+                        job.detail = format_transfer_progress(&progress);
+                    }
                     job.speed
                         .record(progress.bytes_transferred, std::time::Instant::now());
                     job.progress = Some(progress);
@@ -363,7 +505,11 @@ impl ZzClawTermApp {
                             } else {
                                 TransferJobStatus::Failed
                             };
-                            job.detail = error;
+                            job.detail = if job.status == TransferJobStatus::Cancelled {
+                                t!("fileTransfer.cancelled").into_owned()
+                            } else {
+                                error
+                            };
                             if job.status == TransferJobStatus::Failed {
                                 self.notify_background_operation(
                                     "file-operation-error",
@@ -410,26 +556,20 @@ impl ZzClawTermApp {
             }
             return false;
         }
-        let reveal_tree_after_navigation = matches!(
-            &job.kind,
-            TransferJobKind::InitialDirectory
-                | TransferJobKind::ListDir { .. }
-                | TransferJobKind::SyncCwd { .. }
-                | TransferJobKind::ResolveHome
-        ) || job_session_id
-            .as_deref()
-            .is_some_and(|id| !self.transfer.tree_is_initialized(id));
         if let TransferJobKind::ListTree { path, generation } = &job.kind {
             if let TransferJobEvent::Finished(result) = event.event {
+                let tree_slot_released = self.transfer.finish_tree_listing(&event.id);
                 let result = match result {
                     Ok(TransferJobOutput::TreeEntries(entries)) => Ok(entries),
                     Err(error) => Err(error),
                     _ => Err(t!("fileExplorer.treeUnexpectedResult").to_string()),
                 };
-                return job_session_id.as_deref().is_some_and(|session| {
+                let changed = job_session_id.as_deref().is_some_and(|session| {
                     self.transfer
                         .complete_tree_request(session, path, *generation, result)
                 });
+                self.request_missing_expanded_tree_listings(cx);
+                return changed || tree_slot_released;
             }
             self.transfer
                 .restore_transfer_job_after_event((job_index, job));
@@ -455,6 +595,55 @@ impl ZzClawTermApp {
             }
             return false;
         }
+        let navigation_position_owned = if let (Some(session), TransferJobEvent::Finished(result)) =
+            (navigation_job_key.as_deref(), &event.event)
+        {
+            self.transfer
+                .settle_tree_navigation(session, &event_id, result.is_ok())
+        } else {
+            false
+        };
+        let tree_uninitialized = job_session_id
+            .as_deref()
+            .is_some_and(|id| !self.transfer.tree_is_initialized(id));
+        let directory_changed = match &job.kind {
+            TransferJobKind::ListDir { remote_path, .. } => self
+                .transfer
+                .browser
+                .pending_navigations
+                .get(&event_id)
+                .is_some_and(|snapshot| {
+                    let backend = job_session_id.as_deref().and_then(|session| {
+                        self.session
+                            .file_browser_backend_support_for_session(session)
+                    });
+                    backend.is_some_and(|backend| {
+                        if self.session.active_id() == job_session_id.as_deref() {
+                            !self.transfer.tree_paths_equal(
+                                backend,
+                                &RemoteFilePath {
+                                    display_path: snapshot.browser_path.clone(),
+                                    raw_path_token: snapshot.browser_raw_path_token.clone(),
+                                },
+                                &self.transfer.browser_remote_file_path(),
+                            )
+                        } else {
+                            !super::cwd_sync::cwd_paths_equal(
+                                backend,
+                                &snapshot.browser_path,
+                                remote_path,
+                            )
+                        }
+                    })
+                }),
+            TransferJobKind::InitialDirectory => true,
+            _ => false,
+        };
+        let reveal_tree_after_navigation = if navigation_job_key.is_some() {
+            navigation_position_owned && (directory_changed || tree_uninitialized)
+        } else {
+            tree_uninitialized
+        };
         dirty |= transfer_event_needs_ui_refresh(
             self.session.active_id(),
             job_session_id.as_deref(),
@@ -487,6 +676,22 @@ impl ZzClawTermApp {
         let event_failed = matches!(&event.event, TransferJobEvent::Finished(Err(_)));
         let event_succeeded = matches!(&event.event, TransferJobEvent::Finished(Ok(_)));
         let event_finished = event_failed || event_succeeded;
+        if let TransferJobEvent::Finished(Err(error)) = &event.event
+            && matches!(
+                job.kind,
+                TransferJobKind::Upload { .. }
+                    | TransferJobKind::Download { .. }
+                    | TransferJobKind::DragExport { .. }
+            )
+            && error != SFTP_TRANSFER_CANCELLED
+        {
+            self.notify_background_operation(
+                "file-transfer-error",
+                zzclawterm_ui::notification::ZzClawNotificationKind::Error,
+                error.clone(),
+                cx,
+            );
+        }
         if let (TransferJobKind::SendTo { .. }, TransferJobEvent::Finished(result)) =
             (&job.kind, &event.event)
         {
@@ -531,6 +736,14 @@ impl ZzClawTermApp {
                 job.speed.reset();
                 job.summary = None;
             }
+            TransferJobEvent::ExternalWorkspacePrepared { local_path } => {
+                if let TransferJobKind::OpenExternal {
+                    local_path: target, ..
+                } = &mut job.kind
+                {
+                    *target = Some(local_path);
+                }
+            }
             TransferJobEvent::ExternalModified {
                 remote_path,
                 raw_path_token,
@@ -538,7 +751,11 @@ impl ZzClawTermApp {
             } => {
                 job.detail = format!("External edit changed {}", local_path.display());
                 let watch_key = format!("{remote_path}\n{}", local_path.display());
-                if self.transfer.external_sync_always_uploads(&watch_key) {
+                if self.transfer.external_sync_always_uploads(&watch_key)
+                    && !job_session_id
+                        .as_deref()
+                        .is_some_and(|id| self.file_sudo_status(id).is_busy())
+                {
                     external_sync_to_start = Some((
                         job_session_id.clone(),
                         job.id.clone(),
@@ -612,16 +829,29 @@ impl ZzClawTermApp {
                     .retain(|identity| {
                         entries.iter().any(|entry| entry.matches_identity(identity))
                     });
-                if let Some(select_after) = select_after
-                    && entries.iter().any(|entry| entry.path == select_after)
-                {
-                    self.transfer.browser.selected_remote_path = Some(select_after.clone());
-                    self.transfer.browser.selected_remote_paths.clear();
-                    self.transfer
-                        .browser
-                        .selected_remote_paths
-                        .insert(select_after.clone());
-                    remote_path_to_set = Some(select_after);
+                if let Some(select_after) = select_after {
+                    let remote_browser = job_session_id.as_deref().is_some_and(|session_id| {
+                        self.session
+                            .file_browser_backend_support_for_session(session_id)
+                            == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Remote)
+                    });
+                    if remote_browser {
+                        // Inactive listings update the session cache, whose scroll/selection
+                        // are not retained. Never mutate the active session's scroll handle.
+                        if inactive_browser_snapshot.is_none() {
+                            remote_path_to_set =
+                                self.transfer.restore_browser_navigation_selection(
+                                    &select_after,
+                                    self.settings.summary().ui_file_explorer_show_hidden_files,
+                                );
+                        } else {
+                            self.transfer
+                                .restore_browser_ancestor_path_token(&event_id, &select_after);
+                        }
+                    } else if entries.iter().any(|entry| entry.path == select_after) {
+                        self.transfer.select_browser_entry(select_after.clone());
+                        remote_path_to_set = Some(select_after);
+                    }
                 }
                 job.entries = entries;
                 job.summary = None;
@@ -684,10 +914,11 @@ impl ZzClawTermApp {
                 job.detail = format!("Home {home_dir}");
                 self.transfer.browser.home_dir = home_dir.clone();
                 self.transfer.browser.home_dir_pending = false;
-                self.transfer.browser.loading = false;
-                self.transfer.browser.error = None;
-                self.transfer.browser.status =
-                    format!("remote home resolved: {}", truncate_preview(&home_dir, 72));
+                // Metadata replies must not settle a directory request started afterwards.
+                if !self.transfer.browser.loading {
+                    self.transfer.browser.status =
+                        format!("remote home resolved: {}", truncate_preview(&home_dir, 72));
+                }
                 job.entries.clear();
                 job.summary = None;
                 job.progress = None;
@@ -1194,6 +1425,12 @@ impl ZzClawTermApp {
                 local_path,
                 baseline,
             })) => {
+                if let TransferJobKind::OpenExternal {
+                    local_path: target, ..
+                } = &mut job.kind
+                {
+                    *target = Some(local_path.clone());
+                }
                 job.status = TransferJobStatus::Completed;
                 job.detail = format!("Opened {}", local_path.display());
                 job.summary = None;
@@ -1232,6 +1469,7 @@ impl ZzClawTermApp {
                 };
                 job.entries.clear();
                 job.progress = Some(SftpTransferProgress {
+                    phase: None,
                     remote_path: summary.remote_path.clone(),
                     local_path: summary.local_path.clone(),
                     bytes_transferred: summary.bytes,
@@ -1265,6 +1503,7 @@ impl ZzClawTermApp {
                 job.status = TransferJobStatus::Completed;
                 job.detail = format!("{} uploaded", format_file_size(Some(summary.bytes)));
                 job.progress = Some(SftpTransferProgress {
+                    phase: None,
                     remote_path: summary.remote_path.clone(),
                     local_path: summary.local_path.clone(),
                     bytes_transferred: summary.bytes,
@@ -1285,6 +1524,7 @@ impl ZzClawTermApp {
                 job.control = None;
 
                 if transfer_event_paths_match(&self.transfer.browser.path, &parent_path) {
+                    browser_listing_completed = true;
                     self.transfer.browser.path = parent_path.clone();
                     self.transfer.browser.entries = Arc::new(entries.clone());
                     self.transfer.browser.status = format!("{} item(s)", entries.len());
@@ -1331,6 +1571,9 @@ impl ZzClawTermApp {
                     zmodem_upload_after_probe = Some((session_id, files, overwrite));
                 }
             }
+            TransferJobEvent::FileFinished(_) | TransferJobEvent::FileRefreshFailed(_) => {
+                unreachable!("file errors are localized at event entry")
+            }
             TransferJobEvent::Finished(Err(error)) => {
                 if matches!(
                     &job.kind,
@@ -1349,9 +1592,11 @@ impl ZzClawTermApp {
                     &job.kind,
                     TransferJobKind::InitialDirectory
                         | TransferJobKind::ListDir { .. }
-                        | TransferJobKind::ResolveHome
                         | TransferJobKind::SyncCwd { .. }
                 );
+                if matches!(job.kind, TransferJobKind::ResolveHome) {
+                    self.transfer.browser.home_dir_pending = false;
+                }
                 let property_remote_path = match &job.kind {
                     TransferJobKind::LoadProperties { remote_path }
                     | TransferJobKind::UpdateProperties { remote_path, .. }
@@ -1500,6 +1745,9 @@ impl ZzClawTermApp {
         if let Some(snapshot) = inactive_browser_snapshot {
             self.transfer.restore_browser_event_snapshot(snapshot);
         }
+        if let Some((endpoint, path)) = uploaded_directory {
+            self.refresh_file_manager_directory(&endpoint, &path, cx);
+        }
         if event_succeeded && self.session.active_id() == job_session_id.as_deref() {
             if reveal_tree_after_navigation {
                 self.reveal_transfer_tree_current_path(cx);
@@ -1616,6 +1864,146 @@ mod tests {
     use zzclawterm_files::sftp_transfer_types::{
         SftpPathTransferOptions, SftpTransferProgress, SftpTransferSummary,
     };
+
+    #[test]
+    fn external_workspace_path_is_unknown_until_prepared_and_finished_path_is_authoritative() {
+        let test_dir = TestConfigDir::new("zzclawterm-external-prepared-path");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted(&mut cx, test_dir.path());
+        let prepared = test_dir.path().join("local/example.txt");
+        let opened = test_dir.path().join("final/example.txt");
+        // A closed source session lets this test inspect completion without starting a watcher.
+        vcx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let mut job = running_job("external");
+                job.session_id = Some("closed-source".into());
+                job.kind = TransferJobKind::OpenExternal {
+                    remote_path: "/remote/example.txt".into(),
+                    local_path: None,
+                };
+                app.transfer.enqueue_transfer_job(job);
+                assert!(matches!(
+                    &app.transfer.transfer_job("external").unwrap().kind,
+                    TransferJobKind::OpenExternal { local_path: None, .. }
+                ));
+                app.apply_transfer_event(TransferJobResult {
+                    id: "external".into(),
+                    event: TransferJobEvent::ExternalWorkspacePrepared { local_path: prepared.clone() },
+                }, window, cx);
+                assert!(matches!(
+                    &app.transfer.transfer_job("external").unwrap().kind,
+                    TransferJobKind::OpenExternal { local_path: Some(path), .. } if path == &prepared
+                ));
+                app.apply_transfer_event(TransferJobResult {
+                    id: "external".into(),
+                    event: TransferJobEvent::Progress(SftpTransferProgress {
+                phase: None,
+                        remote_path: "/remote/example.txt".into(),
+                        local_path: prepared.clone(),
+                        bytes_transferred: 3,
+                        total_bytes: Some(3),
+                        item_count_completed: None,
+                        item_count_total: None,
+                    }),
+                }, window, cx);
+                assert_eq!(app.transfer.transfer_job("external").unwrap().progress.as_ref().unwrap().local_path, prepared);
+                app.apply_transfer_event(TransferJobResult {
+                    id: "external".into(),
+                    event: TransferJobEvent::Finished(Ok(TransferJobOutput::ExternalOpened {
+                        remote_path: "/remote/example.txt".into(),
+                        raw_path_token: None,
+                        local_path: opened.clone(),
+                        baseline: zzclawterm_files::local_revision::LocalFileVersion {
+                            len: 3, modified: None, digest: [0; 32],
+                        },
+                    })),
+                }, window, cx);
+                let job = app.transfer.transfer_job("external").unwrap();
+                assert_eq!(job.status, TransferJobStatus::Completed);
+                assert!(job.progress.is_none());
+                assert!(matches!(&job.kind, TransferJobKind::OpenExternal { local_path: Some(path), .. } if path == &opened));
+                assert!(job.detail.contains(&opened.display().to_string()));
+            });
+        });
+    }
+
+    #[test]
+    fn prepared_workspace_for_a_removed_job_is_ignored() {
+        let test_dir = TestConfigDir::new("zzclawterm-external-late-prepared");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted(&mut cx, test_dir.path());
+        vcx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                assert!(!app.apply_transfer_event(
+                    TransferJobResult {
+                        id: "removed".into(),
+                        event: TransferJobEvent::ExternalWorkspacePrepared {
+                            local_path: test_dir.path().join("example.txt"),
+                        },
+                    },
+                    window,
+                    cx
+                ));
+                assert!(app.transfer.transfer_jobs().is_empty());
+            });
+        });
+    }
+
+    #[test]
+    fn external_open_completion_watches_the_final_path_and_reports_changes_from_it() {
+        let test_dir = TestConfigDir::new("zzclawterm-external-final-watch");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted(&mut cx, test_dir.path());
+        let path = test_dir.path().join("LocalAppData 文件.txt");
+        std::fs::write(&path, "original").unwrap();
+        let baseline =
+            zzclawterm_files::local_revision::read_local_file_version(&path, || false).unwrap();
+        // An edit before watcher startup must be compared with the downloaded baseline.
+        std::fs::write(&path, "edited").unwrap();
+        let mut receiver = vcx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let mut job = running_job("external-watch");
+                job.kind = TransferJobKind::OpenExternal {
+                    remote_path: "/remote/example.txt".into(),
+                    local_path: None,
+                };
+                app.transfer.enqueue_transfer_job(job);
+                let receiver = app.transfer.take_transfer_event_receiver().unwrap();
+                app.apply_transfer_event(
+                    TransferJobResult {
+                        id: "external-watch".into(),
+                        event: TransferJobEvent::Finished(Ok(TransferJobOutput::ExternalOpened {
+                            remote_path: "/remote/example.txt".into(),
+                            raw_path_token: Some("opaque-remote-path".into()),
+                            local_path: path.clone(),
+                            baseline,
+                        })),
+                    },
+                    window,
+                    cx,
+                );
+                receiver
+            })
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let event = loop {
+            if let Ok(event) = receiver.try_recv() {
+                break event;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "final-path watcher did not report the edit"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(event.id, "external-watch");
+        assert!(matches!(event.event, TransferJobEvent::ExternalModified {
+            local_path, raw_path_token: Some(token), ..
+        } if local_path == path && token == "opaque-remote-path"));
+    }
 
     #[test]
     fn closing_shared_app_child_window_keeps_transfer_events_alive() {
@@ -1818,6 +2206,78 @@ mod tests {
         }
     }
 
+    #[test]
+    fn adb_upload_completion_updates_the_original_sessions_cache_after_a_tab_switch() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let root = zzclawterm_core::test_support::TestTempDir::new("zzclawterm-adb-upload-refresh");
+        let app = crate::features::test_support::app_with_visible_android_session(
+            &mut cx,
+            root.path(),
+            "original",
+            "/device",
+        );
+        let vcx = crate::features::test_support::session_focus_test_window(&mut cx, &app);
+        vcx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                let service = app.browser_transfer_session().unwrap().service;
+                app.transfer.browser.path = "/device".into();
+                app.cache_transfer_browser_session("original");
+                let mut job = running_job("adb-upload");
+                job.session_id = Some("original".into());
+                job.kind = TransferJobKind::Upload {
+                    local_path: root.path().join("input"),
+                    remote_path: "/device/new-file".into(),
+                };
+                app.transfer.enqueue_transfer_job(job);
+                let options = app.sftp_download_path_options();
+                app.transfer
+                    .bind_transfer_job_path_options("adb-upload", options);
+                app.transfer
+                    .bind_transfer_job_source("adb-upload", &service);
+                let metadata = app.session.metadata("original").unwrap().clone();
+                app.session.register_session_metadata("other", metadata);
+                app.session.select_active_session("other");
+                app.transfer.browser.path = "/other".into();
+                app.transfer.browser.status = "other status".into();
+                let mut entry = browser_entry("new-file");
+                entry.name = "new-file".into();
+                entry.path = "/device/new-file".into();
+                entry.raw_path_token = None;
+                app.apply_transfer_event(
+                    TransferJobResult {
+                        id: "adb-upload".into(),
+                        event: TransferJobEvent::FileFinished(Ok(TransferJobOutput::Uploaded {
+                            summary: zzclawterm_files::sftp_transfer_types::SftpTransferSummary {
+                                remote_path: "/device/new-file".into(),
+                                local_path: root.path().join("input"),
+                                bytes: 3,
+                                skipped: false,
+                            },
+                            parent_path: "/device".into(),
+                            entries: vec![entry],
+                        })),
+                    },
+                    window,
+                    cx,
+                );
+                assert_eq!(app.transfer.browser.path, "/other");
+                assert_eq!(app.transfer.browser.status, "other status");
+                let cache = app.transfer.browser.session_cache.get("original").unwrap();
+                assert!(
+                    cache
+                        .entries
+                        .iter()
+                        .any(|entry| entry.path == "/device/new-file")
+                );
+                assert_eq!(
+                    app.transfer.transfer_job("adb-upload").unwrap().status,
+                    TransferJobStatus::Completed
+                );
+            })
+        });
+    }
+
     fn sync_cwd_job(id: &str) -> TransferJobState {
         TransferJobState {
             id: id.to_string(),
@@ -1841,6 +2301,7 @@ mod tests {
         TransferJobResult {
             id: id.to_string(),
             event: TransferJobEvent::Progress(SftpTransferProgress {
+                phase: None,
                 remote_path: format!("/remote/{id}"),
                 local_path: PathBuf::from(format!("/local/{id}")),
                 bytes_transferred: bytes,
@@ -2405,6 +2866,7 @@ mod tests {
                 local_path: PathBuf::from("/tmp/file"),
             },
             &TransferJobEvent::Progress(SftpTransferProgress {
+                phase: None,
                 remote_path: "/tmp/file".to_string(),
                 local_path: PathBuf::from("/tmp/file"),
                 bytes_transferred: 1,
@@ -2447,6 +2909,7 @@ mod tests {
     #[test]
     fn inactive_transfer_progress_does_not_request_ui_refresh() {
         let progress = TransferJobEvent::Progress(SftpTransferProgress {
+            phase: None,
             remote_path: "/tmp/file".to_string(),
             local_path: PathBuf::from("/tmp/file"),
             bytes_transferred: 1,

@@ -3,6 +3,7 @@ use crate::features::app_state::SettingsDraftSnapshot;
 use crate::models::TranslationSecretDraft;
 use gpui::Context;
 use rust_i18n::t;
+use zzclawterm_core::AppSettingsSummary;
 use zzclawterm_files::sftp_transfer_types::SftpDuplicatePolicy;
 use zzclawterm_store::StoreDomain;
 
@@ -43,7 +44,7 @@ impl ZzClawTermApp {
             return false;
         };
         let master_password = self.settings.master_password();
-        snapshot.settings != *self.settings.summary()
+        !settings_draft_matches(&snapshot.settings, self.settings.summary())
             || !self.ai.settings_draft_matches(
                 &snapshot.ai_settings,
                 &snapshot.ai_model_draft,
@@ -275,12 +276,13 @@ impl ZzClawTermApp {
         self.hide_ai_provider_secret(cx);
         self.ai.invalidate_provider_jobs();
         let settings = self.settings.summary().clone();
-        let base_settings = self
+        let mut base_settings = self
             .shell
             .settings_draft_snapshot()
             .expect("settings draft checked above")
             .settings
             .clone();
+        crate::models::ActivityBarLayoutState::complete_settings_layout(&mut base_settings);
         let base = self
             .shell
             .settings_draft_snapshot()
@@ -335,16 +337,18 @@ impl ZzClawTermApp {
         } else {
             Some(Some(master_password.draft.to_string()))
         };
-        let password_rotation = (base.cloud_sync_settings.protocol_version == 4
-            && base.settings.has_master_password)
-            .then(|| {
-                master_password_update
-                    .as_ref()
-                    .and_then(|value| value.as_ref())
-                    .cloned()
-            })
-            .flatten()
-            .map(zzclawterm_core::SecretString::from);
+        let password_rotation =
+            (crate::features::sync::effective_protocol_version(&base.cloud_sync_settings) == 4
+                && base.settings.has_master_password)
+                .then(|| {
+                    master_password_update
+                        .as_ref()
+                        .and_then(|value| value.as_ref())
+                        .cloned()
+                })
+                .flatten()
+                .map(zzclawterm_core::SecretString::from);
+        let sync_configuration_changed = cloud_changed || master_password_update.is_some();
         if password_rotation.is_some() && cloud_changed {
             let message = t!("settings.syncV3RotateSeparately").to_string();
             self.settings.update_store_status(message.clone(), false);
@@ -379,6 +383,7 @@ impl ZzClawTermApp {
                     shared_settings.ui_right_panel_collapsed =
                         persisted_settings.ui_right_panel_collapsed;
                     let mut persisted = persisted_settings;
+                    crate::models::ActivityBarLayoutState::complete_settings_layout(&mut persisted);
                     // These fields are workspace-local projections, not shared settings.
                     persisted.ui_left_panel_width = base_settings.ui_left_panel_width;
                     persisted.ui_right_panel_width = base_settings.ui_right_panel_width;
@@ -487,6 +492,7 @@ impl ZzClawTermApp {
                     saved_keyword_highlights,
                     saved_translation_settings,
                     saved_cloud_sync_settings,
+                    store.load_cloud_sync_state()?,
                     saved_ai_settings,
                 ))
             }),
@@ -496,15 +502,25 @@ impl ZzClawTermApp {
                     saved_keyword_highlights,
                     saved_translation_settings,
                     saved_cloud_sync_settings,
+                    saved_cloud_sync_state,
                     saved_ai_settings,
                 )) => {
                     this.apply_gpui_settings(saved_settings.clone(), cx);
                     this.publish_shared_settings(saved_settings, cx);
+                    if sync_configuration_changed
+                        && let Some(controller) = this.desktop_controller.clone()
+                    {
+                        cx.defer(move |cx| {
+                            let _ = controller.update(cx, |controller, _| {
+                                controller.cloud_sync_settings_changed();
+                            });
+                        });
+                    }
                     this.request_shared_state_refresh(crate::app_shell::SharedStateDomain::All, cx);
                     this.settings.rebase_master_password();
                     this.ai.replace_settings_config(saved_ai_settings, true);
                     this.cloud_sync
-                        .replace_settings(saved_cloud_sync_settings, Default::default());
+                        .replace_loaded(saved_cloud_sync_settings, saved_cloud_sync_state);
                     this.translation.replace_settings(
                         saved_translation_settings,
                         TranslationSecretDraft::default(),
@@ -580,7 +596,8 @@ impl ZzClawTermApp {
         }
         self.settings.theme_designer_mut().reset();
         self.hide_ai_provider_secret(cx);
-        if let Some(snapshot) = self.shell.take_settings_draft_snapshot() {
+        if let Some(mut snapshot) = self.shell.take_settings_draft_snapshot() {
+            copy_settings_shell_state(&mut snapshot.settings, self.settings.summary());
             self.apply_gpui_settings(snapshot.settings, cx);
             self.ai.restore_settings_draft(
                 snapshot.ai_settings,
@@ -688,6 +705,180 @@ impl ZzClawTermApp {
     }
 }
 
+/// Compare a draft against the live settings while ignoring shell state.
+///
+/// `AppSettingsSummary` doubles as the durable home of layout and session state:
+/// `persist_ui_layout` writes panel visibility/collapse/stack state, dock sizes,
+/// the active panels, list sorting and expansion, the activity-bar arrangement
+/// and the launch surface into it whenever a panel is opened or closed, a divider
+/// is dragged, a group is expanded or a list is sorted. A settings draft clones
+/// the whole struct, so a direct comparison reports those navigation writes as
+/// unsaved setting edits even though the settings page was never touched.
+///
+/// The fields neutralised below are restored at launch but cannot be edited from
+/// the settings page, so they have no place in the draft's dirty state. Every
+/// value a settings tab can edit, including the header-status and file-manager
+/// preferences that share the same struct, stays in the comparison.
+fn settings_draft_matches(snapshot: &AppSettingsSummary, live: &AppSettingsSummary) -> bool {
+    shell_state_neutral_settings(snapshot.clone(), live) == *live
+}
+
+fn shell_state_neutral_settings(
+    mut settings: AppSettingsSummary,
+    live: &AppSettingsSummary,
+) -> AppSettingsSummary {
+    // Normalize just the draft to the current layout; rebuilding defaults and
+    // cloning both complete settings would add allocations to every dirty check.
+    copy_settings_shell_state(&mut settings, live);
+    settings
+}
+
+/// The same projection serves comparison and rollback, so a navigation field
+/// ignored by dirty tracking cannot be accidentally restored from an old draft.
+fn copy_settings_shell_state(settings: &mut AppSettingsSummary, live: &AppSettingsSummary) {
+    settings
+        .ui_quick_cmd_view_mode
+        .clone_from(&live.ui_quick_cmd_view_mode);
+    settings
+        .ui_quick_cmd_sort_mode
+        .clone_from(&live.ui_quick_cmd_sort_mode);
+    settings
+        .ui_quick_cmd_selected_category
+        .clone_from(&live.ui_quick_cmd_selected_category);
+    settings
+        .ui_saved_connections_sort_mode
+        .clone_from(&live.ui_saved_connections_sort_mode);
+    settings
+        .ui_saved_connections_expanded_group_ids
+        .clone_from(&live.ui_saved_connections_expanded_group_ids);
+    settings
+        .ui_start_workspace_mode
+        .clone_from(&live.ui_start_workspace_mode);
+    settings
+        .ui_asset_sort_key
+        .clone_from(&live.ui_asset_sort_key);
+    settings
+        .ui_asset_sort_direction
+        .clone_from(&live.ui_asset_sort_direction);
+    settings
+        .ui_file_explorer_show_hidden_files
+        .clone_from(&live.ui_file_explorer_show_hidden_files);
+    settings
+        .ui_file_explorer_view_mode
+        .clone_from(&live.ui_file_explorer_view_mode);
+    settings
+        .ui_file_explorer_auto_sync_cwd_connection_ids
+        .clone_from(&live.ui_file_explorer_auto_sync_cwd_connection_ids);
+    settings
+        .ui_file_explorer_favorite_dirs_by_connection_id
+        .clone_from(&live.ui_file_explorer_favorite_dirs_by_connection_id);
+    settings
+        .ui_file_manager
+        .open
+        .clone_from(&live.ui_file_manager.open);
+    settings
+        .ui_file_manager
+        .left
+        .clone_from(&live.ui_file_manager.left);
+    settings
+        .ui_file_manager
+        .right
+        .clone_from(&live.ui_file_manager.right);
+    settings
+        .ui_file_manager
+        .split_percent
+        .clone_from(&live.ui_file_manager.split_percent);
+    settings
+        .ui_file_manager
+        .active_pane
+        .clone_from(&live.ui_file_manager.active_pane);
+    settings
+        .ui_file_manager
+        .queue_expanded
+        .clone_from(&live.ui_file_manager.queue_expanded);
+    settings
+        .ui_file_manager
+        .queue_height
+        .clone_from(&live.ui_file_manager.queue_height);
+    settings
+        .ui_file_manager
+        .left_view
+        .clone_from(&live.ui_file_manager.left_view);
+    settings
+        .ui_file_manager
+        .right_view
+        .clone_from(&live.ui_file_manager.right_view);
+    settings
+        .ui_left_panel_width
+        .clone_from(&live.ui_left_panel_width);
+    settings
+        .ui_right_panel_width
+        .clone_from(&live.ui_right_panel_width);
+    settings
+        .ui_transfer_height
+        .clone_from(&live.ui_transfer_height);
+    settings
+        .ui_quick_cmd_height
+        .clone_from(&live.ui_quick_cmd_height);
+    settings
+        .ui_quick_cmd_visible
+        .clone_from(&live.ui_quick_cmd_visible);
+    settings
+        .ui_serial_send_height
+        .clone_from(&live.ui_serial_send_height);
+    settings
+        .ui_serial_send_clear_after_send
+        .clone_from(&live.ui_serial_send_clear_after_send);
+    settings
+        .ui_serial_send_visible
+        .clone_from(&live.ui_serial_send_visible);
+    settings
+        .ui_active_left_panel
+        .clone_from(&live.ui_active_left_panel);
+    settings
+        .ui_active_right_panel
+        .clone_from(&live.ui_active_right_panel);
+    settings
+        .ui_left_panel_collapsed
+        .clone_from(&live.ui_left_panel_collapsed);
+    settings
+        .ui_right_panel_collapsed
+        .clone_from(&live.ui_right_panel_collapsed);
+    settings
+        .ui_activity_bar_left_top
+        .clone_from(&live.ui_activity_bar_left_top);
+    settings
+        .ui_activity_bar_left_bottom
+        .clone_from(&live.ui_activity_bar_left_bottom);
+    settings
+        .ui_activity_bar_right_top
+        .clone_from(&live.ui_activity_bar_right_top);
+    settings
+        .ui_activity_bar_right_bottom
+        .clone_from(&live.ui_activity_bar_right_bottom);
+    settings
+        .ui_activity_bar_show_labels
+        .clone_from(&live.ui_activity_bar_show_labels);
+    settings
+        .ui_activity_bar_hidden_items
+        .clone_from(&live.ui_activity_bar_hidden_items);
+    settings
+        .ui_panel_multi_open
+        .clone_from(&live.ui_panel_multi_open);
+    settings
+        .ui_panel_open_mode
+        .clone_from(&live.ui_panel_open_mode);
+    settings
+        .ui_left_open_panels
+        .clone_from(&live.ui_left_open_panels);
+    settings
+        .ui_right_open_panels
+        .clone_from(&live.ui_right_open_panels);
+    settings
+        .ui_panel_stack_sizes
+        .clone_from(&live.ui_panel_stack_sizes);
+}
+
 fn drive_validation_key(
     refresh_token: Option<&str>,
     client_id: Option<&str>,
@@ -740,6 +931,69 @@ mod tests {
     }
 
     #[test]
+    fn command_output_highlighting_draft_cancel_and_apply_preserve_committed_preferences() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        let load = |cx: &mut TestAppContext| {
+            app.update(cx, |app, _| {
+                app.store_blocking_client()
+                    .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                        store.load_app_settings_summary()
+                    })
+                    .unwrap()
+                    .ui_highlight_line_roles
+            })
+        };
+        app.update(&mut cx, |app, cx| {
+            let mut keywords = app.settings.keyword_config().clone();
+            keywords.enabled = true;
+            let keywords = app
+                .store_blocking_client()
+                .request_fn(zzclawterm_store::StoreDomain::Settings, move |store| {
+                    store.save_keyword_highlights(&keywords)
+                })
+                .unwrap();
+            app.settings.replace_keyword_config(keywords);
+            assert!(app.settings.summary().ui_highlight_line_roles);
+            app.begin_settings_draft(cx);
+            app.toggle_line_role_highlights(cx);
+            assert!(!app.settings.summary().ui_highlight_line_roles);
+            assert!(app.settings_draft_dirty());
+            app.cancel_settings(cx);
+            assert!(app.settings.summary().ui_highlight_line_roles);
+        });
+        assert!(load(&mut cx));
+        for enabled in [false, true, false] {
+            app.update(&mut cx, |app, cx| {
+                app.begin_settings_draft(cx);
+                app.toggle_line_role_highlights(cx);
+                assert_eq!(app.settings.summary().ui_highlight_line_roles, enabled);
+                assert!(app.settings_draft_dirty());
+            });
+            assert_eq!(load(&mut cx), !enabled);
+            app.update(&mut cx, |app, cx| app.apply_settings_draft(false, cx));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                cx.run_until_parked();
+                if app.read_with(&cx, |app, _| !app.settings_draft_dirty()) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "command-output highlighting save did not finish"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert_eq!(load(&mut cx), enabled);
+            app.update(&mut cx, |app, _| {
+                assert_eq!(app.settings.summary().ui_highlight_line_roles, enabled);
+                assert!(!app.settings_draft_dirty());
+            });
+        }
+    }
+
+    #[test]
     fn terminal_wrapping_draft_cancel_and_save_preserve_committed_preferences() {
         use zzclawterm_core::models::settings::TerminalWrapMode;
         let mut cx = TestAppContext::single();
@@ -780,6 +1034,82 @@ mod tests {
         });
         assert_eq!(saved.terminal_wrap_mode, TerminalWrapMode::None);
         assert!(saved.terminal_show_wrap_markers);
+    }
+
+    #[test]
+    fn provider_draft_cancel_preserves_receipt_and_save_refreshes_it_before_another_sync() {
+        use zzclawterm_core::{CloudSyncSettings, CloudSyncState};
+        use zzclawterm_store::StoreDomain;
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        app.update(&mut cx, |app, cx| {
+            let (settings, state) = app
+                .store_blocking_client()
+                .request_fn(StoreDomain::CloudSync, |store| {
+                    let settings = store.save_cloud_sync_settings(CloudSyncSettings {
+                        provider: "webdav".into(),
+                        protocol_version: 4,
+                        ..Default::default()
+                    })?;
+                    let state = CloudSyncState {
+                        device_id: "stable".into(),
+                        last_synced_payload_hash: Some("previous-provider".into()),
+                        last_synced_content_hash: Some("previous-content".into()),
+                        ..Default::default()
+                    };
+                    store.save_cloud_sync_state(&state)?;
+                    Ok((settings, state))
+                })
+                .unwrap();
+            app.cloud_sync.replace_loaded(settings, state.clone());
+            app.begin_settings_draft(cx);
+            app.cloud_sync.select_provider("github_gist");
+            assert_eq!(app.cloud_sync.state(), &state);
+            app.cancel_settings(cx);
+            assert_eq!(app.cloud_sync.settings().provider, "webdav");
+            assert_eq!(app.cloud_sync.state(), &state);
+        });
+        for (provider, protocol) in [("github_gist", 3), ("webdav", 4)] {
+            app.update(&mut cx, |app, cx| {
+                app.begin_settings_draft(cx);
+                app.cloud_sync.select_provider(provider);
+                app.apply_settings_draft(false, cx);
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                cx.run_until_parked();
+                if app.read_with(&cx, |app, _| {
+                    app.cloud_sync.state().last_synced_payload_hash.is_none()
+                        && !app.settings_draft_dirty()
+                }) {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "provider save did not finish"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            app.update(&mut cx, |app, _| {
+                assert_eq!(app.cloud_sync.settings().provider, provider);
+                assert_eq!(app.cloud_sync.settings().protocol_version, 4);
+                assert_eq!(
+                    crate::features::sync::effective_protocol_version(app.cloud_sync.settings()),
+                    protocol
+                );
+                assert_eq!(app.cloud_sync.state().device_id, "stable");
+                assert!(app.cloud_sync.state().last_synced_payload_hash.is_none());
+                assert!(app.cloud_sync.state().last_synced_content_hash.is_none());
+                let state = app
+                    .store_blocking_client()
+                    .request_fn(StoreDomain::CloudSync, |store| {
+                        store.load_cloud_sync_state()
+                    })
+                    .unwrap();
+                assert_eq!(&state, app.cloud_sync.state());
+            });
+        }
     }
 
     #[test]
@@ -1372,6 +1702,64 @@ mod tests {
     }
 
     #[test]
+    fn completing_host_tool_slots_does_not_mask_concurrent_visibility_or_placement_changes() {
+        for move_left in [false, true] {
+            let mut cx = TestAppContext::single();
+            let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let app = app(&mut cx);
+            let (store, mut external) = cx.update_entity(&app, |app, cx| {
+                app.begin_settings_draft(cx);
+                app.apply_interaction_word_separators("fixture changed separators".into(), cx);
+                (
+                    app.store_blocking_client().clone(),
+                    app.settings.summary().clone(),
+                )
+            });
+            if move_left {
+                external
+                    .ui_activity_bar_right_top
+                    .retain(|id| id != "portsManager");
+                external
+                    .ui_activity_bar_left_top
+                    .push("portsManager".into());
+            } else {
+                external
+                    .ui_activity_bar_hidden_items
+                    .retain(|id| id != "portsManager");
+            }
+            let original_separators = store
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    store.load_app_settings_summary()
+                })
+                .unwrap()
+                .interaction_word_separators;
+            let expected = external.clone();
+            store
+                .request_fn(zzclawterm_store::StoreDomain::Settings, move |store| {
+                    store.save_ui_layout_settings(&external)
+                })
+                .unwrap();
+            cx.update_entity(&app, |app, cx| app.apply_settings_draft(false, cx));
+            cx.run_until_parked();
+            let saved = store
+                .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+                    store.load_app_settings_summary()
+                })
+                .unwrap();
+            assert_eq!(saved.interaction_word_separators, original_separators);
+            assert_eq!(
+                saved.ui_activity_bar_left_top,
+                expected.ui_activity_bar_left_top
+            );
+            assert_eq!(
+                saved.ui_activity_bar_hidden_items,
+                expected.ui_activity_bar_hidden_items
+            );
+            cx.update_entity(&app, |app, _| assert!(app.shell.has_settings_draft()));
+        }
+    }
+
+    #[test]
     fn stale_draft_cannot_overwrite_settings_saved_by_another_window() {
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -1426,6 +1814,75 @@ mod tests {
         });
         assert!(saved.enabled);
         assert_eq!(stored_header_status(&app, &mut cx).0, "host");
+    }
+
+    #[test]
+    fn cloud_sync_without_a_master_password_can_be_disabled_and_reenabled_after_recovery() {
+        for same_draft in [false, true] {
+            let mut cx = TestAppContext::single();
+            let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let app = app(&mut cx);
+            app.update(&mut cx, |app, cx| {
+                let cloud = app
+                    .store_blocking_client()
+                    .request_fn(zzclawterm_store::StoreDomain::CloudSync, |store| {
+                        let mut cloud = zzclawterm_core::CloudSyncSettings {
+                            enabled: true,
+                            ..Default::default()
+                        };
+                        cloud.webdav.endpoint = "https://dav.example.invalid".into();
+                        store.save_cloud_sync_settings(cloud)
+                    })
+                    .unwrap();
+                app.cloud_sync.replace_loaded(cloud, Default::default());
+                assert!(!app.settings.summary().has_master_password);
+                assert!(!app.cloud_sync_form_enabled());
+                app.begin_settings_draft(cx);
+                assert!(app.pending_settings_validation_error().is_some());
+                app.toggle_cloud_sync_enabled(cx);
+                assert!(!app.cloud_sync.settings().enabled);
+                assert!(app.pending_settings_validation_error().is_none());
+
+                // Cancelling a recovery draft must leave the committed settings intact.
+                app.cancel_settings(cx);
+                assert!(app.cloud_sync.settings().enabled);
+                assert!(!app.settings.master_password().enabled);
+                app.begin_settings_draft(cx);
+                app.toggle_cloud_sync_enabled(cx);
+                // The enable guard must still reject a missing password.
+                app.toggle_cloud_sync_enabled(cx);
+                assert!(!app.cloud_sync.settings().enabled);
+                if same_draft {
+                    app.toggle_settings_master_password(cx);
+                    app.apply_settings_master_password("fixture-recovery-password".into(), cx);
+                }
+                app.apply_settings_draft(false, cx);
+            });
+            finish_settings_apply(&app, &mut cx);
+            let (settings, cloud) = stored_settings_and_cloud(&app, &mut cx);
+            assert!(!cloud.enabled);
+            assert_eq!(settings.has_master_password, same_draft);
+            if !same_draft {
+                app.update(&mut cx, |app, cx| {
+                    app.toggle_settings_master_password(cx);
+                    app.apply_settings_master_password("fixture-recovery-password".into(), cx);
+                    app.apply_settings_draft(false, cx);
+                });
+                finish_settings_apply(&app, &mut cx);
+            }
+            app.update(&mut cx, |app, cx| {
+                assert!(app.settings.summary().has_master_password);
+                assert!(app.cloud_sync_form_enabled());
+                app.toggle_cloud_sync_enabled(cx);
+                assert!(app.cloud_sync.settings().enabled);
+                app.confirm_settings_draft(cx);
+            });
+            finish_settings_apply(&app, &mut cx);
+            let (settings, cloud) = stored_settings_and_cloud(&app, &mut cx);
+            assert!(settings.has_master_password);
+            assert!(cloud.enabled);
+            assert_eq!(cloud.webdav.endpoint, "https://dav.example.invalid");
+        }
     }
 
     #[test]
@@ -2347,5 +2804,94 @@ mod tests {
                 "refreshing must not silently drop the user's edit"
             );
         });
+    }
+
+    /// Opening another panel must not make an untouched settings draft dirty.
+    ///
+    /// Navigation writes the active panel, its collapse state, the open-panel
+    /// stack and the dock sizes into the live summary through `persist_ui_layout`.
+    /// A draft compares against the clone taken when it opened, so a wholesale
+    /// comparison treats that navigation as an unsaved setting edit and the tab
+    /// close starts asking to discard changes.
+    #[test]
+    fn switching_panels_leaves_an_untouched_settings_draft_clean() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        cx.update_entity(&app, |app, cx| {
+            app.begin_settings_draft(cx);
+            assert!(!app.settings_draft_dirty());
+
+            app.open_page(crate::models::NavItem::Connections, cx);
+            assert!(
+                !app.settings_draft_dirty(),
+                "opening the saved-connections panel must not dirty the draft"
+            );
+
+            app.open_page(crate::models::NavItem::Notes, cx);
+            assert!(
+                !app.settings_draft_dirty(),
+                "switching panels must not dirty the draft"
+            );
+
+            // The guard has to stay able to see real edits, or a permanently
+            // clean draft would pass the assertions above.
+            app.set_transfer_internal_editor_font_size(19, cx);
+            assert!(
+                app.settings_draft_dirty(),
+                "a real settings edit must still mark the draft dirty"
+            );
+        });
+    }
+    #[test]
+    fn cancelling_settings_restores_real_edits_and_preserves_live_navigation() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app(&mut cx);
+        cx.update_entity(&app, |app, cx| {
+            let original_font = app.settings.summary().transfer_internal_editor_font_size;
+            app.begin_settings_draft(cx);
+            app.open_page(crate::models::NavItem::Notes, cx);
+            let live = app.settings.summary().clone();
+            app.set_transfer_internal_editor_font_size(19, cx);
+            assert!(app.settings_draft_dirty());
+            app.cancel_settings(cx);
+            assert_eq!(
+                app.settings.summary().transfer_internal_editor_font_size,
+                original_font
+            );
+            assert_eq!(
+                app.settings.summary().ui_active_left_panel,
+                live.ui_active_left_panel
+            );
+            assert_eq!(
+                app.settings.summary().ui_left_open_panels,
+                live.ui_left_open_panels
+            );
+            assert_eq!(
+                app.settings.summary().ui_left_panel_width,
+                live.ui_left_panel_width
+            );
+        });
+    }
+
+    #[test]
+    fn header_and_file_manager_preferences_still_dirty_the_whole_settings_comparison() {
+        let baseline = zzclawterm_core::AppSettingsSummary::default();
+        for field in 0..4 {
+            let mut edited = baseline.clone();
+            match field {
+                0 => edited.ui_header_status_visible = !edited.ui_header_status_visible,
+                1 => edited.ui_highlight_line_roles = !edited.ui_highlight_line_roles,
+                2 => {
+                    edited.ui_file_manager.auto_collapse_sidebar =
+                        !edited.ui_file_manager.auto_collapse_sidebar
+                }
+                _ => {
+                    edited.ui_file_manager.remember_layout = !edited.ui_file_manager.remember_layout
+                }
+            }
+            assert!(!super::settings_draft_matches(&baseline, &edited));
+        }
     }
 }

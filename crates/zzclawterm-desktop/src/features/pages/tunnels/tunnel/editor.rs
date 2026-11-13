@@ -1,11 +1,13 @@
 use rust_i18n::t;
 
+use std::collections::HashSet;
+
 use gpui::prelude::*;
 use gpui::{App, ClickEvent, Context, FontWeight, IntoElement, SharedString, Window, div, px, rgb};
 
 use crate::features::{ZzClawTermApp, selects::NO_SELECTION_VALUE, text_inputs::TextInputSetup};
 use crate::models::{NetworkTunnelEditorField, NetworkTunnelEditorState};
-use zzclawterm_core::ConnectionType;
+use zzclawterm_core::{ConnectionType, Group, SavedConnection};
 use zzclawterm_ui::{ZzClawNumberInputOptions, ZzClawSelectOption};
 
 pub(in crate::features::pages::tunnels) fn network_tunnel_editor_content(
@@ -44,15 +46,10 @@ pub(in crate::features::pages::tunnels) fn network_tunnel_editor_content(
         NO_SELECTION_VALUE,
         t!("network.connectionPickerPlaceholder"),
     )];
-    connection_options.extend(
-        app.connection_state
-            .connections()
-            .iter()
-            .filter(|connection| matches!(&connection.config, ConnectionType::Ssh { .. }))
-            .map(|connection| {
-                ZzClawSelectOption::new(connection.id.clone(), connection.name.clone())
-            }),
-    );
+    connection_options.extend(ssh_connection_select_options(
+        app.connection_state.connections(),
+        app.connection_state.groups(),
+    ));
     let selected_connection = editor
         .connection_id
         .clone()
@@ -138,13 +135,14 @@ pub(in crate::features::pages::tunnels) fn network_tunnel_editor_content(
                     cx,
                 ))),
         )
-        .child(tunnel_editor_selector(
+        .child(tunnel_editor_selector_with_search(
             app,
             palette,
             "network-tunnel-editor-connection",
             t!("network.selectedConnection"),
             connection_options,
             selected_connection,
+            Some(t!("network.searchConnections").into()),
             cx,
         ))
         .child(
@@ -293,6 +291,23 @@ pub(in crate::features::pages::tunnels) fn tunnel_editor_selector<I>(
 where
     I: Into<String>,
 {
+    tunnel_editor_selector_with_search(app, palette, id, label, options, selected_value, None, cx)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tunnel_editor_selector_with_search<I>(
+    app: &mut ZzClawTermApp,
+    palette: crate::theme::ThemePalette,
+    id: I,
+    label: impl Into<SharedString>,
+    options: Vec<ZzClawSelectOption>,
+    selected_value: String,
+    search_placeholder: Option<SharedString>,
+    cx: &mut Context<ZzClawTermApp>,
+) -> impl IntoElement
+where
+    I: Into<String>,
+{
     let label: SharedString = label.into();
     div()
         .min_w_0()
@@ -305,7 +320,76 @@ where
                 .text_color(rgb(palette.text_muted))
                 .child(label),
         )
-        .child(app.form_select_control(id.into(), options, Some(selected_value), false, cx))
+        .child(app.form_select_control_with_search(
+            id.into(),
+            options,
+            Some(selected_value),
+            false,
+            search_placeholder,
+            cx,
+        ))
+}
+
+fn ssh_connection_select_options(
+    connections: &[SavedConnection],
+    groups: &[Group],
+) -> Vec<ZzClawSelectOption> {
+    connections
+        .iter()
+        .filter_map(|connection| {
+            let ConnectionType::Ssh {
+                host,
+                port,
+                username,
+                ..
+            } = &connection.config
+            else {
+                return None;
+            };
+            let group_path = connection
+                .group_id
+                .as_deref()
+                .and_then(|id| connection_group_path_label(groups, id))
+                .unwrap_or_default();
+            let host_port = format!("{host}:{port}");
+            let subtitle = [group_path.as_str(), host_port.as_str(), username.as_str()]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let search_text = [
+                connection.name.as_str(),
+                host.as_str(),
+                username.as_str(),
+                group_path.as_str(),
+            ]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+            Some(
+                ZzClawSelectOption::new(connection.id.clone(), connection.name.clone())
+                    .search_text(search_text)
+                    .subtitle(subtitle),
+            )
+        })
+        .collect()
+}
+
+fn connection_group_path_label(groups: &[Group], group_id: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut next = Some(group_id);
+    let mut seen = HashSet::new();
+    while let Some(id) = next {
+        if !seen.insert(id.to_string()) {
+            break;
+        }
+        let group = groups.iter().find(|group| group.id == id)?;
+        parts.push(group.name.clone());
+        next = group.parent_id.as_deref();
+    }
+    parts.reverse();
+    Some(parts.join(" / "))
 }
 
 pub(in crate::features::pages::tunnels) fn tunnel_editor_option(
@@ -392,5 +476,101 @@ pub(super) fn tunnel_editor_preview(editor: &NetworkTunnelEditorState) -> String
         format!("remote {bind_host}:{listen_port} -> {target_host}:{target_port}")
     } else {
         format!("local {bind_host}:{listen_port} -> {target_host}:{target_port}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use zzclawterm_core::{ConnectionType, Group, SavedConnection};
+    use zzclawterm_ui::ZzClawSelectOption;
+
+    use super::ssh_connection_select_options;
+
+    fn connection(id: &str, name: &str) -> SavedConnection {
+        SavedConnection {
+            id: id.into(),
+            name: name.into(),
+            config: ConnectionType::LocalTerminal {
+                shell_path: String::new(),
+                shell_args: String::new(),
+                working_dir: None,
+                ai_execution_profile: Default::default(),
+                encoding: String::new(),
+                dynamic_tab_title: false,
+            },
+            group_id: None,
+            description: None,
+            tags: Vec::new(),
+            sort_order: 0,
+            icon: None,
+            icon_auto_detect: None,
+            auth: None,
+            network: None,
+            post_login: None,
+            recording: None,
+            ssh_algorithms: None,
+            ssh_compatibility_mode: false,
+            ssh_profile: Default::default(),
+            terminal_type: None,
+            sftp: Default::default(),
+            asset: None,
+            created_at_ms: None,
+            updated_at_ms: None,
+            last_used_at_ms: None,
+            extensions: Default::default(),
+        }
+    }
+
+    #[test]
+    fn ssh_connection_options_index_name_host_user_and_group_path() {
+        let groups = vec![
+            Group {
+                id: "parent".to_string(),
+                name: "Branch A".to_string(),
+                parent_id: None,
+                sort_order: 0,
+                created_at_ms: None,
+                updated_at_ms: None,
+            },
+            Group {
+                id: "child".to_string(),
+                name: "Prod".to_string(),
+                parent_id: Some("parent".to_string()),
+                sort_order: 1,
+                created_at_ms: None,
+                updated_at_ms: None,
+            },
+        ];
+        let connections = vec![
+            SavedConnection {
+                id: "ssh-1".to_string(),
+                name: "Jump Gateway".to_string(),
+                group_id: Some("child".to_string()),
+                config: ConnectionType::Ssh {
+                    host: "10.0.1.10".to_string(),
+                    port: 2222,
+                    username: "devops".to_string(),
+                    backspace_mode: String::new(),
+                    ai_execution_profile: Default::default(),
+                    x11_forwarding: false,
+                    auth_agent_endpoint: None,
+                    agent_forwarding_config: None,
+                    legacy_agent_forwarding: None,
+                    encoding: String::new(),
+                    dynamic_tab_title: false,
+                },
+                ..connection("ssh-1", "Jump Gateway")
+            },
+            connection("local-1", "Local Shell"),
+        ];
+
+        assert_eq!(
+            ssh_connection_select_options(&connections, &groups),
+            vec![
+                ZzClawSelectOption::new("ssh-1", "Jump Gateway")
+                    .search_text("Jump Gateway 10.0.1.10 devops Branch A / Prod")
+                    .subtitle("Branch A / Prod · 10.0.1.10:2222 · devops"),
+            ]
+        );
     }
 }

@@ -9,7 +9,7 @@ use zzclawterm_core::{
     CredentialPromptKind, SavedCredential, compile_prompt_regex, get_credential_prompt_pattern,
 };
 
-use crate::action_links::ActionLinkTarget;
+use crate::action_links::{ActionLinkAction, ActionLinkTarget};
 
 use super::event_wake::{ANY_INTEREST, EventWake};
 
@@ -23,6 +23,7 @@ pub(crate) enum ConnectionKindTab {
     Serial,
     Rdp,
     Vnc,
+    Adb,
 }
 
 impl ConnectionKindTab {
@@ -34,6 +35,7 @@ impl ConnectionKindTab {
             Self::Serial => "Serial",
             Self::Rdp => "RDP",
             Self::Vnc => "VNC",
+            Self::Adb => "Android (ADB)",
         }
     }
 
@@ -45,6 +47,7 @@ impl ConnectionKindTab {
             zzclawterm_core::ConnectionType::Serial { .. } => Self::Serial,
             zzclawterm_core::ConnectionType::Rdp { .. } => Self::Rdp,
             zzclawterm_core::ConnectionType::Vnc { .. } => Self::Vnc,
+            zzclawterm_core::ConnectionType::Adb { .. } => Self::Adb,
         }
     }
 }
@@ -53,6 +56,7 @@ impl ConnectionKindTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ConnectionEditorSection {
     Basic,
+    AndroidScreen,
     Network,
     Terminal,
     Sftp,
@@ -70,6 +74,7 @@ pub(crate) enum ConnectionEditorSection {
 impl ConnectionEditorSection {
     pub(crate) fn for_kind(kind: ConnectionKindTab) -> &'static [Self] {
         match kind {
+            ConnectionKindTab::Adb => &[Self::Basic, Self::AndroidScreen],
             ConnectionKindTab::Ssh => &[
                 Self::Basic,
                 Self::Network,
@@ -81,6 +86,7 @@ impl ConnectionEditorSection {
             ],
             ConnectionKindTab::Telnet => &[
                 Self::Basic,
+                Self::Network,
                 Self::AutoLogin,
                 Self::Terminal,
                 Self::Compatibility,
@@ -100,6 +106,7 @@ impl ConnectionEditorSection {
     pub(crate) fn id(self) -> &'static str {
         match self {
             Self::Basic => "basic",
+            Self::AndroidScreen => "androidScreen",
             Self::Network => "network",
             Self::Terminal => "terminal",
             Self::Sftp => "sftp",
@@ -118,6 +125,7 @@ impl ConnectionEditorSection {
     pub(crate) fn label(self) -> std::borrow::Cow<'static, str> {
         match self {
             Self::Basic => t!("dialog.editorSections.basic"),
+            Self::AndroidScreen => t!("android.screenSettings"),
             Self::Network => t!("dialog.editorSections.network"),
             Self::Terminal => t!("dialog.editorSections.terminal"),
             Self::Sftp => t!("dialog.editorSections.sftp"),
@@ -222,6 +230,9 @@ pub(crate) enum ConnectionEditorField {
     ShellPath,
     ShellArgs,
     WorkingDir,
+    AndroidMaxSize,
+    AndroidFps,
+    AndroidBitRate,
     SerialPort,
     BaudRate,
     PostLoginCommand,
@@ -254,6 +265,9 @@ pub(crate) enum ConnectionEditorFocusTarget {
 impl ConnectionEditorField {
     pub(crate) fn section(self) -> ConnectionEditorSection {
         match self {
+            Self::AndroidMaxSize | Self::AndroidFps | Self::AndroidBitRate => {
+                ConnectionEditorSection::AndroidScreen
+            }
             Self::Name
             | Self::NewTag
             | Self::NewGroupName
@@ -291,6 +305,8 @@ impl ConnectionEditorField {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ConnectionEditorState {
+    pub(crate) android_usb: bool,
+    pub(crate) android_screen: zzclawterm_core::models::android::AndroidScreenSettings,
     pub(crate) id: Option<String>,
     pub(crate) kind: ConnectionKindTab,
     pub(crate) section: ConnectionEditorSection,
@@ -353,6 +369,7 @@ pub(crate) struct ConnectionEditorState {
     pub(crate) agent_preview_loading: bool,
     pub(crate) backspace_mode: String,
     pub(crate) encoding: String,
+    pub(crate) ssh_compatibility_mode: bool,
     pub(crate) ssh_profile: zzclawterm_core::SshProfile,
     pub(crate) terminal_type: Option<zzclawterm_core::SshTerminalType>,
     pub(crate) sftp_enabled: bool,
@@ -537,10 +554,7 @@ pub(crate) struct ActionLinkTooltipState {
     pub(crate) session_id: String,
     pub(crate) x: Pixels,
     pub(crate) y: Pixels,
-    pub(crate) kind_label: String,
-    pub(crate) value: String,
-    pub(crate) default_action_label: String,
-    pub(crate) default_action_preview: String,
+    pub(crate) default_action: ActionLinkAction,
     pub(crate) has_more_actions: bool,
     /// Identity key for hover stability (session|kind|value|start|end).
     pub(crate) match_key: String,
@@ -566,6 +580,8 @@ pub(crate) struct CommandSuggestionItem {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CommandSuggestionState {
+    /// Previous results may stay visible during typing, but cannot be accepted.
+    pub(crate) refreshing: bool,
     pub(crate) mode: zzclawterm_core::completion::types::CompletionMode,
     pub(crate) completion_revision: u64,
     pub(crate) scope: Option<zzclawterm_core::completion::types::CompletionScope>,
@@ -578,6 +594,20 @@ pub(crate) struct CommandSuggestionState {
     /// Visible viewport row, including the presentation shift for cleared rows.
     pub(crate) cursor_row: usize,
     pub(crate) cursor_col: usize,
+}
+
+impl CommandSuggestionState {
+    pub(crate) fn begin_input_refresh(&mut self, text: &str) -> bool {
+        let ordinary_edit = (!text.is_empty() && text.chars().all(|ch| !ch.is_control()))
+            || matches!(text, "\u{7f}" | "\u{8}" | "\u{1b}[3~");
+        let changed =
+            self.refreshing != ordinary_edit || (ordinary_edit && self.selected_index.is_some());
+        self.refreshing = ordinary_edit;
+        if ordinary_edit {
+            self.selected_index = None;
+        }
+        changed
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

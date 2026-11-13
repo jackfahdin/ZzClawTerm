@@ -6,27 +6,39 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, canvas, deferred, div,
-    prelude::FluentBuilder as _, px, rgb, svg,
+    AnyElement, App, Bounds, ClickEvent, Context, InteractiveElement as _, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Pixels, Point, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, canvas, deferred, div, point,
+    prelude::FluentBuilder as _, px, rgb, size, svg,
 };
 use zzclawterm_core::truncate_preview;
 
-use crate::features::{ZzClawTermApp, view_widgets::panel_header_with_actions};
+use crate::features::ZzClawTermApp;
+use crate::features::pages::remote::HostToolKind;
+use crate::features::view_widgets::{
+    conversation_panel_header_with_actions, panel_header_with_actions,
+};
 use crate::models::{
     ActivityBarZone, NavItem, NetworkTab, PanelOpenMode, PanelSide, RightFocus, SecurityAuthTab,
     SettingsTab,
 };
 use crate::theme::ThemePalette;
-use zzclawterm_ui::ZzClawTooltip;
+use zzclawterm_ui::{
+    ZzClawButton, ZzClawButtonVariant, ZzClawDialogWindowExt as _, ZzClawTooltip,
+    nya_popup_is_active,
+};
 
-use super::state::PANEL_STACK_MIN_HEIGHT;
+use super::state::{FloatingPressSource, PANEL_STACK_MIN_HEIGHT};
 
 type PanelStackMeasurements = Rc<RefCell<Vec<(String, f32)>>>;
 
 const EXCLUSIVE_PANEL_IDS: &[&str] = &["aiAssistant"];
 const NON_PANEL_IDS: &[&str] = &["settings", "lock", "quickCmdBar", "serialSend"];
+
+/// Fixed chrome sizes the floating containers are positioned against: the
+/// title bar sits above the workspace surface, and the activity rail is inset.
+const FLOATING_PANEL_TITLE_BAR_HEIGHT: f32 = 40.;
+const FLOATING_PANEL_ACTIVITY_BAR_WIDTH: f32 = 40.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SidePanelStackRenderMode {
@@ -135,6 +147,7 @@ impl ZzClawTermApp {
         });
         self.persist_ui_layout();
         self.transfer_browser_visibility_changed(browser_was_visible, cx);
+        self.sync_host_tools(cx);
         cx.notify();
     }
 
@@ -167,6 +180,7 @@ impl ZzClawTermApp {
         });
         self.persist_ui_layout();
         self.transfer_browser_visibility_changed(browser_was_visible, cx);
+        self.sync_host_tools(cx);
         cx.notify();
     }
 
@@ -185,6 +199,7 @@ impl ZzClawTermApp {
             format!("{} floating panel closed", item.persistence_id())
         });
         self.transfer_browser_visibility_changed(browser_was_visible, cx);
+        self.sync_host_tools(cx);
         cx.notify();
     }
 
@@ -197,6 +212,7 @@ impl ZzClawTermApp {
         if self.shell.panels.floating_panel(side).is_some() {
             self.shell.panels.set_floating_panel(side, None);
             self.transfer_browser_visibility_changed(browser_was_visible, cx);
+            self.sync_host_tools(cx);
             cx.notify();
         }
     }
@@ -210,6 +226,212 @@ impl ZzClawTermApp {
         };
         self.close_floating_panel(side, cx);
         true
+    }
+
+    /// Window-coordinate rectangle of an open floating overlay.
+    ///
+    /// Derived from the same fixed offsets the render code uses
+    /// (`top_0/left(px(40.))` inside the surface that starts below the 40px
+    /// title bar), so the input path never reads layout.
+    fn floating_panel_window_bounds(&self, side: PanelSide) -> Option<Bounds<Pixels>> {
+        if !self.shell.panel_is_floating() {
+            return None;
+        }
+        self.shell.panels.floating_panel(side)?;
+        let (viewport_width, viewport_height) = self.shell.viewport_size();
+        if viewport_width <= 0. || viewport_height <= 0. {
+            return None;
+        }
+        let panel_width = match side {
+            PanelSide::Left => self.shell.left_panel_width(),
+            PanelSide::Right => self.shell.right_panel_width(),
+        };
+        let left = match side {
+            PanelSide::Left => FLOATING_PANEL_ACTIVITY_BAR_WIDTH,
+            PanelSide::Right => viewport_width - FLOATING_PANEL_ACTIVITY_BAR_WIDTH - panel_width,
+        };
+        let height = (viewport_height - FLOATING_PANEL_TITLE_BAR_HEIGHT).max(0.);
+        Some(Bounds::new(
+            point(px(left), px(FLOATING_PANEL_TITLE_BAR_HEIGHT)),
+            size(px(panel_width), px(height)),
+        ))
+    }
+
+    fn position_inside_floating_panel(&self, position: Point<Pixels>) -> bool {
+        [PanelSide::Left, PanelSide::Right]
+            .into_iter()
+            .filter_map(|side| self.floating_panel_window_bounds(side))
+            .any(|bounds| bounds.contains(&position))
+    }
+
+    /// Popups get the first dismissal click, including menus painted beyond
+    /// the panel bounds. Read their existing owners before mouse-down can
+    /// dismiss them or move focus back to the workspace.
+    pub(in crate::features) fn floating_panel_dismissal_is_blocked(
+        &self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        window.has_active_prompt()
+            || window.has_active_nya_dialog(cx)
+            || nya_popup_is_active(window, cx)
+            || self.ai.transient_menus_are_open()
+            || self.remote_ops.docker_menus_open()
+            || self.shell.open_tabs_menu_is_open()
+            || self.shell.new_session_menu_is_open()
+            || self.shell.header_status_menu_is_open()
+            || self.shell.activity_bar_context_menu().is_some()
+            || self.session.dialog_tab_actions_target().is_some()
+            || self.session.dialog_color_picker_is_open()
+            || self.terminal.overlay_visibility().action_link_menu
+            || self.transfer.transfer_job_menu().is_some()
+            || self.transfer.browser_view().favorites_menu.is_some()
+            || self.transfer.browser_view().path_menu.is_some()
+            || self.transfer.browser_view().upload_menu.is_some()
+    }
+
+    pub(in crate::features) fn capture_floating_panel_press(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.button != MouseButton::Left {
+            self.shell.panels.clear_floating_outside_press();
+            return;
+        }
+        // Native observation precedes capture even for ordinary GPUI targets.
+        // Reuse its decision made before menus were dismissed.
+        if !self.shell.panels.handoff_native_floating_press() {
+            self.begin_floating_panel_press(event.position, FloatingPressSource::Gpui, window, cx);
+        }
+    }
+
+    fn begin_floating_panel_press(
+        &mut self,
+        position: Point<Pixels>,
+        source: FloatingPressSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        let eligible = !self.floating_panel_dismissal_is_blocked(window, cx)
+            && self.shell.panel_is_floating()
+            && !self.position_inside_floating_panel(position)
+            && [PanelSide::Left, PanelSide::Right]
+                .into_iter()
+                .any(|side| self.floating_panel_window_bounds(side).is_some());
+        self.shell
+            .panels
+            .begin_floating_press(position, eligible, source)
+    }
+
+    /// A native child sends no release. If GPUI capture takes over this press,
+    /// only its release may complete the gesture instead.
+    pub(in crate::features) fn defer_native_floating_panel_outside_press(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.begin_floating_panel_press(
+            position,
+            FloatingPressSource::NativePending,
+            window,
+            cx,
+        );
+        let app = cx.entity().downgrade();
+        window.defer(cx, move |window, cx| {
+            let _ = app.update(cx, |this, cx| {
+                this.finish_floating_panel_outside_click(
+                    id,
+                    FloatingPressSource::NativePending,
+                    position,
+                    window,
+                    cx,
+                );
+            });
+        });
+    }
+
+    /// Terminal pointer handlers can stop bubbling before the root's menu
+    /// dismissal runs. Preserve popup priority while closing AI's own menus
+    /// from their own outside handlers, using the menu's bounds rather than
+    /// the panel's. Component popups and dialogs handle their own dismissal.
+    pub(in crate::features) fn dismiss_floating_ai_menu_on_outside_press(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.shell.panel_is_floating()
+            || !self.ai.transient_menus_are_open()
+            || window.has_active_prompt()
+            || window.has_active_nya_dialog(cx)
+            || nya_popup_is_active(window, cx)
+        {
+            return;
+        }
+        self.shell.panels.clear_floating_outside_press();
+        if self.ai.history_is_open() {
+            self.close_ai_history(window, cx);
+        }
+        self.ai.close_transient_menus();
+        self.defer_ai_panel_snapshot_flush(cx);
+        cx.notify();
+    }
+
+    /// Capture runs before the activity icon's click. Defer until that click
+    /// has invalidated the press if it opened, closed or replaced a panel.
+    pub(in crate::features) fn defer_floating_panel_outside_click(
+        &mut self,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.shell.panels.floating_press_id() else {
+            return;
+        };
+        let app = cx.entity().downgrade();
+        window.defer(cx, move |window, cx| {
+            let _ = app.update(cx, |this, cx| {
+                this.finish_floating_panel_outside_click(
+                    id,
+                    FloatingPressSource::Gpui,
+                    position,
+                    window,
+                    cx,
+                );
+            });
+        });
+    }
+
+    fn finish_floating_panel_outside_click(
+        &mut self,
+        id: u64,
+        source: FloatingPressSource,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(press) = self.shell.panels.take_floating_outside_press(id, source) else {
+            return;
+        };
+        if self.floating_panel_dismissal_is_blocked(window, cx)
+            || !self.shell.panel_is_floating()
+            || press.panels
+                != [
+                    self.shell.panels.floating_left,
+                    self.shell.panels.floating_right,
+                ]
+            || self.position_inside_floating_panel(position)
+            || !press.is_click_at(position)
+        {
+            return;
+        }
+        let browser_was_visible = self.transfer_browser_is_visible();
+        self.shell.panels.clear_floating();
+        self.transfer_browser_visibility_changed(browser_was_visible, cx);
+        self.sync_host_tools(cx);
+        cx.notify();
     }
 
     pub(in crate::features) fn side_open_panel_ids(&self, side: PanelSide) -> Vec<String> {
@@ -407,6 +629,7 @@ impl ZzClawTermApp {
             }
             self.persist_ui_layout();
             self.transfer_browser_visibility_changed(browser_was_visible, cx);
+            self.sync_host_tools(cx);
             cx.notify();
             return;
         }
@@ -440,6 +663,7 @@ impl ZzClawTermApp {
             self.shell.set_status(format!("{} focused", item.label()));
             self.persist_ui_layout();
             self.transfer_browser_visibility_changed(browser_was_visible, cx);
+            self.sync_host_tools(cx);
             cx.notify();
             return;
         }
@@ -487,6 +711,7 @@ impl ZzClawTermApp {
         }
         self.persist_ui_layout();
         self.transfer_browser_visibility_changed(browser_was_visible, cx);
+        self.sync_host_tools(cx);
         cx.notify();
         // Publish the new panel visibility and browser state.
         self.flush_transfer_panel_snapshot(cx);
@@ -541,6 +766,7 @@ impl ZzClawTermApp {
             None => {}
         }
         self.transfer_browser_visibility_changed(browser_was_visible, cx);
+        self.sync_host_tools(cx);
     }
 
     pub(in crate::features) fn start_panel_stack_resize(
@@ -694,13 +920,7 @@ impl ZzClawTermApp {
                         .flex_col()
                         .overflow_hidden()
                         .child(measurement)
-                        .child(panel_header_with_actions(
-                            title,
-                            meta,
-                            palette,
-                            self.shell_transparent_color(palette.section_header),
-                            actions,
-                        ))
+                        .child(self.side_panel_header(panel, title, meta, palette, actions))
                         .child(div().flex_1().min_h_0().overflow_hidden().child(body)),
                 );
                 if index + 1 < count {
@@ -755,14 +975,30 @@ impl ZzClawTermApp {
             .size_full()
             .flex()
             .flex_col()
-            .child(panel_header_with_actions(
-                title,
-                meta,
-                palette,
-                self.shell_transparent_color(palette.section_header),
-                actions,
-            ))
+            .child(self.side_panel_header(panel, title, meta, palette, actions))
             .child(div().flex_1().min_h_0().overflow_hidden().child(body))
+    }
+
+    fn side_panel_header(
+        &self,
+        panel: NavItem,
+        title: impl Into<SharedString>,
+        meta: SharedString,
+        palette: ThemePalette,
+        actions: Option<AnyElement>,
+    ) -> AnyElement {
+        let background = self.shell_transparent_color(palette.section_header);
+        if panel == NavItem::AiAssistant {
+            conversation_panel_header_with_actions(
+                self.ai_header_presentation().conversation_title,
+                palette,
+                background,
+                actions,
+            )
+            .into_any_element()
+        } else {
+            panel_header_with_actions(title, meta, palette, background, actions).into_any_element()
+        }
     }
 
     fn side_panel_content(
@@ -800,13 +1036,14 @@ impl ZzClawTermApp {
     fn side_panel_meta(&self, _side: PanelSide, panel: NavItem) -> SharedString {
         match panel {
             NavItem::Connections => SharedString::from(""),
-            NavItem::AiAssistant => SharedString::from(self.ai_header_presentation().mode_label),
+            NavItem::AiAssistant => SharedString::from(""),
             NavItem::ActiveSessions => SharedString::from(""),
             NavItem::Transfers => SharedString::from(""),
             NavItem::Processes => self
                 .session
-                .active_ssh_config()
-                .and_then(|_| self.remote_ops.loaded_process_count())
+                .active_has_inspectable_host()
+                .then(|| self.remote_ops.loaded_process_count())
+                .flatten()
                 .map(|count| SharedString::from(count.to_string()))
                 .unwrap_or_else(|| SharedString::from("")),
             NavItem::GpuMonitor => self
@@ -840,7 +1077,7 @@ impl ZzClawTermApp {
                 })
                 .unwrap_or_else(|| SharedString::from("")),
             NavItem::Docker => {
-                if self.session.active_ssh_config().is_none() {
+                if !self.session.active_has_inspectable_host() {
                     return SharedString::from("");
                 }
                 let Some(version) = self.remote_ops.docker_engine_version() else {
@@ -895,17 +1132,48 @@ impl ZzClawTermApp {
                         && !self.session.is_disconnected(session_id)
                 });
                 can_browse.then(|| {
-                    header_svg_icon_button(
-                        self.theme_palette(),
-                        "transfer-browser-open-file-manager",
-                        "icons/file-manager.svg",
-                        t!("fileManager.openWorkspace"),
-                        true,
-                        cx.listener(|this, _, _, cx| {
-                            this.open_file_manager_tab(None, cx);
-                        }),
-                    )
-                    .into_any_element()
+                    let palette = self.theme_palette();
+                    let sudo = self.session.active_id().and_then(|session| {
+                        let status = self.file_sudo_status(session);
+                        (self.file_sudo_available(session) || status.is_sudo()).then(|| {
+                            let session = session.to_owned();
+                            ZzClawButton::new("transfer-sudo", "")
+                                .icon("icons/shield.svg")
+                                .variant(ZzClawButtonVariant::Ghost)
+                                .small()
+                                .compact()
+                                .height(px(24.))
+                                .text_color(rgb(if status.is_sudo() {
+                                    palette.warning
+                                } else {
+                                    palette.text_muted
+                                }))
+                                .tooltip(crate::features::transfers::privilege_runtime::sudo_label(
+                                    status,
+                                ))
+                                .disabled(status.is_busy())
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.toggle_file_sudo(session.clone(), window, cx);
+                                }))
+                        })
+                    });
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .children(sudo)
+                        .child(header_svg_icon_button(
+                            palette,
+                            "transfer-browser-open-file-manager",
+                            "icons/file-manager.svg",
+                            t!("fileManager.openWorkspace"),
+                            true,
+                            cx.listener(|this, _, _, cx| {
+                                this.open_file_manager_tab(None, cx);
+                            }),
+                        ))
+                        .into_any_element()
                 })
             }
             NavItem::AiAssistant => {
@@ -955,10 +1223,31 @@ impl ZzClawTermApp {
                         .into_any_element(),
                 )
             }
+            NavItem::Ports | NavItem::Services => {
+                let palette = self.theme_palette();
+                let kind = if panel == NavItem::Ports {
+                    HostToolKind::Ports
+                } else {
+                    HostToolKind::Services
+                };
+                Some(
+                    header_svg_icon_button(
+                        palette,
+                        "host-tools-header-refresh",
+                        "icons/fe/refresh.svg",
+                        t!("common.refresh"),
+                        self.host_tool_panels.entity(kind).read(cx).can_refresh(),
+                        cx.listener(move |this, _, _window, cx| {
+                            this.refresh_host_tool(kind, cx);
+                        }),
+                    )
+                    .into_any_element(),
+                )
+            }
             NavItem::Stats => {
                 let palette = self.theme_palette();
                 let manual_refreshing = self.remote_ops.stats_manual_refreshing();
-                let can_refresh = self.session.active_ssh_config().is_some()
+                let can_refresh = self.session.active_has_inspectable_host()
                     && !self.remote_ops.stats_is_pending();
                 Some(
                     header_svg_icon_button(
@@ -981,8 +1270,9 @@ impl ZzClawTermApp {
             }
             NavItem::GpuMonitor => {
                 let palette = self.theme_palette();
-                let can_refresh =
-                    self.session.active_ssh_config().is_some() && !self.remote_ops.gpu_is_pending();
+                let can_refresh = self.session.active_has_inspectable_host()
+                    && !self.local_host_tools_unsupported()
+                    && !self.remote_ops.gpu_is_pending();
                 Some(
                     header_svg_icon_button(
                         palette,
@@ -1000,8 +1290,9 @@ impl ZzClawTermApp {
             }
             NavItem::AscendNpuMonitor => {
                 let palette = self.theme_palette();
-                let can_refresh =
-                    self.session.active_ssh_config().is_some() && !self.remote_ops.npu_is_pending();
+                let can_refresh = self.session.active_has_inspectable_host()
+                    && !self.local_host_tools_unsupported()
+                    && !self.remote_ops.npu_is_pending();
                 Some(
                     header_svg_icon_button(
                         palette,
@@ -1019,7 +1310,7 @@ impl ZzClawTermApp {
             }
             NavItem::Processes => {
                 let palette = self.theme_palette();
-                let can_refresh = self.session.active_ssh_config().is_some()
+                let can_refresh = self.session.active_has_inspectable_host()
                     && !self.remote_ops.process_is_pending();
                 Some(
                     header_svg_icon_button(
@@ -1038,7 +1329,8 @@ impl ZzClawTermApp {
             }
             NavItem::Docker => {
                 let palette = self.theme_palette();
-                let can_refresh = self.session.active_ssh_config().is_some()
+                let can_refresh = self.session.active_has_inspectable_host()
+                    && !self.local_host_tools_unsupported()
                     && !self.remote_ops.docker_is_pending();
                 let can_prune = can_refresh && self.remote_ops.docker_can_prune();
                 let more_label = t!("dockerManager.moreActions").to_string();
@@ -1305,6 +1597,8 @@ fn header_svg_icon_button_with_color(
 
 #[cfg(test)]
 mod tests {
+    mod floating;
+
     use gpui::{
         Context, Entity, InteractiveElement as _, IntoElement, Modifiers, MouseButton,
         MouseMoveEvent, ParentElement as _, Render, Styled as _, TestAppContext, Window, div,
@@ -1313,7 +1607,7 @@ mod tests {
 
     use crate::features::ZzClawTermApp;
     use crate::features::test_support::app_with_visible_local_session;
-    use crate::models::{NavItem, PanelOpenMode, PanelSide};
+    use crate::models::{NavItem, PanelOpenMode, PanelSide, SettingsTab};
     use crate::test_support::{TestAppCleanup, TestConfigDir};
 
     use super::{SidePanelStackRenderMode, side_panel_stack_render_mode};
@@ -1344,6 +1638,116 @@ mod tests {
         app: Entity<ZzClawTermApp>,
         side: PanelSide,
         height: f32,
+    }
+
+    struct AiPanelHeaderFixture {
+        app: Entity<ZzClawTermApp>,
+        side: PanelSide,
+        width: f32,
+    }
+
+    impl Render for AiPanelHeaderFixture {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let panel = self.app.update(cx, |app, cx| {
+                app.single_side_panel(self.side, NavItem::AiAssistant, None, window, cx)
+            });
+            div().size_full().child(
+                div()
+                    .debug_selector(|| "ai-panel-header-fixture".into())
+                    .w(px(self.width))
+                    .h_full()
+                    .child(panel),
+            )
+        }
+    }
+
+    #[test]
+    fn ai_panel_titles_reserve_space_for_clickable_actions_at_narrow_widths() {
+        let test_dir = TestConfigDir::new("zzclawterm-ai-panel-header");
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, test_dir.path(), "header-test");
+        app.update(&mut cx, |app, cx| app.sync_component_theme(cx));
+        let (fixture, cx) = cx.add_window_view(|_, cx| {
+            cx.observe(&app, |_, _, cx| cx.notify()).detach();
+            AiPanelHeaderFixture {
+                app: app.clone(),
+                side: PanelSide::Right,
+                width: 320.,
+            }
+        });
+
+        for side in [PanelSide::Left, PanelSide::Right] {
+            for width in [160., 200., 320., 600.] {
+                cx.update(|_, cx| {
+                    app.update(cx, |app, cx| {
+                        app.sync_ai_active_scope(cx);
+                        app.ai.start_new_chat();
+                        app.ai.begin_chat_request(
+                            "MixedCase 中文 👩🏽‍💻 long conversation title ".repeat(40),
+                            zzclawterm_core::AiMode::Ask,
+                            None,
+                        );
+                        app.ai.cancel_chat_and_agent();
+                    });
+                    fixture.update(cx, |fixture, cx| {
+                        fixture.width = width;
+                        fixture.side = side;
+                        cx.notify();
+                    });
+                });
+                cx.run_until_parked();
+                cx.update(|window, cx| _ = window.draw(cx));
+
+                let panel = cx.debug_bounds("ai-panel-header-fixture").unwrap();
+                let title = cx.debug_bounds("ai-conversation-title").unwrap();
+                assert!(title.left() >= panel.left());
+                let mut previous_right = title.right();
+                for id in [
+                    "ai-header-history-toggle",
+                    "ai-header-open-settings",
+                    "ai-header-new-chat",
+                ] {
+                    let action = cx.debug_bounds(id).unwrap();
+                    assert!(
+                        previous_right <= action.left(),
+                        "title and actions must not overlap"
+                    );
+                    assert!(action.right() <= panel.right());
+                    previous_right = action.right();
+                }
+
+                let history = cx.debug_bounds("ai-header-history-toggle").unwrap();
+                cx.simulate_click(history.center(), Modifiers::default());
+                cx.update(|_, cx| assert!(app.read(cx).ai.history_is_open()));
+                cx.run_until_parked();
+                cx.update(|window, cx| _ = window.draw(cx));
+                cx.simulate_click(history.center(), Modifiers::default());
+                cx.update(|_, cx| assert!(!app.read(cx).ai.history_is_open()));
+                cx.run_until_parked();
+                cx.update(|window, cx| _ = window.draw(cx));
+
+                let settings = cx.debug_bounds("ai-header-open-settings").unwrap();
+                cx.simulate_click(settings.center(), Modifiers::default());
+                cx.update(|_, cx| {
+                    assert_eq!(
+                        app.read(cx).shell.navigation.settings.active_tab,
+                        SettingsTab::AiGeneral
+                    );
+                });
+                cx.run_until_parked();
+                cx.update(|window, cx| _ = window.draw(cx));
+
+                let new_chat = cx.debug_bounds("ai-header-new-chat").unwrap();
+                cx.simulate_click(new_chat.center(), Modifiers::default());
+                cx.update(|_, cx| {
+                    assert_eq!(
+                        app.read(cx).ai_header_presentation().conversation_title,
+                        rust_i18n::t!("ai.newChat")
+                    );
+                });
+            }
+        }
     }
 
     impl Render for PanelStackFixture {
@@ -1478,6 +1882,13 @@ mod tests {
         app.update(&mut cx, |app, cx| {
             app.sync_component_theme(cx);
             app.set_panel_open_mode(PanelOpenMode::Floating, cx);
+            app.sync_ai_active_scope(cx);
+            app.ai.begin_chat_request(
+                "MixedCase 中文 👩🏽‍💻 long conversation title ".repeat(40),
+                zzclawterm_core::AiMode::Ask,
+                None,
+            );
+            app.ai.cancel_chat_and_agent();
         });
         let (fixture, cx) = cx.add_window_view(|_, _| FloatingPanelFixture {
             app: app.clone(),
@@ -1489,7 +1900,7 @@ mod tests {
             (PanelSide::Left, "floating-left-panel-close"),
             (PanelSide::Right, "floating-right-panel-close"),
         ] {
-            for width in [160., 200., 320.] {
+            for width in [160., 200., 320., 600.] {
                 cx.update(|_, cx| {
                     app.update(cx, |app, cx| {
                         app.toggle_floating_panel(NavItem::AiAssistant, side, cx);
@@ -1507,6 +1918,8 @@ mod tests {
 
                 let panel = cx.debug_bounds("floating-panel-fixture").unwrap();
                 let close = cx.debug_bounds(close_id).unwrap();
+                let title = cx.debug_bounds("ai-conversation-title").unwrap();
+                assert!(title.left() >= panel.left() && title.right() <= close.left());
                 assert!(close.left() >= panel.left() && close.right() <= panel.right());
                 assert!(
                     cx.debug_bounds("ai-header-execution-mode-toggle").is_none(),
@@ -1522,6 +1935,7 @@ mod tests {
                         action.left() >= panel.left() && action.right() <= panel.right(),
                         "{id} must stay inside a {width}px panel"
                     );
+                    assert!(title.right() <= action.left(), "title must not cover {id}");
                     assert!(
                         action.right() <= close.left()
                             || close.right() <= action.left()

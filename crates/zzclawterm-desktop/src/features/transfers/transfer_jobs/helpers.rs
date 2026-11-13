@@ -1,4 +1,4 @@
-use crate::blocking_jobs::{BlockingJobScheduler, JobOutcome};
+use crate::blocking_jobs::{BlockingJobScheduler, JobHandle, JobOutcome};
 use crate::models::{TransferJobEvent, TransferJobKind, TransferJobResult, TransferJobState};
 use futures::channel::mpsc::UnboundedSender;
 use std::path::PathBuf;
@@ -8,23 +8,6 @@ use zzclawterm_files::sftp_transfer_types::SftpTransferProgress;
 
 const TRANSFER_PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Records the final error returned by an SFTP upload job at the asynchronous boundary.
-///
-/// The transport layer records protocol and retry details; this adds the desktop task ID
-/// so log entries can be matched to failed rows in the transfer panel. User cancellations
-/// are represented by the job state and are not logged as failures again.
-pub(super) fn log_sftp_upload_job_failure(job_id: &str, error: &anyhow::Error) {
-    if error.to_string().contains(SFTP_TRANSFER_CANCELLED) {
-        return;
-    }
-    tracing::error!(
-        transfer_id = %job_id,
-        error = %error,
-        error_chain = %format!("{error:#}"),
-        "SFTP upload job failed"
-    );
-}
-
 pub(in crate::features) fn submit_transfer_blocking_job(
     scheduler: &BlockingJobScheduler,
     name: &'static str,
@@ -32,13 +15,29 @@ pub(in crate::features) fn submit_transfer_blocking_job(
     rejection_tx: UnboundedSender<TransferJobResult>,
     run: impl FnOnce() + Send + 'static,
 ) {
+    drop(submit_transfer_cancellable_blocking_job(
+        scheduler,
+        name,
+        rejection_job_id,
+        rejection_tx,
+        run,
+    ));
+}
+
+pub(in crate::features) fn submit_transfer_cancellable_blocking_job(
+    scheduler: &BlockingJobScheduler,
+    name: &'static str,
+    rejection_job_id: String,
+    rejection_tx: UnboundedSender<TransferJobResult>,
+    run: impl FnOnce() + Send + 'static,
+) -> Option<JobHandle> {
     // A normal closure sends its own typed result. Only synthesize a terminal
     // event when the scheduler skips the closure or catches its panic.
     let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let run_completed = completed.clone();
     let outcome_tx = rejection_tx.clone();
     let outcome_id = rejection_job_id.clone();
-    if let Err(error) = scheduler.submit_with_outcome(
+    match scheduler.submit_with_outcome(
         name,
         move |_| {
             run();
@@ -59,10 +58,14 @@ pub(in crate::features) fn submit_transfer_blocking_job(
             });
         },
     ) {
-        let _ = rejection_tx.unbounded_send(TransferJobResult {
-            id: rejection_job_id,
-            event: TransferJobEvent::Finished(Err(error.to_string())),
-        });
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            let _ = rejection_tx.unbounded_send(TransferJobResult {
+                id: rejection_job_id,
+                event: TransferJobEvent::Finished(Err(error.to_string())),
+            });
+            None
+        }
     }
 }
 
@@ -71,6 +74,7 @@ pub(in crate::features) struct TransferProgressEventSender {
     tx: UnboundedSender<TransferJobResult>,
     last_sent_at: Option<Instant>,
     final_sent: bool,
+    phase: Option<zzclawterm_files::sftp_transfer_types::FileTransferPhase>,
 }
 
 impl TransferProgressEventSender {
@@ -80,6 +84,7 @@ impl TransferProgressEventSender {
             tx,
             last_sent_at: None,
             final_sent: false,
+            phase: None,
         }
     }
 
@@ -99,10 +104,12 @@ impl TransferProgressEventSender {
         if completed && self.final_sent {
             return;
         }
-        if !completed && !due {
+        let phase_changed = self.phase != progress.phase;
+        if !completed && !due && !phase_changed {
             return;
         }
 
+        self.phase = progress.phase;
         self.final_sent |= completed;
         self.last_sent_at = Some(now);
         let _ = self.tx.unbounded_send(TransferJobResult {
@@ -131,18 +138,107 @@ pub(super) fn transfer_job_local_target_path(job: &TransferJobState) -> Option<P
                 .map(|progress| progress.local_path.clone())
         })
         .or_else(|| match &job.kind {
-            TransferJobKind::Download { local_path, .. }
-            | TransferJobKind::OpenExternal { local_path, .. } => Some(local_path.clone()),
+            TransferJobKind::Download { local_path, .. } => Some(local_path.clone()),
+            TransferJobKind::OpenExternal { local_path, .. } => local_path.clone(),
             _ => None,
         })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TransferProgressEventSender, submit_transfer_blocking_job};
+    use super::{
+        TransferProgressEventSender, submit_transfer_blocking_job,
+        submit_transfer_cancellable_blocking_job, transfer_job_local_target_path,
+    };
     use crate::blocking_jobs::BlockingJobScheduler;
     use crate::models::TransferJobEvent;
     use zzclawterm_files::sftp_transfer_types::SftpTransferProgress;
+
+    #[test]
+    fn external_edit_target_and_title_only_expose_a_prepared_path() {
+        use crate::features::transfers::transfer_widgets::transfer_job_title;
+        use crate::models::{TransferJobKind, TransferJobState, TransferJobStatus};
+        use std::path::PathBuf;
+
+        let mut job = TransferJobState {
+            id: "external".into(),
+            session_id: None,
+            kind: TransferJobKind::OpenExternal {
+                remote_path: "/remote/example.txt".into(),
+                local_path: None,
+            },
+            status: TransferJobStatus::Running,
+            detail: String::new(),
+            created_at_ms: 0,
+            display_name: String::new(),
+            entries: Vec::new(),
+            summary: None,
+            progress: None,
+            control: None,
+            speed: Default::default(),
+        };
+        assert_eq!(transfer_job_local_target_path(&job), None);
+        assert_eq!(transfer_job_title(&job.kind), "Open /remote/example.txt");
+        let target = PathBuf::from("local-data/example.txt");
+        if let TransferJobKind::OpenExternal { local_path, .. } = &mut job.kind {
+            *local_path = Some(target.clone());
+        }
+        for status in [TransferJobStatus::Running, TransferJobStatus::Completed] {
+            job.status = status;
+            assert_eq!(transfer_job_local_target_path(&job), Some(target.clone()));
+            assert!(transfer_job_title(&job.kind).contains(&target.display().to_string()));
+        }
+    }
+
+    #[test]
+    fn cancelling_a_queued_directory_request_skips_io_and_emits_one_terminal_event() {
+        use crate::blocking_jobs::JobOutcome;
+        use futures::StreamExt as _;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        use std::time::Duration;
+        use zzclawterm_files::sftp::SFTP_TRANSFER_CANCELLED;
+
+        let scheduler = BlockingJobScheduler::with_limits(1, 4).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let occupied = scheduler
+            .submit("occupied", move |_| {
+                started_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            })
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let accessed = Arc::new(AtomicBool::new(false));
+        let accessed_in_job = accessed.clone();
+        let handle = submit_transfer_cancellable_blocking_job(
+            &scheduler,
+            "directory",
+            "cancelled".into(),
+            tx,
+            move || {
+                accessed_in_job.store(true, Ordering::Release);
+            },
+        )
+        .unwrap();
+        handle.cancel();
+        release_tx.send(()).unwrap();
+        assert_eq!(occupied.wait(), JobOutcome::Completed);
+        assert_eq!(handle.wait(), JobOutcome::Cancelled);
+        assert!(!accessed.load(Ordering::Acquire));
+        // The outcome is published before on_outcome emits the feature event.
+        let event = futures::executor::block_on(rx.next()).unwrap();
+        assert_eq!(event.id, "cancelled");
+        assert!(
+            matches!(event.event, TransferJobEvent::Finished(Err(error)) if error == SFTP_TRANSFER_CANCELLED)
+        );
+        assert!(futures::executor::block_on(rx.next()).is_none());
+        scheduler.shutdown();
+    }
 
     #[test]
     fn occupied_bulk_executor_does_not_block_interactive_jobs() {
@@ -229,6 +325,7 @@ mod tests {
         let (sender, mut receiver) = futures::channel::mpsc::unbounded();
         let mut sender = TransferProgressEventSender::new("job".into(), sender);
         let mut progress = SftpTransferProgress {
+            phase: None,
             remote_path: "/folder".into(),
             local_path: Default::default(),
             bytes_transferred: 10,

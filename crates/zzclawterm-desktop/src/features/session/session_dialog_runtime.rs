@@ -6,6 +6,7 @@ use zzclawterm_store::StoreDomain;
 use zzclawterm_ui::ZzClawDialogWindowExt as _;
 
 use crate::features::ZzClawTermApp;
+use crate::features::text_inputs::TextInputSetup;
 use crate::models::{SessionLaunchConfig, StartupCommandAction};
 
 use super::state::RenameSessionSubmission;
@@ -33,8 +34,17 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         };
-        self.session.dialogs.open_tab_rename(target, &current_name);
+        self.session
+            .dialogs
+            .open_tab_rename(target.clone(), &current_name);
         self.forget_text_inputs("session.rename");
+        let rename_draft = self.session.dialogs.rename_draft().to_string();
+        let input = self.text_input(
+            "session.rename",
+            &rename_draft,
+            TextInputSetup::placeholder(t!("tabCtx.renamePlaceholder")),
+            cx,
+        );
         self.shell.set_status("rename tab opened".to_string());
         let handle = self.open_tracked_form_dialog(
             (
@@ -51,7 +61,27 @@ impl ZzClawTermApp {
             window,
             cx,
         );
-        self.session.dialogs.set_rename_dialog_handle(handle);
+        self.session
+            .dialogs
+            .set_rename_dialog_handle(handle.clone());
+        let app = cx.weak_entity();
+        // Focus once after opening so closing the tab menu cannot steal it back.
+        window.defer(cx, move |window, cx| {
+            if !handle.is_top(window, cx) {
+                return;
+            }
+            let _ = app.update(cx, |app, cx| {
+                if app.session.dialogs.rename_target() != Some(&target)
+                    || app.session.tab_action_display_name(&target).is_none()
+                    || app.existing_text_input("session.rename").as_ref() != Some(&input)
+                {
+                    return;
+                }
+                input.update(cx, |input, cx| {
+                    input.select_all_with_cursor_at_end(window, cx);
+                });
+            });
+        });
         cx.notify();
     }
 
@@ -288,7 +318,7 @@ impl ZzClawTermApp {
         let patch = entry.last_asset_patch;
         self.submit_store_request(
             0,
-            zzclawterm_store::store_mutation(StoreDomain::Connections, move |store| {
+            zzclawterm_store::store_request(StoreDomain::Connections, move |store| {
                 if !store.merge_connection_asset_from_monitoring(&persisted_id, patch)? {
                     return Ok(None);
                 }
@@ -324,6 +354,7 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         // A tmux host closing takes its virtual pane sessions with it —
+        self.android.close_view(session_id);
         // detached or not, they only exist as projections of this session.
         // The converse (a pane leaf being removed) drops its host-side index
         // entry so `pane_for_session` cannot resurrect it.
@@ -335,7 +366,12 @@ impl ZzClawTermApp {
             self.tmux.drop_pane_session(session_id);
         }
         self.clear_terminal_composition_for_session(session_id, cx);
-        self.transfer.cancel_bulk_jobs_for_session(session_id);
+        let adb = self
+            .session
+            .file_browser_backend_support_for_session(session_id)
+            == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Adb);
+        self.transfer
+            .cancel_bulk_jobs_for_closed_view(session_id, adb);
         self.reconcile_bulk_transfer_jobs();
         self.commands.cancel_staged_quick_command(session_id);
         self.close_terminal_executions_for_session(session_id, cx);

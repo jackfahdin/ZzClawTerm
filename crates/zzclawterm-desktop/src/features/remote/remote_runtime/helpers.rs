@@ -1,15 +1,33 @@
 use crate::features::ZzClawTermApp;
 use zzclawterm_remote_ops::docker::RemoteDockerOverview;
-use zzclawterm_transport::{SshMultiplexHandle, SshSessionConfig};
+use zzclawterm_remote_ops::host::HostTarget;
 
+/// Where the active session's host tools run: this machine for a local shell,
+/// or the shared SSH connection for a remote one.
 pub(in crate::features) struct ActiveSshRuntimeContext {
     pub(in crate::features) session_id: String,
-    pub(in crate::features) config: SshSessionConfig,
-    pub(in crate::features) multiplex: SshMultiplexHandle,
+    pub(in crate::features) target: HostTarget,
     pub(in crate::features) docker_state: zzclawterm_remote_ops::docker::DockerConnectionState,
 }
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn local_host_tools_unsupported(&self) -> bool {
+        cfg!(windows) && self.session.active_is_local_pty()
+    }
+
+    pub(in crate::features) fn process_control_capabilities(
+        &self,
+    ) -> zzclawterm_remote_ops::process_control::ProcessControlCapabilities {
+        use zzclawterm_remote_ops::host::HostOs;
+        zzclawterm_remote_ops::process_control::ProcessControlCapabilities::for_os(
+            if self.session.active_is_local_pty() {
+                HostOs::local()
+            } else {
+                HostOs::OtherUnix
+            },
+        )
+    }
+
     pub(in crate::features) fn active_ssh_runtime_context(
         &mut self,
         action: &str,
@@ -17,11 +35,24 @@ impl ZzClawTermApp {
         let session_id = self
             .session
             .active_id_owned()
-            .ok_or_else(|| format!("start an SSH session before {action}"))?;
+            .ok_or_else(|| format!("start a session before {action}"))?;
+        if self.session.is_local_pty(&session_id) {
+            if self.session.is_disconnected(&session_id) {
+                return Err(format!("reconnect the local shell before {action}"));
+            }
+            return Ok(ActiveSshRuntimeContext {
+                session_id,
+                target: HostTarget::Local,
+                docker_state: self.remote_ops.local_docker_state(),
+            });
+        }
         let config = self
             .session
             .active_ssh_config_owned()
             .ok_or_else(|| format!("start an SSH session before {action}"))?;
+        config
+            .ensure_remote_resource_probes_allowed()
+            .map_err(|_| rust_i18n::t!("panel.sshCompatibilityModeUnavailable").to_string())?;
         // `session_id` may be a tmux pane leaf — the SSH connection and its
         // multiplex handle live on the host session, so look the connection
         // up through the host while keeping the pane id for job bookkeeping.
@@ -37,8 +68,10 @@ impl ZzClawTermApp {
         {
             return Ok(ActiveSshRuntimeContext {
                 session_id,
-                config,
-                multiplex: connection.handle(),
+                target: HostTarget::Ssh {
+                    config,
+                    multiplex: Some(connection.handle()),
+                },
                 docker_state: connection.docker_state(),
             });
         }

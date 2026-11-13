@@ -1,11 +1,13 @@
 //! Protocol writers, readers, and terminal transport adapters.
+pub(crate) mod telnet_naws;
+
 use crate::local_shell::LocalShellPathStyle;
 use crate::session::{ManagedSession, local_pty_size};
 use crate::session_event_queue::SessionEventQueue;
 use crate::ssh_shell_integration::SshIntegrationOutput;
 use crate::ssh_worker::{SshCommand, TmuxCommandSender, send_session_error};
 use crate::telnet_codec::{
-    maybe_build_naws, negotiate_response, strip_telnet_commands, unescape_iac_iac,
+    DO, DONT, OPT_NAWS, TelnetCommandDecoder, negotiate_response, unescape_iac_iac,
 };
 use crate::telnet_input::{TelnetInputState, telnet_auto_login_line_bytes};
 use crate::telnet_prompts::{
@@ -13,6 +15,7 @@ use crate::telnet_prompts::{
     default_username_regex, default_wake_regex, last_chars, last_login_regex, last_non_empty_line,
     prompt_candidates, strip_telnet_auto_login_control_sequences,
 };
+use crate::transport_io::telnet_naws::TelnetNawsWriter;
 use crate::writer_mailbox::WriterMailbox;
 use crate::{
     CleanupOperation, SerialSessionConfig, SessionEvent, TelnetSessionConfig, TerminalTransport,
@@ -45,6 +48,7 @@ pub struct LocalPtyTransport {
 }
 
 pub struct TelnetTransport {
+    pub(crate) route: Option<Arc<crate::network_route::NetworkRoute>>,
     pub(crate) info: SessionInfo,
     pub(crate) writer: QueuedTransportWriter,
     pub(crate) reader_stream: TcpStream,
@@ -52,6 +56,7 @@ pub struct TelnetTransport {
     pub(crate) backspace_as_bs: bool,
     pub(crate) input: TelnetInputState,
     pub(crate) auto_login: Option<Arc<Mutex<TelnetAutoLoginState>>>,
+    pub(crate) naws: TelnetNawsWriter,
     pub(crate) event_queue: SessionEventQueue,
     pub(crate) reader_thread: Option<JoinHandle<()>>,
 }
@@ -64,9 +69,9 @@ pub struct SshChannelTransport {
     /// Ordered tmux control-channel commands; buffered until the channel
     /// enters control mode so early UI calls cannot reach the user's shell.
     pub(crate) tmux_tx: TmuxCommandSender,
-    /// Set only while the worker runs the tmux control session; gates
-    /// `tmux_send_command`/`tmux_detach` so commands cannot be written into
-    /// a plain shell.
+    /// Blocks binary transfers during verification and the control session.
+    /// This gate is not protocol confirmation; the worker alone owns that
+    /// transition and never routes tmux mailbox commands into a plain shell.
     pub(crate) tmux_active: Arc<AtomicBool>,
     pub(crate) backspace_as_bs: bool,
     pub(crate) worker_thread: Option<JoinHandle<()>>,
@@ -233,10 +238,6 @@ impl QueuedTransportWriter {
             telnet_lifecycle,
             cancellation: None,
         })
-    }
-
-    pub(crate) fn write_telnet_control(&self, data: Vec<u8>) -> anyhow::Result<()> {
-        queue_telnet_control(&self.command_tx, data)
     }
 
     pub(crate) fn write(&self, data: Vec<u8>) -> anyhow::Result<()> {
@@ -508,16 +509,17 @@ impl TerminalTransport for TelnetTransport {
         _pixel_width: u16,
         _pixel_height: u16,
     ) -> anyhow::Result<()> {
+        self.naws.resize(cols, rows)?;
         self.info.cols = cols;
         self.info.rows = rows;
-        if let Some(naws) = maybe_build_naws(cols, rows, &self.config) {
-            self.writer.write_telnet_control(naws)?;
-        }
         Ok(())
     }
 
     fn close(&mut self) -> anyhow::Result<()> {
         let _ = self.reader_stream.shutdown(Shutdown::Both);
+        if let Some(route) = self.route.take() {
+            route.close();
+        }
         self.writer.close();
         if let Some(reader_thread) = self.reader_thread.take() {
             let _ = reader_thread.join();
@@ -609,8 +611,12 @@ impl TerminalTransport for TmuxPaneTransport {
         self.tmux_tx.write(&self.pane, data).map_err(Into::into)
     }
 
-    fn write_raw(&mut self, _data: &[u8]) -> anyhow::Result<()> {
-        Err(tmux_modem_unsupported().into())
+    /// Protocol bytes stay literal; the control session classifies them for
+    /// `send-keys` so remote panes receive the right key encoding. Modem
+    /// transfers stay gated by `supports_modem_transfer` and the cancellable
+    /// transfer writer, not by this channel.
+    fn write_raw(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        self.write(data)
     }
 
     fn resize(
@@ -739,17 +745,20 @@ pub(crate) fn spawn_reader_thread(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_tcp_reader_thread(
     session_id: String,
     mut reader: TcpStream,
     command_tx: WriterMailbox,
     lifecycle: Arc<TelnetWriterLifecycle>,
     config: TelnetSessionConfig,
+    naws: TelnetNawsWriter,
     auto_login: Option<Arc<Mutex<TelnetAutoLoginState>>>,
     event_queue: SessionEventQueue,
 ) -> std::io::Result<JoinHandle<()>> {
     zzclawterm_core::runtime::worker::spawn(format!("transport-reader-{session_id}"), move || {
         let mut buffer = [0_u8; 8192];
+        let mut decoder = TelnetCommandDecoder::default();
         while !lifecycle.is_stopped() {
             match reader.read(&mut buffer) {
                 Ok(0) => {
@@ -770,16 +779,20 @@ pub(crate) fn spawn_tcp_reader_thread(
                     let visible = if config.raw_tcp {
                         unescape_iac_iac(&buffer[..read])
                     } else {
-                        strip_telnet_commands(&buffer[..read], &mut |command, option| {
-                            let response = negotiate_response(
-                                command,
-                                option,
-                                config.send_naws,
-                                config.send_sga,
-                            );
-                            if !response.is_empty()
-                                && let Err(error) = queue_telnet_control(&command_tx, response)
-                            {
+                        decoder.decode(&buffer[..read], &mut |command, option| {
+                            if lifecycle.is_stopped() {
+                                return;
+                            }
+                            let queued = match (command, option) {
+                                (DO | DONT, OPT_NAWS) => {
+                                    naws.negotiate(command).map_err(anyhow::Error::from)
+                                }
+                                _ => queue_telnet_control(
+                                    &command_tx,
+                                    negotiate_response(command, option, config.send_sga),
+                                ),
+                            };
+                            if let Err(error) = queued {
                                 send_session_error(&event_queue, &session_id, error);
                                 lifecycle.stop();
                             }

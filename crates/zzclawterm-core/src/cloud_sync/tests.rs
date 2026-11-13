@@ -5,6 +5,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 mod cancellation;
 mod concurrent_heads;
+mod recovery;
 mod regressions;
 
 use super::{
@@ -190,6 +191,10 @@ impl ConnectionStore {
                 .entities
                 .clone(),
         );
+        if snapshot.meta.snapshot_kind == PortableSnapshotKind::Sync {
+            snapshot = crate::portable_snapshot::project_fixed_sync_snapshot(&snapshot)
+                .map_err(std::io::Error::other)?;
+        }
         Ok(snapshot)
     }
 
@@ -2592,6 +2597,94 @@ fn a_remote_that_does_not_keep_the_uploaded_bytes_reports_a_divergent_write() {
 }
 
 #[test]
+fn a_truncated_compatibility_pointer_does_not_block_push_when_a_device_head_exists() {
+    let source_dir = unique_temp_dir("cloud-truncated-pointer-source");
+    let unused_remote = unique_temp_dir("cloud-truncated-pointer-unused");
+    let source_options = options(&source_dir, &unused_remote, "source-device");
+    ConnectionStore::open(&source_dir)
+        .expect("source")
+        .replace_sessions(&SessionsConfig {
+            custom_icons: Vec::new(),
+            groups: Vec::new(),
+            connections: vec![local_connection("conn-1", "Truncated Pointer", "bash")],
+        })
+        .expect("seed source");
+    let remote = MemoryRemote::default();
+    push_snapshot_with_remote(&source_options, &remote, &CloudSyncState::default(), true)
+        .expect("first push");
+    let latest_path = remote_path(&source_options.remote_root, super::SYNC_LATEST_FILE);
+    remote
+        .files
+        .lock()
+        .expect("files lock")
+        .get_mut(&latest_path)
+        .expect("pointer")
+        .truncate(64);
+
+    let store = OptionsTestLocalStore(&source_options);
+    assert!(
+        super::load_sync_pointer_from_remote(&store, &remote, &source_options.remote_root).is_err(),
+        "the truncated pointer stays visibly corrupt"
+    );
+    super::probe_remote_sync(&store, &remote, &source_options.remote_root)
+        .expect("a device head makes the shared pointer advisory");
+    let pushed =
+        push_snapshot_with_remote(&source_options, &remote, &CloudSyncState::default(), true)
+            .expect("a truncated pointer must not block a push");
+    assert_eq!(
+        super::load_sync_pointer_from_remote(&store, &remote, &source_options.remote_root)
+            .expect("repair read"),
+        pushed.pointer
+    );
+
+    std::fs::remove_dir_all(source_dir).ok();
+    std::fs::remove_dir_all(unused_remote).ok();
+}
+
+#[test]
+fn a_truncated_compatibility_pointer_remains_fatal_without_device_heads() {
+    let source_dir = unique_temp_dir("cloud-truncated-legacy-source");
+    let unused_remote = unique_temp_dir("cloud-truncated-legacy-unused");
+    let source_options = options(&source_dir, &unused_remote, "source-device");
+    ConnectionStore::open(&source_dir)
+        .expect("source")
+        .replace_sessions(&SessionsConfig {
+            custom_icons: Vec::new(),
+            groups: Vec::new(),
+            connections: vec![local_connection("conn-1", "Truncated Legacy", "bash")],
+        })
+        .expect("seed source");
+    let remote = MemoryRemote::default();
+    push_snapshot_with_remote(&source_options, &remote, &CloudSyncState::default(), true)
+        .expect("first push");
+    let heads_prefix = remote_path(&source_options.remote_root, super::heads::HEADS_DIR);
+    remote
+        .files
+        .lock()
+        .expect("files lock")
+        .retain(|path, _| !path.starts_with(&heads_prefix));
+    let latest_path = remote_path(&source_options.remote_root, super::SYNC_LATEST_FILE);
+    remote
+        .files
+        .lock()
+        .expect("files lock")
+        .get_mut(&latest_path)
+        .expect("pointer")
+        .truncate(64);
+
+    let store = OptionsTestLocalStore(&source_options);
+    let error = super::probe_remote_sync(&store, &remote, &source_options.remote_root)
+        .expect_err("without a device head the corrupt pointer has no safe replacement");
+    assert!(matches!(
+        error,
+        CloudSyncError::PortableSnapshot(_) | CloudSyncError::Json(_)
+    ));
+
+    std::fs::remove_dir_all(source_dir).ok();
+    std::fs::remove_dir_all(unused_remote).ok();
+}
+
+#[test]
 fn masked_cloud_sync_merge_preserves_provider_secrets() {
     let mut current = CloudSyncSettings::default();
     current.webdav.password = Some("webdav-password".to_string().into());
@@ -2787,6 +2880,7 @@ fn local_connection(id: &str, name: &str, shell: &str) -> SavedConnection {
         icon_auto_detect: None,
         auth: None,
         ssh_algorithms: None,
+        ssh_compatibility_mode: false,
         ssh_profile: Default::default(),
         terminal_type: None,
         sftp: Default::default(),
@@ -2836,7 +2930,10 @@ fn capacity_cleanup_protects_head_target_foreign_and_corrupted_snapshots() {
     };
     let mut snapshots = Vec::new();
     for (age, revision) in ["old", "head", "target", "recent"].into_iter().enumerate() {
-        let mut snapshot = store.build_sync_snapshot(&options).unwrap();
+        let mut snapshot = crate::portable_snapshot::project_fixed_sync_snapshot(
+            &store.build_sync_snapshot(&options).unwrap(),
+        )
+        .unwrap();
         snapshot.meta.revision_id = revision.into();
         snapshot.meta.created_at_ms = age as u64;
         snapshot.recalculate_hash().unwrap();
@@ -2909,7 +3006,10 @@ fn capacity_cleanup_rechecks_changed_or_unreadable_head_before_deleting() {
         };
         let mut snapshots = Vec::new();
         for (age, revision) in ["old", "expected", "spare"].into_iter().enumerate() {
-            let mut snapshot = store.build_sync_snapshot(&options).unwrap();
+            let mut snapshot = crate::portable_snapshot::project_fixed_sync_snapshot(
+                &store.build_sync_snapshot(&options).unwrap(),
+            )
+            .unwrap();
             snapshot.meta.revision_id = revision.into();
             snapshot.meta.created_at_ms = age as u64;
             snapshot.recalculate_hash().unwrap();
@@ -2973,7 +3073,10 @@ fn capacity_cleanup_stops_on_delete_failure_without_removing_other_files() {
         ..Default::default()
     };
     for revision in ["old-a", "old-b"] {
-        let mut snapshot = store.build_sync_snapshot(&options).unwrap();
+        let mut snapshot = crate::portable_snapshot::project_fixed_sync_snapshot(
+            &store.build_sync_snapshot(&options).unwrap(),
+        )
+        .unwrap();
         snapshot.meta.revision_id = revision.into();
         snapshot.recalculate_hash().unwrap();
         remote
@@ -2985,4 +3088,40 @@ fn capacity_cleanup_stops_on_delete_failure_without_removing_other_files() {
     }
     assert!(super::gc::reserve_snapshot_capacity(&store, &options, &remote, None, "new").is_err());
     assert_eq!(remote.files.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn cleanup_and_capacity_preserve_legacy_schema_three_snapshots() {
+    let dir = unique_temp_dir("retained-legacy-snapshots");
+    let options = options(&dir, &dir, "device");
+    let store = OptionsTestLocalStore(&options);
+    let remote = MemoryRemote {
+        capacity_limit: Some(8),
+        ..Default::default()
+    };
+    for index in 0..8 {
+        let mut snapshot = RawPortableSnapshot::sync("legacy-device", "supported-version");
+        assert_eq!(snapshot.meta.schema_version, 3);
+        snapshot.meta.revision_id = format!("legacy-{index}");
+        snapshot.meta.created_at_ms = index;
+        snapshot.recalculate_hash().unwrap();
+        remote
+            .write(
+                &remote_path(
+                    "zzclawterm",
+                    &super::legacy_sync_snapshot_file(&snapshot.meta.revision_id),
+                ),
+                &store.encode_sync_snapshot(&snapshot, "secret").unwrap(),
+            )
+            .unwrap();
+    }
+    let original = remote.files.lock().unwrap().clone();
+    super::gc::cleanup_sync_snapshots_with_remote(&store, &options, &remote, None).unwrap();
+    assert_eq!(*remote.files.lock().unwrap(), original);
+    assert!(matches!(
+        super::gc::reserve_snapshot_capacity(&store, &options, &remote, None, "new"),
+        Err(CloudSyncError::GistCapacity)
+    ));
+    assert_eq!(*remote.files.lock().unwrap(), original);
+    std::fs::remove_dir_all(dir).ok();
 }

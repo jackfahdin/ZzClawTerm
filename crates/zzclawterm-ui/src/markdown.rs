@@ -1,3 +1,5 @@
+pub mod lightweight;
+
 use crate::text::{ZzClawTextState, ZzClawTextStyle};
 use gpui::{IntoElement, RenderOnce, SharedString};
 use gpui_base::text::TextView;

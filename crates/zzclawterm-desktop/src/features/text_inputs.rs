@@ -501,6 +501,8 @@ impl ZzClawTermApp {
         let remote_panel_input = id.starts_with("remote.");
         if let Some(host) = id.strip_prefix("tmux.command.") {
             self.on_tmux_command_draft(host, text, cx);
+        } else if id.starts_with("asset-batch.") {
+            self.apply_asset_batch_input(id.as_ref(), &text, cx);
         } else if let Some(rest) = id.strip_prefix("settings.number.") {
             self.apply_settings_number_input(rest, &text, cx);
         } else if let Some(rest) = id.strip_prefix("ai.number.") {
@@ -546,11 +548,7 @@ impl ZzClawTermApp {
         } else if id.starts_with("transfer.rename.") {
             self.apply_transfer_rename_input(text, cx);
         } else if let Some(field) = id.strip_prefix("quick-command.editor.") {
-            if field == "new-category" {
-                self.apply_quick_command_editor_new_category_input(text, cx);
-            } else {
-                self.apply_quick_command_editor_input(field, text, cx);
-            }
+            self.apply_quick_command_editor_input(field, text, cx);
         } else if let Some(index) = id
             .strip_prefix("quick-command.variable.")
             .and_then(|index| index.parse::<usize>().ok())
@@ -655,6 +653,8 @@ impl ZzClawTermApp {
             self.apply_terminal_x11_display(text, cx);
         } else if id.as_ref() == "settings.terminal.x11-server-path" {
             self.apply_terminal_x11_server_path(text, cx);
+        } else if id.as_ref() == "settings.android.adb-path" {
+            self.apply_android_adb_path(text, cx);
         } else if id.as_ref() == "settings.terminal.timestamp-format" {
             self.apply_terminal_timestamp_format(text, cx);
         } else if id.as_ref() == "settings.security.master-password" {
@@ -798,7 +798,7 @@ pub(in crate::features) fn ordinary_input_box(
         .when(focused, |this| {
             this.shadow(ordinary_input_focus_ring(palette))
         })
-        .bg(rgb(palette.input))
+        .bg(rgb(palette.input_surface()))
         .cursor_text()
         .on_click(move |_, window, cx| {
             window.focus(&handle, cx);

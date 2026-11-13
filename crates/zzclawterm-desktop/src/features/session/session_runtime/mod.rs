@@ -7,7 +7,7 @@ use super::state::{SavedConnectionStartOptions, SessionStartTabPlacement};
 use crate::models::{SessionLaunchConfig, StartupCommandRequest, WorkspaceSplitDirection};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum SessionStartFocusTarget {
+pub(in crate::features) enum SessionStartFocusTarget {
     Terminal,
     RemoteDesktop,
 }
@@ -23,6 +23,8 @@ pub(in crate::features) struct MultiplexSshStartRequest {
 }
 
 pub(in crate::features) struct PendingSessionStartRegistration {
+    pub(in crate::features) request_id: Option<String>,
+    pub(in crate::features) mcp_open_operation_id: Option<String>,
     pub requested_ssh_runtime_mode: Option<zzclawterm_core::models::ssh_runtime::SshRuntimeMode>,
     pub(in crate::features) connection_name: String,
     pub(in crate::features) launch_config: Option<SessionLaunchConfig>,
@@ -48,3 +50,5 @@ mod background;
 mod mstsc;
 mod retry;
 mod start;
+
+pub(in crate::features) use start::SshSessionConfigBuildContext;

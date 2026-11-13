@@ -74,7 +74,7 @@ impl ConnectionStore {
             }
         })?;
 
-        self.apply_raw_portable_snapshot_with_password(snapshot, Some(snapshot_password))?;
+        self.apply_fixed_sync_snapshot(snapshot, snapshot_password)?;
         Ok(Some(safety_backup_path))
     }
 
@@ -574,6 +574,13 @@ impl ConnectionStore {
         snapshot_password: Option<&str>,
     ) -> Result<(), StorageError> {
         validate_raw_snapshot(snapshot)?;
+        if snapshot.meta.schema_version
+            == zzclawterm_core::portable_snapshot::FIXED_SYNC_SNAPSHOT_SCHEMA_VERSION
+        {
+            return Err(StorageError::InvalidData(
+                "Cloud sync snapshots require fixed-scope application".into(),
+            ));
+        }
         for (entity, raw) in &snapshot.entities {
             serde_json::from_str::<serde_json::Value>(raw).map_err(|error| {
                 StorageError::PortableSnapshotEntity {
@@ -740,11 +747,35 @@ impl ConnectionStore {
             &mut settings,
         )
         .map_err(StorageError::InvalidData)?;
-        let merged_settings = merge_imported_settings(
+        let has_local_master_password = current_settings
+            .get("security")
+            .and_then(|security| security.get("master_password"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|password| !password.is_empty());
+        let mut merged_settings = merge_imported_settings(
             settings,
             current_settings,
             snapshot.meta.snapshot_kind == PortableSnapshotKind::Sync,
         );
+
+        if snapshot.meta.snapshot_kind == PortableSnapshotKind::Backup && !has_local_master_password
+        {
+            // Backups omit the source master password. Keep imported provider
+            // settings usable without enabling sync until this device has one.
+            // Normalize the retained fallback too, without changing precedence
+            // or discarding unknown fields in either document.
+            for value in merged_settings
+                .get_mut("cloud_sync")
+                .into_iter()
+                .chain(legacy_cloud_sync.as_mut())
+            {
+                if let Some(enabled) = value.get_mut("enabled")
+                    && enabled.as_bool() == Some(true)
+                {
+                    *enabled = serde_json::Value::Bool(false);
+                }
+            }
+        }
 
         let txn = self.db.begin_write()?;
         {

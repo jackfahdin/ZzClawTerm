@@ -40,9 +40,12 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
+        self.stop_mcp_background_operations(cx);
+        self.cancel_file_sudo_prompt(cx);
         self.hide_secret_inputs(cx);
         self.security.remember_screen_lock_focus(window.focused(cx));
         self.security.activate_screen_lock(String::new());
+        self.reconcile_command_suggestion_availability(cx);
         self.forget_text_inputs("security.unlock.password");
         self.forget_text_inputs("security.editor.");
         self.connection_state.clear_editor_secrets(cx);
@@ -318,7 +321,10 @@ impl ZzClawTermApp {
                 SessionKind::RawTcp => raw_tcp_sessions += 1,
                 SessionKind::Serial => serial_sessions += 1,
                 SessionKind::Rdp => {}
-                SessionKind::Vnc => {}
+                SessionKind::Vnc
+                | SessionKind::AdbShell
+                | SessionKind::AdbFiles
+                | SessionKind::AdbScreen => {}
             }
         }
 

@@ -442,7 +442,8 @@ impl ZzClawTermApp {
         let can_reconnect = !is_busy
             && !self
                 .session
-                .start_reconnect_is_pending(reconnect_session_id.as_str());
+                .start_reconnect_is_pending(reconnect_session_id.as_str())
+            && !self.remote_desktop.start_is_pending(&reconnect_session_id);
         let can_disconnect = !is_busy && !is_disconnected;
         let reconnect_label = if busy_action.as_deref() == Some("reconnect") {
             t!("tabCtx.reconnecting").to_string()
@@ -617,7 +618,7 @@ fn sort_active_sessions(sessions: &mut [SessionInfo]) {
         left.name
             .to_lowercase()
             .cmp(&right.name.to_lowercase())
-            .then_with(|| session_kind_label(left.kind).cmp(session_kind_label(right.kind)))
+            .then_with(|| session_kind_label(left.kind).cmp(&session_kind_label(right.kind)))
     });
 }
 

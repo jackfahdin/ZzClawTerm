@@ -8,8 +8,8 @@ use zzclawterm_ui::ZzClawDialogWindowExt as _;
 use crate::features::{ZzClawTermApp, runtime_jobs::await_blocking_job};
 use crate::models::{QuickCommandImportPathPromptKind, QuickCommandImportPathPromptResult};
 
-use super::merge::merge_import;
 use super::sources::parse_quick_commands_from_path;
+use zzclawterm_core::quick_command_import::merge_import;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn open_quick_command_import_dialog(

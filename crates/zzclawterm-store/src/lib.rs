@@ -6,20 +6,22 @@ pub use portable_decode_helper::run_cloud_snapshot_decode_helper_if_requested;
 pub mod plugin_preferences;
 mod runtime;
 mod storage;
+pub use storage::maintenance;
 pub use storage::runtime_auth;
 
 pub use runtime::{
     BootstrapSnapshot, FlushBarrier, LoadBootstrap, LoadDeviceWindowManifest, LoadMainWindowState,
-    LoadWorkspaceRestoreManifest, RequestId, SaveDeviceWindowManifest, SaveMainWindowState,
-    SaveWorkspaceRestoreManifest, StoreBlockingClient, StoreClientError, StoreConfig, StoreDomain,
-    StoreEvent, StoreFnRequest, StoreMutationEvent, StoreOperationError, StoreRequest,
-    StoreRuntime, StoreSubmitError, StoreTask, StoreUiClient, store_mutation, store_request,
+    LoadWorkspaceRestoreManifest, LoadWorkspaceStartupRestore, RequestId, SaveDeviceWindowManifest,
+    SaveMainWindowState, SaveWorkspaceRestoreManifest, StoreBlockingClient, StoreClientError,
+    StoreConfig, StoreDomain, StoreEvent, StoreFnRequest, StoreMutationEvent, StoreOperationError,
+    StoreRequest, StoreRuntime, StoreSubmitError, StoreTask, StoreUiClient, store_mutation,
+    store_request,
 };
 
 pub use storage::{
     ConfigBackupInfo, ConnectionStore, KnownHostCheck, KnownHostEntry, RdpCertificateMetadata,
     RdpKnownHostCheck, RemoteFileBackendCache, RemoteFileBackendCacheEntry, StorageError,
-    ThemeCommitOutcome,
+    ThemeCommitOutcome, WorkspaceStartupRestore,
 };
 
 pub use portable_codec::{

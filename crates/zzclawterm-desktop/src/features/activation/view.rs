@@ -81,9 +81,9 @@ impl ZzClawTermApp {
                 } => *runtime_mode,
                 _ => None,
             };
-            self.prepare_external_saved(connection, mode, cx);
+            self.prepare_external_saved(connection, mode, window, cx);
         } else {
-            self.start_external_temporary(request, cx);
+            self.start_external_temporary(request, window, cx);
         }
         cx.notify();
     }

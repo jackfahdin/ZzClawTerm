@@ -575,6 +575,22 @@ impl ZzClawTermApp {
 
     fn header_status_content(&self) -> HeaderStatusContent {
         let mode = HeaderStatusMode::from_setting(&self.settings.summary().ui_header_status_mode);
+        if matches!(
+            mode,
+            HeaderStatusMode::Resources
+                | HeaderStatusMode::Host
+                | HeaderStatusMode::Gpu
+                | HeaderStatusMode::Npu
+        ) && self
+            .session
+            .active_ssh_config()
+            .is_some_and(|config| config.ssh_compatibility_mode)
+        {
+            return HeaderStatusContent::simple(
+                header_status_mode_icon(mode),
+                t!("panel.sshCompatibilityModeUnavailable").to_string(),
+            );
+        }
         match mode {
             HeaderStatusMode::Session => HeaderStatusContent::simple(
                 self.title_context_icon()
@@ -593,10 +609,16 @@ impl ZzClawTermApp {
         }
     }
 
+    /// The header shows host metrics for any live terminal: an SSH session or
+    /// a local shell (this machine). Without one it shows the "no session" hint.
+    pub(in crate::features) fn header_status_has_host(&self) -> bool {
+        self.session.active_has_inspectable_host()
+    }
+
     fn gpu_header_content(&self) -> HeaderStatusContent {
         let icon = header_status_mode_icon(HeaderStatusMode::Gpu);
         let fallback = |label| HeaderStatusContent::simple(icon, label);
-        if self.session.active_ssh_config().is_none() {
+        if !self.header_status_has_host() {
             return fallback(t!("gpuMonitor.noSession").to_string());
         }
         let gpu = self.remote_ops.gpu_presentation();
@@ -631,7 +653,7 @@ impl ZzClawTermApp {
     fn npu_header_content(&self) -> HeaderStatusContent {
         let icon = header_status_mode_icon(HeaderStatusMode::Npu);
         let fallback = |label| HeaderStatusContent::simple(icon, label);
-        if self.session.active_ssh_config().is_none() {
+        if !self.header_status_has_host() {
             return fallback(t!("ascendNpuMonitor.noSession").to_string());
         }
         let npu = self.remote_ops.npu_presentation();
@@ -674,7 +696,7 @@ impl ZzClawTermApp {
                 self.remote_stats_header_fallback(),
             )
         };
-        if self.session.active_ssh_config().is_none() {
+        if !self.header_status_has_host() {
             return fallback();
         }
         let stats_state = self.remote_ops.stats_presentation();
@@ -838,7 +860,7 @@ impl ZzClawTermApp {
     }
 
     fn remote_stats_header_fallback(&self) -> String {
-        if self.session.active_ssh_config().is_none() {
+        if !self.header_status_has_host() {
             t!("panel.resourceMonitorNoSession").to_string()
         } else {
             let stats = self.remote_ops.stats_presentation();
@@ -1134,6 +1156,7 @@ fn session_kind_label(kind: SessionKind) -> &'static str {
         SessionKind::Serial => "Serial",
         SessionKind::Rdp => "RDP",
         SessionKind::Vnc => "VNC",
+        SessionKind::AdbShell | SessionKind::AdbFiles | SessionKind::AdbScreen => "Android",
     }
 }
 

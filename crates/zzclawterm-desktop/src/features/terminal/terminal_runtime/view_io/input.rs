@@ -144,6 +144,7 @@ impl ZzClawTermApp {
         // Only drop an in-progress drag so a stuck drag cannot block further input.
         if self.terminal.selection.dragging {
             self.terminal.selection.dragging = false;
+            self.terminal.selection.block_gesture = None;
             self.terminal.selection.drag_pointer_position = None;
             self.terminal.selection.scroll_rehit_armed = false;
             self.stop_terminal_selection_autoscroll();
@@ -180,6 +181,7 @@ impl ZzClawTermApp {
         // pending Enter submission is applied to every successful peer.
         let mut ok_sessions = Vec::new();
         let write_started_at = Instant::now();
+        let navigation_candidate = self.prepare_command_navigation_input(&bytes);
         let result = if literal {
             self.write_session_literal_input_recorded(&session_id, &bytes)
         } else {
@@ -221,7 +223,7 @@ impl ZzClawTermApp {
         }
         let input_wake_duration = input_wake_started_at.elapsed();
 
-        self.note_shell_editing_input(&bytes, cx);
+        self.note_shell_editing_input_with_navigation(&bytes, navigation_candidate, cx);
         let suggestion_started_at = Instant::now();
         if terminal_should_track_command_suggestion_input(
             track_suggestions,
@@ -275,6 +277,7 @@ impl ZzClawTermApp {
         // the active session's wire bytes.
         if self.terminal.selection.dragging {
             self.terminal.selection.dragging = false;
+            self.terminal.selection.block_gesture = None;
             self.terminal.selection.drag_pointer_position = None;
             self.terminal.selection.scroll_rehit_armed = false;
             self.stop_terminal_selection_autoscroll();
@@ -326,6 +329,15 @@ impl ZzClawTermApp {
         let peers = self.sync_peer_session_ids(&session_id);
         let mut ok_sessions = Vec::new();
         let write_started_at = Instant::now();
+        // Kitty can encode Enter as CSI-u. Tracking/history still consume its
+        // logical submission, while each session keeps its own wire encoding.
+        let logical_bytes: &[u8] =
+            if event.keystroke.key == "enter" && !event.keystroke.modifiers.modified() {
+                b"\r"
+            } else {
+                &primary_bytes
+            };
+        let navigation_candidate = self.prepare_command_navigation_input(logical_bytes);
         match self.write_session_input_recorded(&session_id, &primary_bytes) {
             Ok(()) => ok_sessions.push(session_id),
             Err(error) => {
@@ -383,15 +395,7 @@ impl ZzClawTermApp {
         }
         let input_wake_duration = input_wake_started_at.elapsed();
 
-        // Kitty can encode Enter as CSI-u. Tracking/history still consume its
-        // logical submission, while each session keeps its own wire encoding.
-        let logical_bytes: &[u8] =
-            if event.keystroke.key == "enter" && !event.keystroke.modifiers.modified() {
-                b"\r"
-            } else {
-                &primary_bytes
-            };
-        self.note_shell_editing_input(logical_bytes, cx);
+        self.note_shell_editing_input_with_navigation(logical_bytes, navigation_candidate, cx);
         let suggestion_started_at = Instant::now();
         if terminal_should_track_command_suggestion_input(
             track_suggestions,
@@ -441,6 +445,11 @@ impl ZzClawTermApp {
         let Some(session_id) = self.session.active_id_owned() else {
             return false;
         };
+        if event.keystroke.key == "tab"
+            && let Some(view) = self.terminal.view.views.get_mut(&session_id)
+        {
+            view.tab_action_pressed = false;
+        }
         let peers = self.sync_peer_session_ids(&session_id);
         // Consume ownership even if the connection is no longer writable. A
         // reconnect key press and keys held by the previous TUI have no owner
@@ -678,7 +687,8 @@ impl ZzClawTermApp {
         event: &gpui::MouseMoveEvent,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.terminal.selection.mouse_report_button.is_some() {
+        if self.terminal.selection.mouse_report_button.is_some() || self.terminal.selection.dragging
+        {
             return false;
         }
         let Some(session_id) = self.terminal_session_at_point(event.position) else {
@@ -970,8 +980,15 @@ impl ZzClawTermApp {
             .capabilities
             .terminal_executions
             .capturing(session_id)
+            && bytes != b"\x03"
         {
             return Err("An automatic command is capturing this terminal".into());
+        }
+        if !bytes.is_empty() {
+            self.mcp
+                .capabilities
+                .terminal_executions
+                .note_manual_takeover(session_id);
         }
         self.write_terminal_input_recorded_impl(session_id, bytes, None)
     }
@@ -1046,7 +1063,7 @@ impl ZzClawTermApp {
             .session
             .manager()
             .write(session_id, &encoded)
-            .map_err(|error| error.to_string())
+            .map_err(|error| self.terminal_session_write_error_text(session_id, error))
         {
             self.record_terminal_session_write_failure(session_id, "input", &error);
             return Err(error);
@@ -1114,8 +1131,15 @@ impl ZzClawTermApp {
             .capabilities
             .terminal_executions
             .capturing(session_id)
+            && bytes != b"\x03"
         {
             return Err("An automatic command is capturing this terminal".into());
+        }
+        if !bytes.is_empty() {
+            self.mcp
+                .capabilities
+                .terminal_executions
+                .note_manual_takeover(session_id);
         }
         if self.security.screen_locked() {
             return Err("screen locked".to_string());
@@ -1126,7 +1150,7 @@ impl ZzClawTermApp {
             .session
             .manager()
             .write_raw(session_id, bytes)
-            .map_err(|error| error.to_string())
+            .map_err(|error| self.terminal_session_write_error_text(session_id, error))
         {
             self.record_terminal_session_write_failure(session_id, "raw input", &error);
             return Err(error);
@@ -1158,8 +1182,15 @@ impl ZzClawTermApp {
             .capabilities
             .terminal_executions
             .capturing(session_id)
+            && bytes != b"\x03"
         {
             return Err("An automatic command is capturing this terminal".into());
+        }
+        if !bytes.is_empty() {
+            self.mcp
+                .capabilities
+                .terminal_executions
+                .note_manual_takeover(session_id);
         }
         if self.security.screen_locked() {
             return Err("screen locked".to_string());
@@ -1174,7 +1205,7 @@ impl ZzClawTermApp {
         self.session
             .manager()
             .write(session_id, &encoded)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| self.terminal_session_write_error_text(session_id, error))?;
         if bytes.contains(&b'\r') || bytes.contains(&b'\n') {
             self.commands.complete_completion_submission(session_id);
         }
@@ -1231,6 +1262,26 @@ impl ZzClawTermApp {
         wire_bytes: &[u8],
         recording_bytes: &[u8],
     ) -> Result<(), String> {
+        self.write_session_framed_input_recorded_as(session_id, wire_bytes, recording_bytes, false)
+    }
+
+    /// Literal framing must also bypass Telnet's typed-Enter normalization.
+    pub(in crate::features) fn write_session_literal_wire_input_recorded_as(
+        &mut self,
+        session_id: &str,
+        wire_bytes: &[u8],
+        recording_bytes: &[u8],
+    ) -> Result<(), String> {
+        self.write_session_framed_input_recorded_as(session_id, wire_bytes, recording_bytes, true)
+    }
+
+    fn write_session_framed_input_recorded_as(
+        &mut self,
+        session_id: &str,
+        wire_bytes: &[u8],
+        recording_bytes: &[u8],
+        literal: bool,
+    ) -> Result<(), String> {
         if let Some(state) = self.terminal.editing.sessions.get_mut(session_id) {
             state.suggestion_fill = None;
         }
@@ -1238,13 +1289,27 @@ impl ZzClawTermApp {
         if self.security.screen_locked() {
             return Err("screen locked".to_string());
         }
+        if self
+            .mcp
+            .capabilities
+            .terminal_executions
+            .capturing(session_id)
+        {
+            return Err("An automatic command is capturing this terminal".into());
+        }
+        self.mcp
+            .capabilities
+            .terminal_executions
+            .note_manual_takeover(session_id);
         let disposition = terminal_wire_write_disposition(TerminalWireWriteKind::FramedInput);
         debug_assert!(!disposition.encode_session_charset);
-        if let Err(error) = self
-            .session
-            .manager()
-            .write(session_id, wire_bytes)
-            .map_err(|error| error.to_string())
+        let result = if literal {
+            self.session.manager().write_raw(session_id, wire_bytes)
+        } else {
+            self.session.manager().write(session_id, wire_bytes)
+        };
+        if let Err(error) =
+            result.map_err(|error| self.terminal_session_write_error_text(session_id, error))
         {
             self.record_terminal_session_write_failure(session_id, "framed input", &error);
             return Err(error);
@@ -1287,12 +1352,28 @@ impl ZzClawTermApp {
             .session
             .manager()
             .write_raw(session_id, bytes)
-            .map_err(|error| error.to_string())
+            .map_err(|error| self.terminal_session_write_error_text(session_id, error))
         {
             self.record_terminal_session_write_failure(session_id, "protocol response", &error);
             return Err(error);
         }
         Ok(())
+    }
+
+    fn terminal_session_write_error_text(
+        &self,
+        session_id: &str,
+        error: zzclawterm_transport::SessionError,
+    ) -> String {
+        if self
+            .session
+            .session_info(session_id)
+            .is_some_and(|session| session.kind == zzclawterm_transport::SessionKind::AdbShell)
+        {
+            rust_i18n::t!("android.errors.inputFailed").into_owned()
+        } else {
+            error.to_string()
+        }
     }
 
     fn record_terminal_session_write_failure(
@@ -1310,7 +1391,18 @@ impl ZzClawTermApp {
         if session_id.is_empty() {
             return;
         }
-        let log = terminal_session_write_failure_log(context, error);
+        let log = if self
+            .session
+            .session_info(session_id)
+            .is_some_and(|session| session.kind == zzclawterm_transport::SessionKind::AdbShell)
+        {
+            format!(
+                "\n# {}: {error}\n",
+                rust_i18n::t!("sessionNotice.writeFailed")
+            )
+        } else {
+            terminal_session_write_failure_log(context, error)
+        };
         self.recording
             .write_local_message(session_id.to_string(), log.clone());
         self.publish_session_notice(
@@ -1417,6 +1509,13 @@ impl ZzClawTermApp {
         if !focused {
             self.dismiss_command_suggestions(cx);
             self.clear_terminal_composition(cx);
+            if let Some(view) = self
+                .session
+                .active_id()
+                .and_then(|id| self.terminal.view.views.get_mut(id))
+            {
+                view.tab_action_pressed = false;
+            }
         }
         let Some(session_id) = self.session.active_id_owned() else {
             return;

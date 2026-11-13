@@ -1,7 +1,7 @@
 use super::components::agent_kind_display_name;
 use super::{
-    AiAgentStepPresentation, AiHeaderPresentation, AiMentionCandidate, AiModelChoice,
-    AiPanelChrome, AiPanelSnapshot, AiTargetSession, harness,
+    AI_COMPOSER_RESIZE_HANDLE_ID, AiAgentStepPresentation, AiHeaderPresentation,
+    AiMentionCandidate, AiModelChoice, AiPanelChrome, AiPanelSnapshot, AiTargetSession, harness,
 };
 use crate::features::ZzClawTermApp;
 use crate::features::formatting::short_id;
@@ -83,6 +83,10 @@ impl ZzClawTermApp {
         };
         AiHeaderPresentation {
             running: self.ai.chat_or_agent_is_running(),
+            conversation_title: self
+                .ai
+                .conversation_title()
+                .unwrap_or_else(|| t!("ai.newChat").to_string()),
             mode_label,
             selected_model_id,
             model_label,
@@ -371,6 +375,11 @@ impl ZzClawTermApp {
             discovery_index: self.ai.discovery_index(),
             prompt_draft,
             prompt_input,
+            composer_min_height: self.ai.composer_min_height(),
+            composer_resizing: self.ai.composer_is_resizing(),
+            composer_handle_active: self.shell.resize_handle_is_highlighted(
+                &gpui::SharedString::from(AI_COMPOSER_RESIZE_HANDLE_ID),
+            ),
             model_search_input,
             history_search_input,
             file_action_ready: self
@@ -464,6 +473,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn sync_ai_active_scope(&mut self, cx: &mut Context<Self>) {
+        let before = self.ai_header_presentation();
         let scope = self
             .session
             .active_id()
@@ -472,6 +482,7 @@ impl ZzClawTermApp {
         if self.ai.switch_visible_scope(&scope) {
             let draft = self.ai.chat_prompt_draft().to_string();
             self.reset_text_input("ai.chat.prompt", &draft, cx);
+            self.notify_root_if_ai_header_changed(before, cx);
         }
     }
 }

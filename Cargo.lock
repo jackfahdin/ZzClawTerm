@@ -181,7 +181,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.26.1-dev"
-source = "git+https://github.com/jackfahdin/alacritty?rev=6056cb4d0dc49a43a6542f3eb8a951c6d9220368#6056cb4d0dc49a43a6542f3eb8a951c6d9220368"
+source = "git+https://github.com/jackfahdin/alacritty?rev=eff8dffbd4c6063387c97c9c74a6428f329eee47#eff8dffbd4c6063387c97c9c74a6428f329eee47"
 dependencies = [
  "arrayvec",
  "base64 0.22.1",
@@ -923,12 +923,30 @@ dependencies = [
 [[package]]
 name = "bench_metrics"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "anyhow",
  "criterion",
  "libc",
  "perf-event2",
+]
+
+[[package]]
+name = "bindgen"
+version = "0.72.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags 2.13.2",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.13.0",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash 2.1.3",
+ "shlex 1.3.0",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1322,7 +1340,16 @@ dependencies = [
  "find-msvc-tools",
  "jobserver",
  "libc",
- "shlex",
+ "shlex 2.0.1",
+]
+
+[[package]]
+name = "cexpr"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fac387a98bb7c37292057cffc56d62ecb629900026402633ae9160df93a8766"
+dependencies = [
+ "nom 7.1.3",
 ]
 
 [[package]]
@@ -1431,6 +1458,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "clang-sys"
+version = "1.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
+dependencies = [
+ "glob",
+ "libc",
+ "libloading 0.8.9",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1513,7 +1551,7 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "gpui_util",
  "indexmap 2.14.2",
@@ -2398,7 +2436,7 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2923,6 +2961,31 @@ checksum = "a1f686ab92a9fb0eaf188f6c6c87b89490baa6fdb0db4544ba4dc47f7942489f"
 dependencies = [
  "rand_core 0.10.1",
  "subtle",
+]
+
+[[package]]
+name = "ffmpeg-next"
+version = "8.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7c4bd5ab1ac61f29c634df1175d350ded29cf74c3c6d4f7030431a5ae3c7d5d"
+dependencies = [
+ "bitflags 2.13.2",
+ "ffmpeg-sys-next",
+ "libc",
+]
+
+[[package]]
+name = "ffmpeg-sys-next"
+version = "8.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a314bc0e022a33a99567ed4bd2576bd58ffd8fcff7891c29194cfecc26a62547"
+dependencies = [
+ "bindgen",
+ "cc",
+ "libc",
+ "num_cpus",
+ "pkg-config",
+ "vcpkg",
 ]
 
 [[package]]
@@ -3717,7 +3780,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3788,7 +3851,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.9.0"
-source = "git+https://github.com/jackfahdin/gpui-kit?rev=25631f56a0d0c7c1baf6606de64c30874816b676#25631f56a0d0c7c1baf6606de64c30874816b676"
+source = "git+https://github.com/jackfahdin/gpui-kit?rev=15704adb9f0265fdb88ae7489a5032c897d19dfe#15704adb9f0265fdb88ae7489a5032c897d19dfe"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3828,7 +3891,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.9.0"
-source = "git+https://github.com/jackfahdin/gpui-kit?rev=25631f56a0d0c7c1baf6606de64c30874816b676#25631f56a0d0c7c1baf6606de64c30874816b676"
+source = "git+https://github.com/jackfahdin/gpui-kit?rev=15704adb9f0265fdb88ae7489a5032c897d19dfe#15704adb9f0265fdb88ae7489a5032c897d19dfe"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3904,7 +3967,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.9.0"
-source = "git+https://github.com/jackfahdin/gpui-kit?rev=25631f56a0d0c7c1baf6606de64c30874816b676#25631f56a0d0c7c1baf6606de64c30874816b676"
+source = "git+https://github.com/jackfahdin/gpui-kit?rev=15704adb9f0265fdb88ae7489a5032c897d19dfe#15704adb9f0265fdb88ae7489a5032c897d19dfe"
 dependencies = [
  "proc-macro-crate 3.5.0",
  "proc-macro2",
@@ -3915,7 +3978,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit"
 version = "0.9.0"
-source = "git+https://github.com/jackfahdin/gpui-kit?rev=25631f56a0d0c7c1baf6606de64c30874816b676#25631f56a0d0c7c1baf6606de64c30874816b676"
+source = "git+https://github.com/jackfahdin/gpui-kit?rev=15704adb9f0265fdb88ae7489a5032c897d19dfe#15704adb9f0265fdb88ae7489a5032c897d19dfe"
 dependencies = [
  "gpui",
  "gpui-base",
@@ -3929,7 +3992,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.9.0"
-source = "git+https://github.com/jackfahdin/gpui-kit?rev=25631f56a0d0c7c1baf6606de64c30874816b676#25631f56a0d0c7c1baf6606de64c30874816b676"
+source = "git+https://github.com/jackfahdin/gpui-kit?rev=15704adb9f0265fdb88ae7489a5032c897d19dfe#15704adb9f0265fdb88ae7489a5032c897d19dfe"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3943,7 +4006,7 @@ dependencies = [
 [[package]]
 name = "gpui_apple"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "anyhow",
  "async-task",
@@ -3982,7 +4045,7 @@ dependencies = [
 [[package]]
 name = "gpui_ios"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -4003,7 +4066,7 @@ dependencies = [
 [[package]]
 name = "gpui_linux"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -4047,7 +4110,7 @@ dependencies = [
 [[package]]
 name = "gpui_macos"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -4087,7 +4150,7 @@ dependencies = [
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -4098,7 +4161,7 @@ dependencies = [
 [[package]]
 name = "gpui_platform"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -4114,7 +4177,7 @@ dependencies = [
 [[package]]
 name = "gpui_shared_string"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "schemars 1.2.2",
  "serde",
@@ -4124,7 +4187,7 @@ dependencies = [
 [[package]]
 name = "gpui_util"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "anyhow",
  "log",
@@ -4134,7 +4197,7 @@ dependencies = [
 [[package]]
 name = "gpui_web"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -4163,7 +4226,7 @@ dependencies = [
 [[package]]
 name = "gpui_wgpu"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -4190,7 +4253,7 @@ dependencies = [
 [[package]]
 name = "gpui_windows"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -4591,6 +4654,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostname"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link 0.2.1",
+]
+
+[[package]]
 name = "html5ever"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4641,7 +4715,7 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5930,6 +6004,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
+name = "listeners"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "862c44851651b2c0941582733609f92d870550c75b25a8e3b161d7ace06bd5c9"
+dependencies = [
+ "byteorder",
+ "cc",
+ "libc",
+ "rustix",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6959,6 +7046,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-io-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33fafba39597d6dc1fb709123dfa8289d39406734be322956a69f0931c73bb15"
+dependencies = [
+ "libc",
+ "objc2-core-foundation",
+]
+
+[[package]]
 name = "objc2-io-surface"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6991,6 +7088,17 @@ dependencies = [
  "block2 0.6.2",
  "dispatch2",
  "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-open-directory"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb82bed227edf5201dfedf072bba4015a33d3d4a98519837295a90f0a23f676d"
+dependencies = [
+ "objc2 0.6.4",
+ "objc2-core-foundation",
  "objc2-foundation 0.3.2",
 ]
 
@@ -8423,6 +8531,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8841,7 +8955,7 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "derive_refineable",
 ]
@@ -9682,7 +9796,7 @@ dependencies = [
 [[package]]
 name = "scheduler"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "async-task",
  "backtrace",
@@ -10161,6 +10275,12 @@ dependencies = [
 
 [[package]]
 name = "shlex"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+
+[[package]]
+name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
@@ -10603,7 +10723,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sum_tree"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "heapless",
  "rayon",
@@ -10738,6 +10858,21 @@ dependencies = [
  "ntapi",
  "rayon",
  "windows 0.57.0",
+]
+
+[[package]]
+name = "sysinfo"
+version = "0.39.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
+dependencies = [
+ "libc",
+ "memchr",
+ "ntapi",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "objc2-open-directory",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -12077,6 +12212,12 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vello_common"
@@ -14267,7 +14408,7 @@ dependencies = [
  "anyhow",
  "log",
  "rand 0.8.8",
- "sysinfo",
+ "sysinfo 0.31.4",
  "windows 0.61.3",
  "windows-capture",
  "x11",
@@ -14438,9 +14579,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "zstd"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50adf04cf3ec914b0b9905c9dde90c80fe74bfd701e331fc80a39c512c525278"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "7.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "498d94ad68720c89b4fbe41b9090850651e68cb2dd9210ce7ffbff3a94653819"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.3+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f729a06d0257428fd9d997ac8db7e1407bd0262ab016b085b36bc52957c0052d"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
+
+[[package]]
 name = "ztracing"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 dependencies = [
  "tracing",
  "ztracing_macro",
@@ -14449,7 +14618,7 @@ dependencies = [
 [[package]]
 name = "ztracing_macro"
 version = "0.1.0"
-source = "git+https://github.com/jackfahdin/zed?rev=6cda7bc3f0e0ab64be33627851f56f8d908fe844#6cda7bc3f0e0ab64be33627851f56f8d908fe844"
+source = "git+https://github.com/jackfahdin/zed?rev=a45a77c08a7cd5ed364778eb84961e1bde650b73#a45a77c08a7cd5ed364778eb84961e1bde650b73"
 
 [[package]]
 name = "zune-core"
@@ -14570,6 +14739,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "zzclawterm-agent-client"
+version = "0.2.1"
+dependencies = [
+ "serde_json",
+ "tracing",
+ "windows-sys 0.61.2",
+ "zzclawterm-core",
+]
+
+[[package]]
+name = "zzclawterm-ai-client"
+version = "0.2.1"
+dependencies = [
+ "futures",
+ "genai",
+ "httpdate",
+ "reqwest 0.13.5",
+ "rustls",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "uuid",
+ "zzclawterm-core",
+]
+
+[[package]]
+name = "zzclawterm-android"
+version = "0.2.1"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+ "zzclawterm-core",
+]
+
+[[package]]
+name = "zzclawterm-android-helper"
+version = "0.2.1"
+dependencies = [
+ "ffmpeg-next",
+ "tempfile",
+ "zzclawterm-android",
+ "zzclawterm-core",
+]
+
+[[package]]
 name = "zzclawterm-app"
 version = "0.2.1"
 dependencies = [
@@ -14596,6 +14816,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "zzclawterm-cloud-storage"
+version = "0.2.1"
+dependencies = [
+ "futures",
+ "hex",
+ "http",
+ "httpdate",
+ "md5",
+ "opendal",
+ "quick-xml 0.40.1",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+ "zed-reqwest",
+ "zzclawterm-core",
+]
+
+[[package]]
 name = "zzclawterm-core"
 version = "0.2.1"
 dependencies = [
@@ -14608,6 +14853,7 @@ dependencies = [
  "csscolorparser",
  "dirs",
  "encoding_rs",
+ "flate2",
  "futures",
  "glob",
  "hex",
@@ -14647,38 +14893,24 @@ version = "0.2.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
- "bytemuck",
  "dirs",
- "encoding_rs",
- "flate2",
  "futures",
- "genai",
  "gpui",
+ "gpui_platform",
  "gtk",
- "hayro",
  "hex",
- "http",
- "httpdate",
  "image",
  "keyring",
- "md5",
- "minisign-verify",
- "opendal",
- "quick-xml 0.40.1",
  "rand 0.10.3",
  "raw-window-handle",
- "rcgen",
  "redb",
  "regex",
- "reqwest 0.13.5",
- "rqrr",
+ "russh",
  "rust-i18n",
- "rustls",
  "semver",
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "tar",
  "tempfile",
  "time",
  "tokio",
@@ -14690,14 +14922,19 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "x11rb",
- "zed-reqwest",
  "zeroize",
  "zip",
+ "zzclawterm-agent-client",
+ "zzclawterm-ai-client",
+ "zzclawterm-android",
+ "zzclawterm-cloud-storage",
  "zzclawterm-core",
  "zzclawterm-files",
+ "zzclawterm-mcp-host",
  "zzclawterm-mcp-protocol",
  "zzclawterm-otp",
  "zzclawterm-plugin-host",
+ "zzclawterm-preview",
  "zzclawterm-recording",
  "zzclawterm-remote-desktop",
  "zzclawterm-remote-ops",
@@ -14705,8 +14942,10 @@ dependencies = [
  "zzclawterm-sync",
  "zzclawterm-terminal",
  "zzclawterm-terminal-gpui",
+ "zzclawterm-translation-client",
  "zzclawterm-transport",
  "zzclawterm-ui",
+ "zzclawterm-updater",
  "zzclawterm-windows-rdp",
 ]
 
@@ -14729,10 +14968,12 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
  "unicode-normalization",
  "uuid",
  "windows-sys 0.61.2",
+ "zzclawterm-android",
  "zzclawterm-core",
  "zzclawterm-terminal",
  "zzclawterm-transport",
@@ -14751,6 +14992,26 @@ dependencies = [
  "tokio",
  "tokio-util",
  "uuid",
+ "zzclawterm-core",
+ "zzclawterm-mcp-protocol",
+]
+
+[[package]]
+name = "zzclawterm-mcp-host"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "futures",
+ "hex",
+ "rand 0.10.3",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "windows-sys 0.61.2",
  "zzclawterm-core",
  "zzclawterm-mcp-protocol",
 ]
@@ -14791,12 +15052,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "zzclawterm-preview"
+version = "0.2.1"
+dependencies = [
+ "bytemuck",
+ "hayro",
+ "image",
+ "qrcode",
+ "rqrr",
+ "serde_json",
+ "zzclawterm-core",
+]
+
+[[package]]
 name = "zzclawterm-rdp-helper"
 version = "0.2.1"
 dependencies = [
  "anyhow",
  "arboard",
  "dirs",
+ "hostname",
  "ironrdp-client",
  "ironrdp-cliprdr",
  "ironrdp-core",
@@ -14818,12 +15093,14 @@ dependencies = [
 name = "zzclawterm-recording"
 version = "0.2.1"
 dependencies = [
+ "futures",
  "regex",
  "same-file",
  "serde",
  "tempfile",
  "thiserror 2.0.20",
  "time",
+ "tracing",
  "zzclawterm-core",
  "zzclawterm-terminal",
 ]
@@ -14847,11 +15124,17 @@ name = "zzclawterm-remote-ops"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "libc",
+ "listeners",
+ "russh",
  "serde",
  "serde_json",
+ "sysinfo 0.39.6",
  "tempfile",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
+ "zeroize",
  "zzclawterm-core",
  "zzclawterm-transport",
 ]
@@ -14907,6 +15190,7 @@ dependencies = [
  "regex",
  "unicode-segmentation",
  "unicode-width",
+ "zeroize",
  "zzclawterm-core",
 ]
 
@@ -14926,6 +15210,16 @@ dependencies = [
  "zzclawterm-core",
  "zzclawterm-terminal",
  "zzclawterm-ui",
+]
+
+[[package]]
+name = "zzclawterm-translation-client"
+version = "0.2.1"
+dependencies = [
+ "serde_json",
+ "url",
+ "zed-reqwest",
+ "zzclawterm-core",
 ]
 
 [[package]]
@@ -14953,11 +15247,14 @@ dependencies = [
  "time",
  "tokio",
  "tokio-socks",
+ "tokio-util",
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
  "zeroize",
  "zmodem2",
+ "zstd",
+ "zzclawterm-android",
  "zzclawterm-core",
  "zzclawterm-terminal",
 ]
@@ -14972,6 +15269,21 @@ dependencies = [
  "ropey",
  "rust-i18n",
  "url",
+ "zzclawterm-core",
+]
+
+[[package]]
+name = "zzclawterm-updater"
+version = "0.2.1"
+dependencies = [
+ "base64 0.22.1",
+ "flate2",
+ "minisign-verify",
+ "semver",
+ "tar",
+ "windows-sys 0.61.2",
+ "zed-reqwest",
+ "zip",
  "zzclawterm-core",
 ]
 

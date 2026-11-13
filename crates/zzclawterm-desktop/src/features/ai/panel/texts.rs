@@ -455,7 +455,10 @@ impl AiPanel {
                         });
                     }),
             ]
-        });
+        })
+        // Quote / Copy are short labels. The default 220px menu leaves a wide
+        // empty track beside the icon; keep this one at the compact menu width.
+        .min_width(px(144.));
         let state = entry.state.clone();
         div()
             .min_w_0()

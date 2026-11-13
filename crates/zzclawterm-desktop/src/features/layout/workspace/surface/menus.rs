@@ -69,6 +69,7 @@ fn new_session_connection_protocol(connection: &SavedConnection) -> &'static str
         ConnectionType::Rdp { .. } => "rdp",
         ConnectionType::Ssh { .. } => "ssh",
         ConnectionType::Vnc { .. } => "vnc",
+        ConnectionType::Adb { .. } => "adb",
     }
 }
 
@@ -346,6 +347,9 @@ impl ZzClawTermApp {
                         zzclawterm_transport::SessionKind::RawTcp => "SSH",
                         zzclawterm_transport::SessionKind::Rdp => "RDP",
                         zzclawterm_transport::SessionKind::Vnc => "VNC",
+                        zzclawterm_transport::SessionKind::AdbShell
+                        | zzclawterm_transport::SessionKind::AdbFiles
+                        | zzclawterm_transport::SessionKind::AdbScreen => "Android",
                     },
                     SavedConnection::kind_label,
                 );
@@ -1107,6 +1111,7 @@ mod tests {
             auth: None,
             recording: None,
             ssh_algorithms: None,
+            ssh_compatibility_mode: false,
             ssh_profile: Default::default(),
             terminal_type: None,
             sftp: Default::default(),

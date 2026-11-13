@@ -116,6 +116,85 @@ pub struct SyncScope {
     pub trusted_hosts: bool,
 }
 
+/// The application sync policy is fixed. `SyncScope` remains a compatibility
+/// contract for reading older settings and encrypted replicas, not a preference.
+pub const FIXED_CLOUD_SYNC_SCOPE: SyncScope = SyncScope {
+    secrets: false,
+    preferences: false,
+    ai: false,
+    keybindings: false,
+    trusted_hosts: false,
+};
+
+pub fn fixed_cloud_sync_field(field: &SyncFieldId) -> bool {
+    CORE_KINDS.contains(&field.resource.kind.as_str())
+        && supports_field(&field.resource.kind, &field.field)
+}
+
+/// Legacy grouped registers may contain future properties. They must remain
+/// readable locally, but cannot expand the content of a fixed-scope publication.
+pub fn valid_fixed_cloud_sync_value(field: &SyncFieldId, value: &Value) -> bool {
+    if !fixed_cloud_sync_field(field) {
+        return false;
+    }
+    let kind = field.resource.kind.as_str();
+    let name = field.field.as_str();
+    if name == "$present" {
+        return value.is_boolean();
+    }
+    if kind == "connection" && !connection_fields(name).is_empty() {
+        return value.as_object().is_some_and(|fields| {
+            fields.iter().all(|(key, value)| match key.as_str() {
+                "device" => {
+                    value.is_object()
+                        && pick(value, &["kind", "serial", "host", "port"]) == *value
+                        && value
+                            .as_object()
+                            .unwrap()
+                            .values()
+                            .all(fixed_scalar_or_list)
+                }
+                "screen" => {
+                    value.is_object()
+                        && pick(value, &["max_size", "max_fps", "bit_rate", "view_only"]) == *value
+                        && value
+                            .as_object()
+                            .unwrap()
+                            .values()
+                            .all(fixed_scalar_or_list)
+                }
+                _ => fixed_scalar_or_list(value),
+            })
+        }) && pick(value, connection_fields(name)) == *value;
+    }
+    if matches!(kind, "proxy" | "tunnel") && name == "endpoint" {
+        return value
+            .as_object()
+            .is_some_and(|fields| fields.values().all(fixed_scalar_or_list))
+            && pick(value, network_endpoint_fields(kind)) == *value;
+    }
+    if kind == "theme" && name == "colors" {
+        let Ok(mut colors) = serde_json::from_value::<crate::themes::ThemeColors>(value.clone())
+        else {
+            return false;
+        };
+        colors.extra.clear();
+        colors.terminal.extra.clear();
+        return serde_json::to_value(colors).is_ok_and(|clean| clean == *value);
+    }
+    fixed_scalar_or_list(value)
+}
+
+fn fixed_scalar_or_list(value: &Value) -> bool {
+    match value {
+        Value::Object(_) => false,
+        Value::Array(values) => values
+            .iter()
+            .all(|value| !value.is_object() && !value.is_array()),
+        _ => true,
+    }
+}
+
 pub const CORE_KINDS: &[&str] = &[
     "connection",
     "connection_group",
@@ -329,10 +408,21 @@ fn project_connection(source: &Value) -> Result<Value, String> {
         "telnet" => &["type", "host", "port", "username"],
         "rdp" => &["type", "host", "port", "username", "domain"],
         "vnc" => &["type", "host", "port", "username"],
+        "adb" => &["type", "device"],
         "local" | "local_terminal" | "serial" => &["type"],
         _ => return Err("Unsupported connection protocol".into()),
     };
     result["endpoint"] = pick(source, endpoint_fields);
+    if kind == "adb" {
+        if let Some(device) = source.get("device") {
+            result["endpoint"]["device"] = pick(device, &["kind", "serial", "host", "port"]);
+        }
+        let mut android = pick(source, &["directory"]);
+        if let Some(screen) = source.get("screen") {
+            android["screen"] = pick(screen, &["max_size", "max_fps", "bit_rate", "view_only"]);
+        }
+        result["android"] = android;
+    }
     result["terminal"] = pick(source, connection_fields("terminal"));
     for name in ["sftp", "ssh_algorithms"] {
         if let Some(value) = source.get(name).filter(|value| value.is_object()) {
@@ -457,7 +547,7 @@ pub fn apply_record(kind: &str, original: &Value, projected: &Value) -> Result<V
         } else if kind == "connection"
             && matches!(
                 field.as_str(),
-                "endpoint" | "placement" | "terminal" | "serial" | "icon" | "telnet"
+                "endpoint" | "placement" | "terminal" | "serial" | "icon" | "telnet" | "android"
             )
         {
             let Some(group) = value.as_object() else {
@@ -465,7 +555,22 @@ pub fn apply_record(kind: &str, original: &Value, projected: &Value) -> Result<V
             };
             for (key, value) in group {
                 if connection_fields(field).contains(&key.as_str()) {
-                    result[key] = value.clone();
+                    let nested_fields: &[&str] = match key.as_str() {
+                        "device" => &["kind", "serial", "host", "port"],
+                        "screen" => &["max_size", "max_fps", "bit_rate", "view_only"],
+                        _ => &[],
+                    };
+                    if nested_fields.is_empty() {
+                        result[key] = value.clone();
+                    } else {
+                        let before = pick(original.get(key).unwrap_or(&Value::Null), nested_fields);
+                        let after = pick(value, nested_fields);
+                        result[key] = overlay_classified(
+                            original.get(key).unwrap_or(&Value::Null),
+                            &before,
+                            &after,
+                        );
+                    }
                 }
             }
         } else if kind == "connection"
@@ -540,6 +645,7 @@ pub fn supports_field(kind: &str, field: &str) -> bool {
                 | "description"
                 | "tags"
                 | "endpoint"
+                | "android"
                 | "placement"
                 | "terminal"
                 | "serial"
@@ -612,13 +718,15 @@ fn overlay_classified(original: &Value, before: &Value, after: &Value) -> Value 
 
 fn connection_fields(field: &str) -> &'static [&'static str] {
     match field {
-        "endpoint" => &["type", "host", "port", "username", "domain"],
+        "endpoint" => &["type", "host", "port", "username", "domain", "device"],
+        "android" => &["directory", "screen"],
         "placement" => &["group_id", "sort_order"],
         "terminal" => &[
             "encoding",
             "backspace_mode",
             "terminal_type",
             "ssh_profile",
+            "ssh_compatibility_mode",
             "ai_execution_profile",
             "dynamic_tab_title",
         ],

@@ -3,12 +3,12 @@ pub(crate) use zzclawterm_terminal::{
     terminal_text_cells,
 };
 pub(crate) use zzclawterm_terminal_gpui::{
-    TerminalBufferMatch, TerminalGridSelection, TerminalKeyMode, TerminalKeywordHighlightSnapshot,
-    TerminalKeywordHighlighter, TerminalLineDecorations, ZzClawTerminalElement,
-    ZzClawTerminalLayoutCache, compile_terminal_keyword_highlighter,
+    TerminalBufferMatch, TerminalGridSelection, TerminalKeyMode, TerminalKeywordHighlightConfig,
+    TerminalKeywordHighlightSnapshot, TerminalKeywordHighlighter, TerminalLineDecorations,
+    ZzClawTerminalElement, ZzClawTerminalLayoutCache, compile_terminal_keyword_highlighter,
     precompute_terminal_keyword_highlights_for_rows_with_stats_and_cancel, terminal_font_features,
     terminal_key_bytes_with_mode, terminal_key_release_bytes_with_mode,
-    terminal_keyword_highlight_expanded_rows, terminal_keyword_rules_key,
+    terminal_keyword_highlight_config_key, terminal_keyword_highlight_expanded_rows,
     terminal_screen_from_output,
 };
 

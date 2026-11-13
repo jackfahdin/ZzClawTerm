@@ -4,8 +4,11 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use zeroize::Zeroize;
-use zzclawterm_core::terminal::editing::{EditCapability, EditPhase, ShellEditState};
+use zzclawterm_core::terminal::editing::{
+    EditCapability, EditPhase, ShellEditState, supports_scalar_editing,
+};
 use zzclawterm_core::terminal::input_tracker::TerminalInputState;
+use zzclawterm_core::terminal::shell_prompt::ShellPrompt;
 use zzclawterm_terminal::editing::InputMapping;
 use zzclawterm_terminal::{ShellInputAnchor, TerminalLineId, TerminalSnapshot};
 
@@ -20,12 +23,15 @@ pub(super) struct TerminalEditingState {
 
 #[derive(Default)]
 pub(super) struct SessionEditingState {
-    pub(super) command_navigation_interactive: bool,
+    // Survives snapshot reconciliation: recovering a history line is not typing.
+    pub(super) browsing_history: bool,
+    pub(super) command_navigation: super::navigation_input::CommandNavigationInputState,
     pub(super) model: ShellEditState,
     pub(super) capability: EditCapability,
     pub(super) echo_line_editor: bool,
     pub(super) launched_line_editor: bool,
     pub(super) line_editor_prompt: Option<String>,
+    pub(super) editor_evidence: Option<ShellPrompt>,
     pub(super) mapping: Option<InputMapping>,
     pub(super) selection: Option<(TerminalSelection, u64)>,
     pub(super) selection_origin_version: Option<u64>,
@@ -77,6 +83,48 @@ impl SnapshotEvidence {
 }
 
 impl SessionEditingState {
+    pub(super) fn note_suggestion_input(&mut self, text: &str) {
+        if matches!(
+            text,
+            "\u{1b}[A" | "\u{1b}OA" | "\u{1b}[B" | "\u{1b}OB" | "\u{10}" | "\u{e}"
+        ) {
+            self.browsing_history = true;
+        } else if (!text.is_empty()
+            && text
+                .chars()
+                .all(|ch| !ch.is_control() || matches!(ch, '\r' | '\n' | '\t')))
+            || text.contains("\u{1b}[200~")
+            || matches!(
+                text,
+                "\r" | "\n"
+                    | "\u{3}"
+                    | "\u{4}"
+                    | "\t"
+                    | "\u{7f}"
+                    | "\u{8}"
+                    | "\u{15}"
+                    | "\u{17}"
+                    | "\u{b}"
+                    | "\u{1b}[3~"
+            )
+        {
+            self.browsing_history = false;
+        }
+    }
+
+    pub(super) fn confirmed_input_at_end(&self) -> bool {
+        let input = &self.model.input;
+        !self.awaiting_snapshot
+            && self.model.phase == EditPhase::Ready
+            && self.mapping.is_some()
+            && !input.desynced
+            && !input.line_rewrite_required
+            && !input.multiline
+            && !input.paste_mode
+            && input.cursor == input.value.len()
+            && supports_scalar_editing(&input.value)
+    }
+
     pub(super) fn cancel_stale_suggestion_fill(&mut self, now: Instant, sync_revision: u64) {
         if self.suggestion_fill.as_ref().is_some_and(|request| {
             request.request_id != self.confirmation_id
@@ -113,6 +161,14 @@ impl SessionEditingState {
         self.capability.allows_editing(self.echo_line_editor)
     }
 
+    pub(super) fn observe_editor_evidence(&mut self, backend: Option<ShellPrompt>) {
+        if self.editor_evidence != backend {
+            self.editor_evidence = backend;
+            self.model.version = self.model.version.wrapping_add(1);
+            self.suggestion_fill = None;
+        }
+    }
+
     fn deactivate(&mut self) {
         self.model.deactivate(self.allows_editing());
         self.invalidate();
@@ -122,6 +178,7 @@ impl SessionEditingState {
         self.suggestion_fill = None;
         self.model.invalidate();
         self.capability = EditCapability::None;
+        self.editor_evidence = None;
         self.mapping = None;
         self.selection = None;
         self.selection_origin_version = None;
@@ -151,6 +208,9 @@ impl TerminalEditingState {
 
     pub(super) fn state(&self) -> Option<&SessionEditingState> {
         self.sessions.get(&self.active)
+    }
+    pub(super) fn is_active(&self, session_id: &str) -> bool {
+        self.active == session_id
     }
     pub(super) fn state_mut(&mut self) -> &mut SessionEditingState {
         self.sessions.entry(self.active.clone()).or_default()
@@ -186,11 +246,15 @@ impl TerminalEditingState {
     }
 
     pub(super) fn clear_active(&mut self) {
+        // Losing editing authorization (alternate screen, credentials, locks)
+        // cannot prove that the foreground program returned to the shell.
+        let command_navigation = std::mem::take(&mut self.state_mut().command_navigation);
         let awaiting_snapshot = self.state_mut().awaiting_snapshot;
         let version = self.state_mut().model.version.wrapping_add(1);
         let mut model = ShellEditState::default();
         model.version = version;
         *self.state_mut() = SessionEditingState {
+            command_navigation,
             awaiting_snapshot,
             model,
             ..SessionEditingState::default()
@@ -216,9 +280,17 @@ impl super::state::TerminalFeatureState {
 
     pub(in crate::features) fn invalidate_shell_editing_session(&mut self, session_id: &str) {
         if let Some(state) = self.editing.sessions.get_mut(session_id) {
+            // Only a line that already holds tracked text has an echo that the
+            // new geometry can invalidate. The first pane layout also resizes an
+            // untouched line; marking that empty tracker desynced would leave
+            // the first line of a new session ineligible for suggestions until
+            // an Enter reset the flag.
+            let tracked_text = !state.model.input.value.is_empty();
             state.invalidate();
             state.model.clear_input();
-            state.model.input.desynced = true;
+            if tracked_text {
+                state.model.input.desynced = true;
+            }
         }
     }
 }
@@ -231,6 +303,36 @@ mod tests {
     use zzclawterm_core::terminal::editing::{
         EDIT_CONFIRMATION_TIMEOUT, EditCapability, EditPhase,
     };
+
+    #[test]
+    fn history_navigation_suppression_survives_cursor_moves_and_session_switches() {
+        let mut state = TerminalEditingState::default();
+        state.activate("one");
+        state.state_mut().note_suggestion_input("\u{1b}[A");
+        for input in ["\u{1b}[D", "\u{1b}[C", "\u{1b}[H", "\u{1b}[F", "\u{1b}"] {
+            state.state_mut().note_suggestion_input(input);
+            assert!(state.state().unwrap().browsing_history);
+        }
+        state.activate("two");
+        assert!(!state.state().unwrap().browsing_history);
+        state.activate("one");
+        assert!(state.state().unwrap().browsing_history);
+        for input in [
+            "x",
+            "中文",
+            "\u{7f}",
+            "\u{1b}[3~",
+            "\t",
+            "\r",
+            "\u{3}",
+            "one\ntwo",
+            "\u{1b}[200~paste\u{1b}[201~",
+        ] {
+            state.state_mut().note_suggestion_input("\u{1b}[A");
+            state.state_mut().note_suggestion_input(input);
+            assert!(!state.state().unwrap().browsing_history);
+        }
+    }
 
     #[test]
     fn switching_sessions_retains_only_confirmed_editable_input() {

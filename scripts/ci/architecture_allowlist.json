@@ -2,11 +2,6 @@
   "wildcard_super_import": [],
   "desktop_feature_thread_spawn": [
     {
-      "path": "crates/zzclawterm-desktop/src/features/ai/agent_management.rs",
-      "max_count": 1,
-      "reason": "The cancellation unit test uses a temporary waiter thread and joins it before returning."
-    },
-    {
       "path": "crates/zzclawterm-desktop/src/features/app_state/store_runtime.rs",
       "max_count": 1,
       "reason": "The GPUI shutdown responsiveness test uses a watchdog thread and joins it before returning."
@@ -34,17 +29,12 @@
       "reason": "CredentialAutofillMatchPipeline owns, stops, and joins its matcher worker."
     },
     {
-      "path": "crates/zzclawterm-desktop/src/models/recording.rs",
-      "max_count": 1,
-      "reason": "RecordingWritePipeline owns, stops, and joins its writer worker."
-    },
-    {
       "path": "crates/zzclawterm-desktop/src/models/session_event_bridge.rs",
       "max_count": 1,
       "reason": "SessionEventBridge owns, signals, and joins its bridge worker."
     },
     {
-      "path": "crates/zzclawterm-desktop/src/models/terminal/mod.rs",
+      "path": "crates/zzclawterm-desktop/src/models/terminal/frame_pipeline.rs",
       "max_count": 1,
       "reason": "TerminalFramePipeline owns, closes, and joins its frame worker."
     },
@@ -74,9 +64,9 @@
       "reason": "SshConnectionPool owns its process-wide disconnect worker and DisconnectWorker joins it during shutdown."
     },
     {
-      "path": "crates/zzclawterm-desktop/src/features/session/trzsz_runtime.rs",
-      "max_count": 3,
-      "reason": "Per-session trzsz state owns, stops, and joins prepare, upload, and download workers."
+      "path": "crates/zzclawterm-desktop/src/app_shell/session_hub/ssh_connections/background.rs",
+      "max_count": 1,
+      "reason": "Background SSH acquisition coalesces callers onto one connector per cached entry, tracks completion in EntryState, and cancels the dial when the last waiter cancels; a dedicated connector lets each waiting scheduler job respect its own cancellation and deadline."
     },
     {
       "path": "crates/zzclawterm-desktop/src/features/session/xymodem_runtime.rs",
@@ -85,6 +75,21 @@
     }
   ],
   "raw_scroll_container": [
+    {
+      "path": "crates/zzclawterm-desktop/src/features/terminal/command_suggestions/mod.rs",
+      "max_count": 1,
+      "reason": "Command suggestions track a caller-owned ScrollHandle for keyboard reveal and attach vertical_scrollbar to the non-scrolling parent outside the header and footer."
+    },
+    {
+      "path": "crates/zzclawterm-desktop/src/features/panels/quick_command_editor_overlay.rs",
+      "max_count": 1,
+      "reason": "The category picker owns its navigation ScrollHandle in command feature state; the in-flow candidate list tracks it and the non-scrolling parent attaches vertical_scrollbar."
+    },
+    {
+      "path": "crates/zzclawterm-desktop/src/features/assets/batch_edit/view.rs",
+      "max_count": 1,
+      "reason": "Batch draft owns the body ScrollHandle; in-flow body tracks it and the non-scrolling parent attaches vertical_scrollbar outside the selector and footer."
+    },
     {
       "path": "crates/zzclawterm-desktop/src/features/panels/session_overlays.rs",
       "max_count": 1,
@@ -116,6 +121,11 @@
       "reason": "Connection editor content tracks its caller-owned ScrollHandle for section anchors and keyboard reveal; connection_editor_frame in connection/layout.rs attaches vertical_scrollbar to the non-scrolling parent."
     },
     {
+      "path": "crates/zzclawterm-desktop/src/features/pages/settings/ai/models/tests.rs",
+      "max_count": 1,
+      "reason": "The model-row layout fixture tracks a caller-owned ScrollHandle to verify scrolling and attaches vertical_scrollbar to the non-scrolling parent."
+    },
+    {
       "path": "crates/zzclawterm-desktop/src/features/pages/transfers/browser/view.rs",
       "max_count": 1,
       "reason": "Browser uses a caller-owned horizontal scrollbar."
@@ -126,6 +136,11 @@
       "reason": "Transfer path menu uses a caller-owned ScrollHandle and attaches an explicit vertical scrollbar to the scrolling child."
     },
     {
+      "path": "crates/zzclawterm-desktop/src/features/pages/transfers/overlays_favorites.rs",
+      "max_count": 1,
+      "reason": "The favorites menu tracks its caller-owned ScrollHandle for keyboard reveal and attaches vertical_scrollbar to the non-scrolling parent inside the positioned popup shell."
+    },
+    {
       "path": "crates/zzclawterm-ui/src/settings.rs",
       "max_count": 1,
       "reason": "Settings content tracks an explicit scroll handle and attaches a visible vertical scrollbar to the non-scrolling parent."
@@ -134,11 +149,6 @@
       "path": "crates/zzclawterm-ui/src/widgets.rs",
       "max_count": 2,
       "reason": "Reusable widgets own caller-positioned scrollbar overlays."
-    },
-    {
-      "path": "crates/zzclawterm-desktop/src/features/pages/settings/ai/models/tests.rs",
-      "max_count": 1,
-      "reason": "The model-rows test fixture tracks its ScrollHandle and attaches vertical_scrollbar on the non-scrolling parent."
     }
   ]
 }

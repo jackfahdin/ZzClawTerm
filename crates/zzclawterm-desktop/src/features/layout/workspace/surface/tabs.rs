@@ -503,6 +503,9 @@ impl ZzClawTermApp {
                     zzclawterm_transport::SessionKind::RawTcp => "SSH",
                     zzclawterm_transport::SessionKind::Rdp => "RDP",
                     zzclawterm_transport::SessionKind::Vnc => "VNC",
+                    zzclawterm_transport::SessionKind::AdbShell
+                    | zzclawterm_transport::SessionKind::AdbFiles
+                    | zzclawterm_transport::SessionKind::AdbScreen => "Android",
                 };
                 resolve_connection_icon(Some(icon), kind)
             });

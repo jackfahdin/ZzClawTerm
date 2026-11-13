@@ -604,7 +604,10 @@ fn wrap_shell_integration_payload(
         ShellKind::Bash => {
             " if [[ -o history ]]; then ZZCLAWTERM_INJ_HISTORY_WAS_ENABLED=1; ZZCLAWTERM_PRUNE_HISTORY=1; else unset ZZCLAWTERM_INJ_HISTORY_WAS_ENABLED ZZCLAWTERM_PRUNE_HISTORY; fi; ZZCLAWTERM_LAST_HISTCMD=\"${HISTCMD-}\"; export ZZCLAWTERM_INJ=1; set +o history\n"
         }
-        ShellKind::Zsh => " fc -p /dev/null 2>/dev/null\n export ZZCLAWTERM_INJ=1;\n",
+        // The first physical line pushes an anonymous in-memory history list.
+        // Record its status only on the next line, after history has switched, so
+        // injection variables never enter the user's original history.
+        ShellKind::Zsh => " fc -p\n ZZCLAWTERM_INJ_HISTORY_PUSHED=$?; export ZZCLAWTERM_INJ=1;\n",
         ShellKind::Fish => " set -gx ZZCLAWTERM_INJ 1\n",
         ShellKind::PosixSh | ShellKind::Unknown => return None,
     };
@@ -614,8 +617,11 @@ fn wrap_shell_integration_payload(
                 "\nif [ -n \"${{ZZCLAWTERM_INJ_HISTORY_WAS_ENABLED:-}}\" ]; then set -o history; __zzclawterm_prune_history; else unset ZZCLAWTERM_PRUNE_HISTORY; fi; unset ZZCLAWTERM_INJ_HISTORY_WAS_ENABLED; __zzclawterm_install_prompt {install_arg} 2>/dev/null || true; printf '{ready}'\n"
             )
         }
+        // The ready marker must be emitted before `fc -P`: a failed pop aborts the
+        // remainder of its physical line, which previously swallowed the marker and
+        // stalled startup for the full integration timeout.
         ShellKind::Zsh => format!(
-            "\n__zzclawterm_install_prompt {install_arg} 2>/dev/null || true; fc -P 2>/dev/null; printf '{ready}'\n"
+            "\n__zzclawterm_install_prompt {install_arg} 2>/dev/null || true\nprintf '{ready}'\nif [ \"${{ZZCLAWTERM_INJ_HISTORY_PUSHED:-1}}\" = 0 ]; then unset ZZCLAWTERM_INJ_HISTORY_PUSHED ZZCLAWTERM_INJ; fc -P 2>/dev/null; else unset ZZCLAWTERM_INJ_HISTORY_PUSHED ZZCLAWTERM_INJ; fi\n"
         ),
         ShellKind::Fish => format!(
             "\n __zzclawterm_install_prompt {install_arg} 2>/dev/null; or true\n printf '{ready}'\n"
@@ -1103,7 +1109,7 @@ __zzclawterm_emit_command(){
 }
 __zzclawterm_cwd_prompt(){
   [ -n "${ZZCLAWTERM_ZSH_CWD_READY:-}" ] || return 0
-  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "${PWD//%/%25}"
+  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "${PWD//\%/%25}"
 }
 __zzclawterm_cwd_preexec(){
   [ -n "${ZZCLAWTERM_ZSH_CWD_READY:-}" ] || return 0
@@ -1120,7 +1126,7 @@ __zzclawterm_precmd_d(){
 }
 __zzclawterm_prompt(){
   [ -n "${ZZCLAWTERM_ZSH_HOOKS_READY:-}" ] || return 0
-  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "${PWD//%/%25}"
+  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "${PWD//\%/%25}"
   printf '\033]133;A\007'
   [[ "$PS1" == *$'\033]133;B\007'* ]] || PS1="$PS1"$'%{\033]133;B\007%}'
 }
@@ -1307,7 +1313,7 @@ __zzclawterm_emit_command(){
 }
 __zzclawterm_cwd_prompt(){
   [ -n "${ZZCLAWTERM_ZSH_CWD_READY:-}" ] || return 0
-  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "${PWD//%/%25}"
+  printf '\033]7;file://%s%s\007' "$(__zzclawterm_host)" "${PWD//\%/%25}"
 }
 __zzclawterm_cwd_preexec(){
   [ -n "${ZZCLAWTERM_ZSH_CWD_READY:-}" ] || return 0
@@ -1666,7 +1672,8 @@ mod tests {
                     assert!(uploaded.contains("set -o history; __zzclawterm_prune_history"));
                 }
                 ShellKind::Zsh => {
-                    assert!(uploaded.starts_with(" fc -p /dev/null"));
+                    assert!(uploaded.starts_with(" fc -p\n"));
+                    assert!(!uploaded.contains("mktemp"));
                     assert!(uploaded.contains("fc -P 2>/dev/null"));
                 }
                 ShellKind::Fish => {
@@ -1709,10 +1716,52 @@ mod tests {
             assert!(script.contains("ZzClawTermReady:rc-history-guard"));
             match shell {
                 ShellKind::Bash => assert!(script.contains("if [[ -o history ]]")),
-                ShellKind::Zsh => assert!(script.starts_with(" fc -p /dev/null")),
+                ShellKind::Zsh => {
+                    assert!(script.starts_with(" fc -p\n"));
+                    assert!(!script.contains("mktemp"));
+                }
                 ShellKind::Fish => assert!(script.starts_with(" set -gx ZZCLAWTERM_INJ 1")),
                 ShellKind::PosixSh | ShellKind::Unknown => unreachable!(),
             }
+        }
+    }
+
+    #[test]
+    fn zsh_history_guard_is_anonymous_and_emits_ready_before_guarded_pop() {
+        let ready_marker = build_ssh_ready_marker("zsh-history-lock");
+        for mode in [ShellIntegrationMode::Full, ShellIntegrationMode::CwdOnly] {
+            let integration =
+                super::prepare_shell_integration(ShellKind::Zsh, &ready_marker, mode).unwrap();
+            let script = String::from_utf8(integration.inline_script()).unwrap();
+            assert_eq!(script.lines().next(), Some(" fc -p"));
+            assert!(
+                script
+                    .lines()
+                    .nth(1)
+                    .unwrap()
+                    .starts_with(" ZZCLAWTERM_INJ_HISTORY_PUSHED=$?;")
+            );
+            assert!(!script.contains("mktemp"));
+            assert!(!script.contains(".LOCK"));
+            let ready = script.find("ZzClawTermReady:zsh-history-lock").unwrap();
+            let pop = script.find("fc -P 2>/dev/null").unwrap();
+            assert!(ready < pop);
+            assert!(script.contains("unset ZZCLAWTERM_INJ_HISTORY_PUSHED ZZCLAWTERM_INJ; fc -P"));
+        }
+    }
+
+    #[test]
+    fn zsh_scripts_escape_percent_in_pwd_substitution() {
+        // In zsh a leading `%` in a `//` pattern anchors the match at the end
+        // of the string, so `${PWD//%/%25}` appends `%25` to the path instead
+        // of encoding literal percent signs; the pattern must be `\%`. Bash
+        // has no such anchor and keeps the plain `%` pattern.
+        for script in [super::ZSH_PERSISTENT_SCRIPT, super::ZSH_CWD_ONLY_SCRIPT] {
+            assert!(script.contains("${PWD//\\%/%25}"));
+            assert!(!script.contains("${PWD//%/%25}"));
+        }
+        for script in [super::BASH_PERSISTENT_SCRIPT, super::BASH_CWD_ONLY_SCRIPT] {
+            assert!(script.contains("${PWD//%/%25}"));
         }
     }
 

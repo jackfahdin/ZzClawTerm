@@ -4,9 +4,13 @@ use std::borrow::Cow;
 use std::path::PathBuf;
 
 use zzclawterm_core::SecretString;
+use zzclawterm_core::session_import::mobaxterm::{
+    MobaXtermCredentialDiagnosticKind, MobaXtermImportReport, prepare_mobaxterm_import,
+};
 use zzclawterm_core::session_import::{
-    SessionImportError, SessionImportOptions, prepare_session_import_with_options,
-    prepare_windterm_import_with_decisions, prepare_windterm_preview,
+    SessionImportError, SessionImportNotice, SessionImportNoticeKind, SessionImportOptions,
+    prepare_session_import_with_options, prepare_windterm_import_with_decisions,
+    prepare_windterm_preview,
 };
 use zzclawterm_core::{PreparedSessionImport, WindtermImportReport, WindtermPreview};
 
@@ -15,18 +19,36 @@ use zeroize::Zeroize as _;
 use zzclawterm_store::StoreDomain;
 use zzclawterm_ui::ZzClawDialogWindowExt as _;
 
-use crate::features::connections::state::import::ConnectionImportReportView;
+use crate::features::connections::state::import::{
+    ConnectionImportReportView, MobaImportSlot, MobaXtermPasswordContext,
+};
 use crate::features::text_inputs::TextInputSetup;
 use crate::features::{ZzClawTermApp, runtime_jobs::await_blocking_job};
 use crate::models::ConnectionImportSource;
+
+#[derive(Default)]
+struct ConnectionImportRequest {
+    path: Option<PathBuf>,
+    master_password: Option<SecretString>,
+    mobaxterm_passwords: Option<PathBuf>,
+    skip_mobaxterm_credentials: bool,
+    auto_termius: bool,
+}
+
+enum ConnectionImportReport {
+    Windterm(WindtermImportReport),
+    Mobaxterm(MobaXtermImportReport),
+}
 
 enum ConnectionImportResult {
     Imported {
         count: usize,
         incomplete: usize,
-        report: Option<WindtermImportReport>,
+        report: Option<ConnectionImportReport>,
+        notices: Vec<SessionImportNotice>,
     },
     NeedsWindtermPassword(PathBuf),
+    NeedsMobaxtermPassword(MobaXtermPasswordContext),
     /// WindTerm files parsed with OneKey accounts; the import waits for the user
     /// to confirm the inferred accounts before anything is written.
     NeedsWindtermAccounts {
@@ -46,7 +68,7 @@ enum ConnectionImportResult {
 enum PreparedConnectionImport {
     Commit {
         prepared: PreparedSessionImport,
-        report: Option<WindtermImportReport>,
+        report: Option<ConnectionImportReport>,
     },
     WindtermAccounts(WindtermPreview),
 }
@@ -56,7 +78,7 @@ impl ConnectionImportSource {
         match self {
             Self::ZzClawTermBackup => Cow::Borrowed("Import ZzClawTerm backup"),
             Self::Xshell => Cow::Borrowed("Import Xshell .xts sessions"),
-            Self::MobaXterm => Cow::Borrowed("Import MobaXterm .mxtsessions sessions"),
+            Self::MobaXterm => Cow::Borrowed("Import MobaXterm .mxtsessions or .ini"),
             Self::WindTerm => Cow::Borrowed("Import WindTerm .sessions file"),
             Self::SecureCrt => Cow::Borrowed("Import SecureCRT .xml sessions"),
             Self::FinalShell => Cow::Borrowed("Import FinalShell conn directory"),
@@ -93,6 +115,12 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // 程序化关窗（`close_nya_dialog`）不会触发对话框的 `on_close`，取消
+        // 路径可能只关掉了窗口却把导入阶段留在 `Selecting`。以「是否真有活动
+        // 对话框」为准清掉这种残留，避免导入入口被永久拦住。
+        if self.connection_state.import_path_prompt_active() && !window.has_active_nya_dialog(cx) {
+            let _ = self.connection_state.cancel_mobaxterm_prompt();
+        }
         if self.connection_state.import_path_prompt_active()
             || self.settings.config_path_prompt_active()
         {
@@ -129,11 +157,193 @@ impl ZzClawTermApp {
             self.prompt_encrypted_portable_snapshot_import(window, cx);
             return;
         }
+        if source == ConnectionImportSource::MobaXterm {
+            self.open_mobaxterm_import_dialog(window, cx);
+            return;
+        }
         if source == ConnectionImportSource::Termius {
-            self.start_connection_import(source, None, None, true, window, cx);
+            self.start_connection_import(
+                source,
+                ConnectionImportRequest {
+                    auto_termius: true,
+                    ..ConnectionImportRequest::default()
+                },
+                window,
+                cx,
+            );
             return;
         }
         self.prompt_connection_session_import(source, window, cx);
+    }
+
+    pub(in crate::features) fn open_mobaxterm_import_dialog(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connection_state.import_path_prompt_active() {
+            return;
+        }
+        self.connection_state
+            .begin_import_path_prompt(ConnectionImportSource::MobaXterm);
+        self.open_content_dialog(
+            t!("savedConnections.mobaxtermImportTitle").to_string(),
+            640.,
+            |app, _, cx| app.mobaxterm_import_dialog_content(cx).into_any_element(),
+            |app, cx| app.close_mobaxterm_import_dialog(cx),
+            window,
+            cx,
+        );
+        cx.notify();
+    }
+
+    pub(in crate::features) fn close_mobaxterm_import_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.connection_state.cancel_mobaxterm_prompt() {
+            self.shell
+                .set_status(t!("savedConnections.importCancelled").to_string());
+        }
+        cx.notify();
+    }
+
+    /// 取消按钮专用：`window.close_nya_dialog` 不会触发 `on_close`，所以先
+    /// 复位阶段与槽位草稿再关窗，确保下次能重新打开且不残留旧文件。
+    pub(in crate::features) fn cancel_mobaxterm_import(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_mobaxterm_import_dialog(cx);
+        window.close_nya_dialog(cx);
+    }
+
+    pub(in crate::features) fn browse_mobaxterm_session_file(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Do not open a picker once the window is gone or the background import
+        // has already started.
+        if !self.connection_state.import_path_prompt_active() {
+            return;
+        }
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(SharedString::from(
+                t!("savedConnections.mobaxtermSessionFilePrompt").to_string(),
+            )),
+        });
+        cx.spawn(async move |this, cx| {
+            let picked = receiver.await;
+            if let Ok(Ok(Some(paths))) = picked
+                && let Some(path) = paths.into_iter().next()
+            {
+                let _ = this.update(cx, |app, cx| {
+                    app.connection_state
+                        .set_mobaxterm_file(MobaImportSlot::Session, path);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(in crate::features) fn browse_mobaxterm_passwords_file(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.connection_state.import_path_prompt_active() {
+            return;
+        }
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(SharedString::from(
+                t!("savedConnections.mobaxtermPasswordsFilePrompt").to_string(),
+            )),
+        });
+        cx.spawn(async move |this, cx| {
+            let picked = receiver.await;
+            if let Ok(Ok(Some(paths))) = picked
+                && let Some(path) = paths.into_iter().next()
+            {
+                let _ = this.update(cx, |app, cx| {
+                    app.connection_state
+                        .set_mobaxterm_file(MobaImportSlot::Passwords, path);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub(in crate::features) fn clear_mobaxterm_slot(
+        &mut self,
+        slot: MobaImportSlot,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connection_state.clear_mobaxterm_slot(slot) {
+            cx.notify();
+        }
+    }
+
+    pub(in crate::features) fn handle_mobaxterm_slot_drop(
+        &mut self,
+        slot: MobaImportSlot,
+        paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.connection_state.apply_mobaxterm_drop(slot, &paths) {
+            cx.notify();
+        }
+    }
+
+    pub(in crate::features) fn set_mobaxterm_drop_hover(
+        &mut self,
+        slot: MobaImportSlot,
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .connection_state
+            .set_mobaxterm_drop_hover(hovered.then_some(slot))
+        {
+            cx.notify();
+        }
+    }
+
+    pub(in crate::features) fn start_mobaxterm_import(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_path) = self
+            .connection_state
+            .mobaxterm_session_path()
+            .map(std::path::Path::to_path_buf)
+        else {
+            return;
+        };
+        let passwords_path = self
+            .connection_state
+            .mobaxterm_passwords_path()
+            .map(std::path::Path::to_path_buf);
+        self.start_connection_import(
+            ConnectionImportSource::MobaXterm,
+            ConnectionImportRequest {
+                path: Some(session_path),
+                mobaxterm_passwords: passwords_path,
+                ..ConnectionImportRequest::default()
+            },
+            window,
+            cx,
+        );
+        window.close_nya_dialog(cx);
     }
 
     fn prompt_connection_session_import(
@@ -163,9 +373,10 @@ impl ZzClawTermApp {
                             if let Some(path) = paths.into_iter().next() {
                                 app.start_connection_import(
                                     source,
-                                    Some(path),
-                                    None,
-                                    false,
+                                    ConnectionImportRequest {
+                                        path: Some(path),
+                                        ..ConnectionImportRequest::default()
+                                    },
                                     window,
                                     cx,
                                 );
@@ -192,12 +403,17 @@ impl ZzClawTermApp {
     fn start_connection_import(
         &mut self,
         source: ConnectionImportSource,
-        path: Option<PathBuf>,
-        master_password: Option<SecretString>,
-        auto_termius: bool,
+        request: ConnectionImportRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let ConnectionImportRequest {
+            path,
+            master_password,
+            mobaxterm_passwords,
+            skip_mobaxterm_credentials,
+            auto_termius,
+        } = request;
         self.connection_state.begin_session_import_job();
         self.shell
             .set_status(t!("savedConnections.importInProgress"));
@@ -206,20 +422,53 @@ impl ZzClawTermApp {
         let window = window.window_handle();
         cx.spawn(async move |this, cx| {
             let task = scheduler.submit_task("connection-import", move |_| {
-                let retained_master_password = master_password.clone();
+                let retained_master_password = if source == ConnectionImportSource::WindTerm {
+                    master_password.clone()
+                } else {
+                    None
+                };
                 let prepared = if source == ConnectionImportSource::WindTerm {
                     prepare_windterm_source(path.as_deref(), master_password.as_deref())
-                } else {
-                    prepare_connection_source(source, path.as_deref(), master_password.as_deref())
-                        .map(|prepared| PreparedConnectionImport::Commit {
-                            prepared,
-                            report: None,
+                } else if source == ConnectionImportSource::MobaXterm {
+                    path.as_deref()
+                        .ok_or_else(|| {
+                            SessionImportError::Config(
+                                "connection import path was not selected".into(),
+                            )
                         })
+                        .and_then(|path| {
+                            prepare_mobaxterm_import(
+                                path,
+                                SessionImportOptions {
+                                    mobaxterm_passwords_path: mobaxterm_passwords.as_deref(),
+                                    mobaxterm_master_password: master_password.as_deref(),
+                                    mobaxterm_skip_encrypted_credentials:
+                                        skip_mobaxterm_credentials,
+                                    ..SessionImportOptions::default()
+                                },
+                            )
+                        })
+                        .map(|outcome| PreparedConnectionImport::Commit {
+                            prepared: outcome.prepared,
+                            report: Some(ConnectionImportReport::Mobaxterm(outcome.report)),
+                        })
+                } else {
+                    prepare_connection_source(
+                        source,
+                        path.as_deref(),
+                        master_password.as_deref(),
+                        mobaxterm_passwords.as_deref(),
+                    )
+                    .map(|prepared| PreparedConnectionImport::Commit {
+                        prepared,
+                        report: None,
+                    })
                 };
                 drop(master_password);
                 match prepared {
                     Ok(PreparedConnectionImport::Commit { prepared, report }) => {
                         let incomplete = prepared.incomplete_credentials_count();
+                        let notices = prepared.notices.clone();
                         match store.request_mutation_fn(StoreDomain::Connections, move |database| {
                             database.commit_session_import(prepared)
                         }) {
@@ -227,6 +476,7 @@ impl ZzClawTermApp {
                                 count,
                                 incomplete,
                                 report,
+                                notices,
                             },
                             Err(error) => ConnectionImportResult::Failed {
                                 source,
@@ -248,6 +498,26 @@ impl ZzClawTermApp {
                             source,
                             auto_termius,
                             error: "connection import path was not selected".into(),
+                        },
+                    },
+                    Err(
+                        error @ (SessionImportError::MobaXtermMasterPasswordRequired
+                        | SessionImportError::MobaXtermCredentialDecryptionFailed),
+                    ) => match path {
+                        Some(path) => ConnectionImportResult::NeedsMobaxtermPassword(
+                            MobaXtermPasswordContext {
+                                path,
+                                passwords_path: mobaxterm_passwords,
+                                decryption_failed: matches!(
+                                    error,
+                                    SessionImportError::MobaXtermCredentialDecryptionFailed
+                                ),
+                            },
+                        ),
+                        None => ConnectionImportResult::Failed {
+                            source,
+                            auto_termius,
+                            error: error.to_string(),
                         },
                     },
                     Err(error) => ConnectionImportResult::Failed {
@@ -272,6 +542,84 @@ impl ZzClawTermApp {
             });
         })
         .detach();
+        cx.notify();
+    }
+
+    pub(in crate::features) fn submit_mobaxterm_password(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.resume_mobaxterm_import(false, window, cx)
+    }
+
+    pub(in crate::features) fn skip_mobaxterm_credentials(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.resume_mobaxterm_import(true, window, cx);
+        window.close_nya_dialog(cx);
+    }
+
+    fn resume_mobaxterm_import(
+        &mut self,
+        skip: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.connection_state.mobaxterm_password_context().is_none() {
+            return true;
+        }
+        let password = if skip {
+            None
+        } else {
+            let Some(field) = self.existing_text_input("mobaxterm-password.value") else {
+                return false;
+            };
+            let password = SecretString::from(field.read(cx).value(cx));
+            if password.is_empty() {
+                self.shell
+                    .set_status(t!("savedConnections.mobaxtermMasterPasswordRequired"));
+                cx.notify();
+                return false;
+            }
+            Some(password)
+        };
+        let Some(context) = self.connection_state.take_mobaxterm_password_context() else {
+            return true;
+        };
+        self.clear_mobaxterm_password_input(cx);
+        self.start_connection_import(
+            ConnectionImportSource::MobaXterm,
+            ConnectionImportRequest {
+                path: Some(context.path),
+                mobaxterm_passwords: context.passwords_path,
+                master_password: password,
+                skip_mobaxterm_credentials: skip,
+                ..ConnectionImportRequest::default()
+            },
+            window,
+            cx,
+        );
+        true
+    }
+
+    pub(in crate::features) fn clear_mobaxterm_password_input(&mut self, cx: &mut Context<Self>) {
+        if let Some(field) = self.existing_text_input("mobaxterm-password.value") {
+            field.update(cx, |field, cx| field.discard_content(cx));
+        }
+        self.forget_text_inputs("mobaxterm-password.");
+    }
+
+    pub(in crate::features) fn cancel_mobaxterm_password(&mut self, cx: &mut Context<Self>) {
+        if self.connection_state.mobaxterm_password_context().is_none() {
+            return;
+        }
+        self.clear_mobaxterm_password_input(cx);
+        self.connection_state.finish_import_path_prompt();
+        self.shell
+            .set_status(t!("savedConnections.importCancelled"));
         cx.notify();
     }
 
@@ -300,9 +648,11 @@ impl ZzClawTermApp {
         self.forget_text_inputs("windterm-password.");
         self.start_connection_import(
             ConnectionImportSource::WindTerm,
-            Some(path),
-            Some(password),
-            false,
+            ConnectionImportRequest {
+                path: Some(path),
+                master_password: Some(password),
+                ..ConnectionImportRequest::default()
+            },
             window,
             cx,
         );
@@ -371,7 +721,8 @@ impl ZzClawTermApp {
                     Ok(count) => ConnectionImportResult::Imported {
                         count,
                         incomplete: report.credential_warning_sessions,
-                        report: Some(report),
+                        report: Some(ConnectionImportReport::Windterm(report)),
+                        notices: Vec::new(),
                     },
                     Err(error) => ConnectionImportResult::Failed {
                         source: ConnectionImportSource::WindTerm,
@@ -489,6 +840,14 @@ impl ZzClawTermApp {
     ) {
         self.connection_state.finish_import_path_prompt();
         match result {
+            ConnectionImportResult::NeedsMobaxtermPassword(context) => {
+                self.connection_state.await_mobaxterm_password(
+                    context.path,
+                    context.passwords_path,
+                    context.decryption_failed,
+                );
+                self.open_mobaxterm_password_dialog(window, cx);
+            }
             ConnectionImportResult::NeedsWindtermPassword(path) => {
                 self.connection_state.await_windterm_password(path);
                 self.open_windterm_password_dialog(window, cx);
@@ -512,6 +871,7 @@ impl ZzClawTermApp {
                 count,
                 incomplete,
                 report,
+                notices,
             } => {
                 self.refresh_store_from_runtime_and_sync_theme(cx);
                 self.connection_state.expand_all_catalog_groups();
@@ -524,9 +884,62 @@ impl ZzClawTermApp {
                         incomplete = incomplete
                     )
                 };
+                let skipped = notices
+                    .iter()
+                    .filter(|notice| notice.kind.is_skipped())
+                    .count();
+                let mut notice_messages = notices
+                    .iter()
+                    .map(|notice| {
+                        format!(
+                            "{} — {}",
+                            notice.session_name,
+                            connection_import_notice_reason(notice.kind)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(ConnectionImportReport::Mobaxterm(report)) = &report {
+                    notice_messages.push(
+                        t!(
+                            "savedConnections.mobaxtermLinkedCredentials",
+                            count = report.linked_credentials
+                        )
+                        .to_string(),
+                    );
+                    notice_messages.extend(report.diagnostics.iter().map(|diagnostic| {
+                        let key = match diagnostic.kind {
+                            MobaXtermCredentialDiagnosticKind::RegistryOnly => {
+                                "savedConnections.mobaxtermRegistryOnly"
+                            }
+                            MobaXtermCredentialDiagnosticKind::SkippedEncrypted => {
+                                "savedConnections.mobaxtermSkippedEncrypted"
+                            }
+                            MobaXtermCredentialDiagnosticKind::Undecryptable => {
+                                "savedConnections.mobaxtermUndecryptable"
+                            }
+                            MobaXtermCredentialDiagnosticKind::MissingReference => {
+                                "savedConnections.mobaxtermMissingReference"
+                            }
+                            MobaXtermCredentialDiagnosticKind::AmbiguousMatch => {
+                                "savedConnections.mobaxtermAmbiguousMatch"
+                            }
+                            MobaXtermCredentialDiagnosticKind::Unmatched => {
+                                "savedConnections.mobaxtermUnmatched"
+                            }
+                        };
+                        t!(key, count = diagnostic.count).to_string()
+                    }));
+                }
                 let report_view = match &report {
-                    Some(report) => ConnectionImportReportView::from_windterm(report),
-                    None => ConnectionImportReportView::from_basic(count, incomplete),
+                    Some(ConnectionImportReport::Windterm(report)) => {
+                        ConnectionImportReportView::from_windterm(report)
+                    }
+                    _ => ConnectionImportReportView::from_basic(
+                        count,
+                        incomplete,
+                        skipped,
+                        notice_messages,
+                    ),
                 };
                 let missing = report_view.missing_one_key.len();
                 let one_key_notice = report_view.one_key_state.map(|state| match state {
@@ -591,6 +1004,29 @@ impl ZzClawTermApp {
     }
 }
 
+fn connection_import_notice_reason(kind: SessionImportNoticeKind) -> String {
+    match kind {
+        SessionImportNoticeKind::SkippedUnsupportedType => {
+            t!("savedConnections.importNoticeUnsupportedType").to_string()
+        }
+        SessionImportNoticeKind::SkippedMalformedEntry => {
+            t!("savedConnections.importNoticeMalformedEntry").to_string()
+        }
+        SessionImportNoticeKind::SkippedMissingEndpoint => {
+            t!("savedConnections.importNoticeMissingEndpoint").to_string()
+        }
+        SessionImportNoticeKind::SkippedMissingSerialPort => {
+            t!("savedConnections.importNoticeMissingSerialPort").to_string()
+        }
+        SessionImportNoticeKind::SerialSettingsDefaulted => {
+            t!("savedConnections.importNoticeSerialDefaults").to_string()
+        }
+        SessionImportNoticeKind::VncSettingsDefaulted => {
+            t!("savedConnections.importNoticeVncDefaults").to_string()
+        }
+    }
+}
+
 fn prepare_windterm_source(
     path: Option<&std::path::Path>,
     master_password: Option<&str>,
@@ -603,7 +1039,7 @@ fn prepare_windterm_source(
         // No referenced OneKey account (missing/unreadable config included):
         // keep the single-step import, but carry the diagnostics with it.
         Ok(PreparedConnectionImport::Commit {
-            report: Some(preview.report()),
+            report: Some(ConnectionImportReport::Windterm(preview.report())),
             prepared: preview.prepared,
         })
     } else {
@@ -615,6 +1051,7 @@ fn prepare_connection_source(
     source: ConnectionImportSource,
     path: Option<&std::path::Path>,
     master_password: Option<&str>,
+    mobaxterm_passwords: Option<&std::path::Path>,
 ) -> Result<zzclawterm_core::PreparedSessionImport, SessionImportError> {
     match source {
         ConnectionImportSource::Termius => {
@@ -640,6 +1077,8 @@ fn prepare_connection_source(
                 path,
                 SessionImportOptions {
                     windterm_master_password: master_password,
+                    mobaxterm_passwords_path: mobaxterm_passwords,
+                    ..SessionImportOptions::default()
                 },
             )
         }

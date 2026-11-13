@@ -1,4 +1,5 @@
 use std::{io::Read, net::TcpListener, time::Duration};
+use zzclawterm_core::action_links::find_action_links;
 
 use gpui::{
     AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _, IntoElement,
@@ -9,7 +10,7 @@ use zzclawterm_core::{ActionLinksMatcherSettings, mac_address::MacAddressFormat}
 use zzclawterm_transport::TelnetSessionConfig;
 use zzclawterm_ui::zzclaw_root;
 
-use crate::action_links::{ActionLinkTarget, actions_for_match, find_action_links};
+use crate::action_links::{ActionLinkPlatform, ActionLinkTarget, actions_for_match_on};
 use crate::features::ZzClawTermApp;
 use crate::features::test_support::{app_with_visible_local_session, session_focus_test_window};
 use crate::models::{ActionLinkMenuAction, ActionLinkMenuState, SessionLaunchConfig};
@@ -29,7 +30,7 @@ fn menu(session_id: &str, generation: u64) -> ActionLinkMenuState {
         y: px(700.),
         kind_label: "MAC".into(),
         value: item.value.clone(),
-        actions: actions_for_match(&item)
+        actions: actions_for_match_on(&item, ActionLinkPlatform::default())
             .into_iter()
             .map(|action| ActionLinkMenuAction {
                 id: action.id,

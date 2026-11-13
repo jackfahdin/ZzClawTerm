@@ -14,7 +14,7 @@ use zzclawterm_remote_desktop::{
     RemoteDesktopViewState, VNC_FRAMEBUFFER_LIMITS, VncRuntimeEvent, VncServerCapabilities,
     VncSessionState,
 };
-use zzclawterm_store::{StoreDomain, store_request};
+use zzclawterm_store::StoreDomain;
 #[cfg(windows)]
 use zzclawterm_ui::ZzClawDialogWindowExt as _;
 
@@ -352,7 +352,7 @@ impl ZzClawTermApp {
         };
         #[cfg(not(windows))]
         let mut dirty = false;
-        dirty |= self.drive_deferred_rdp_starts();
+        dirty |= self.drive_deferred_rdp_starts(cx);
         dirty |= self.drive_rdp_resize_debounce();
         dirty |= self.drive_rdp_reconnects(cx);
         self.settle_remote_desktop_restore(cx);
@@ -380,7 +380,7 @@ impl ZzClawTermApp {
                 if let Some(trust) = self.remote_desktop.vnc_manager.trust_state(session_id) {
                     self.submit_store_request(
                         0,
-                        store_request(StoreDomain::Security, move |store| {
+                        zzclawterm_store::store_mutation(StoreDomain::Security, move |store| {
                             trust
                                 .commit_if_current(&request, |current| {
                                     store.remember_vnc_known_host_if_current(
@@ -627,6 +627,7 @@ impl ZzClawTermApp {
                     RdpClipboardTransferStatus::Cancelled => TransferJobStatus::Cancelled,
                 };
                 let sample = SftpTransferProgress {
+                    phase: None,
                     remote_path: "RDP clipboard".to_string(),
                     local_path: std::path::PathBuf::new(),
                     bytes_transferred: progress.transferred_bytes,

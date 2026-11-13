@@ -14,22 +14,6 @@ use crate::features::{
 use crate::models::NetworkTab;
 
 impl ZzClawTermApp {
-    pub(in crate::features) fn open_network_move_picker(
-        &mut self,
-        tab: NetworkTab,
-        id: String,
-        cx: &mut Context<Self>,
-    ) {
-        if self.connection_state.toggle_network_move_picker(tab, id) {
-            self.shell
-                .set_status(format!("choose {} group", tab.label()));
-        } else {
-            self.shell
-                .set_status("network move menu closed".to_string());
-        }
-        cx.notify();
-    }
-
     pub(in crate::features) fn move_tunnel_to_group(
         &mut self,
         tunnel_id: String,
@@ -67,7 +51,6 @@ impl ZzClawTermApp {
                 match event.outcome {
                     Ok(()) => {
                         this.tunnel_state.commit_tunnels(next_tunnels);
-                        this.connection_state.close_network_move_picker();
                         this.shell.set_status(format!("tunnel moved to {label}"));
                         this.settings
                             .update_store_status("tunnel group saved", true);
@@ -122,7 +105,6 @@ impl ZzClawTermApp {
                 match event.outcome {
                     Ok(()) => {
                         this.tunnel_state.commit_proxies(next_proxies);
-                        this.connection_state.close_network_move_picker();
                         this.shell.set_status(format!("proxy moved to {label}"));
                         this.settings.update_store_status("proxy group saved", true);
                     }
@@ -298,28 +280,32 @@ impl ZzClawTermApp {
     }
 
     fn start_tunnel_without_window(&mut self, tunnel: TunnelConfig, cx: &mut Context<Self>) {
+        let label = tunnel_name(&tunnel);
+        match self.submit_tunnel_open(tunnel) {
+            Ok(()) => self.shell.set_status(format!("opening tunnel {label}")),
+            Err(error) => self.shell.set_status(error),
+        }
+        cx.notify();
+    }
+
+    /// Validate and submit one tunnel open job. The result arrives as a
+    /// `TunnelJobResult`; `Err` means nothing was submitted.
+    pub(super) fn submit_tunnel_open(&mut self, tunnel: TunnelConfig) -> Result<(), String> {
         if self.tunnel_state.is_pending(&tunnel.id) {
-            self.shell.set_status(format!(
+            return Err(format!(
                 "tunnel {} is already pending",
                 tunnel_name(&tunnel)
             ));
-            cx.notify();
-            return;
         }
         if self.tunnel_state.is_open(&tunnel.id) {
-            self.shell
-                .set_status(format!("tunnel {} is already open", tunnel_name(&tunnel)));
-            cx.notify();
-            return;
+            return Err(format!("tunnel {} is already open", tunnel_name(&tunnel)));
         }
 
         let Some(connection_id) = tunnel.connection_id.as_deref() else {
-            self.shell.set_status(format!(
+            return Err(format!(
                 "tunnel {} has no SSH connection",
                 tunnel_name(&tunnel)
             ));
-            cx.notify();
-            return;
         };
         let Some(connection) = self
             .connection_state
@@ -328,37 +314,26 @@ impl ZzClawTermApp {
             .find(|connection| connection.id == connection_id)
             .cloned()
         else {
-            self.shell.set_status(format!(
+            return Err(format!(
                 "tunnel {} references missing connection {}",
                 tunnel_name(&tunnel),
                 connection_id
             ));
-            cx.notify();
-            return;
         };
-        let mode = match tunnel_mode(&tunnel) {
-            Some(mode) => mode,
-            None => {
-                self.shell.set_status(format!(
-                    "tunnel {} mode '{}' is not native yet",
-                    tunnel_name(&tunnel),
-                    tunnel.tunnel_type
-                ));
-                cx.notify();
-                return;
-            }
+        let Some(mode) = tunnel_mode(&tunnel) else {
+            return Err(format!(
+                "tunnel {} mode '{}' is not native yet",
+                tunnel_name(&tunnel),
+                tunnel.tunnel_type
+            ));
         };
         let build_context = self.ssh_session_config_build_context();
         if !self.tunnel_state.begin_job(tunnel.id.clone()) {
-            self.shell.set_status(format!(
+            return Err(format!(
                 "tunnel {} is already pending",
                 tunnel_name(&tunnel)
             ));
-            cx.notify();
-            return;
         }
-        self.shell
-            .set_status(format!("opening tunnel {}", tunnel_name(&tunnel)));
         let tunnel_manager = self.tunnel_state.manager_for_job();
         let tunnel_tx = self.tunnel_state.job_sender();
         let rejected_tx = tunnel_tx.clone();
@@ -398,7 +373,7 @@ impl ZzClawTermApp {
                 result: Err(error.to_string()),
             });
         }
-        cx.notify();
+        Ok(())
     }
 
     pub(in crate::features) fn close_tunnel_job(
@@ -406,26 +381,26 @@ impl ZzClawTermApp {
         tunnel_id: String,
         cx: &mut Context<Self>,
     ) {
+        let status = format!("closing tunnel {tunnel_id}");
+        match self.submit_tunnel_close(tunnel_id) {
+            Ok(()) => self.shell.set_status(status),
+            Err(error) => self.shell.set_status(error),
+        }
+        cx.notify();
+    }
+
+    /// Submit one tunnel close job. The result arrives as a `TunnelJobResult`;
+    /// `Err` means nothing was submitted.
+    pub(super) fn submit_tunnel_close(&mut self, tunnel_id: String) -> Result<(), String> {
         if self.tunnel_state.is_pending(&tunnel_id) {
-            self.shell
-                .set_status(format!("tunnel {tunnel_id} is already pending"));
-            cx.notify();
-            return;
+            return Err(format!("tunnel {tunnel_id} is already pending"));
         }
         if !self.tunnel_state.is_open(&tunnel_id) {
-            self.shell
-                .set_status(format!("tunnel {tunnel_id} is not open"));
-            cx.notify();
-            return;
+            return Err(format!("tunnel {tunnel_id} is not open"));
         }
-
         if !self.tunnel_state.begin_job(tunnel_id.clone()) {
-            self.shell
-                .set_status(format!("tunnel {tunnel_id} is already pending"));
-            cx.notify();
-            return;
+            return Err(format!("tunnel {tunnel_id} is already pending"));
         }
-        self.shell.set_status(format!("closing tunnel {tunnel_id}"));
         let tunnel_manager = self.tunnel_state.manager_for_job();
         let tunnel_tx = self.tunnel_state.job_sender();
         let rejected_tx = tunnel_tx.clone();
@@ -445,7 +420,7 @@ impl ZzClawTermApp {
                 result: Err(error.to_string()),
             });
         }
-        cx.notify();
+        Ok(())
     }
 
     /// Deliver tunnel open/close results as they arrive.
@@ -476,27 +451,46 @@ impl ZzClawTermApp {
 
     fn apply_tunnel_event(&mut self, event: TunnelJobResult, cx: &mut Context<Self>) {
         self.tunnel_state.finish_job(&event.tunnel_id);
+        let owned_by_batch = self.tunnel_state.record_batch_job_finished(
+            &event.tunnel_id,
+            event.result.as_ref().map(|_| ()).map_err(String::as_str),
+        );
         match event.result {
             Ok(TunnelJobOutput::Opened(info)) => {
                 self.shell.set_status(format!(
                     "tunnel {} open on {}:{}",
                     event.tunnel_id, info.bind_host, info.listen_port
                 ));
+                // The profile (or its whole group) was deleted while the open
+                // was still running. Close the forward instead of leaving a
+                // listener with no configuration behind it.
+                if !self.tunnel_state.has_tunnel(&event.tunnel_id)
+                    && let Err(error) = self.submit_tunnel_close(event.tunnel_id.clone())
+                {
+                    self.shell.set_status(format!(
+                        "failed to close deleted tunnel {}: {error}",
+                        event.tunnel_id
+                    ));
+                }
             }
             Ok(TunnelJobOutput::Closed) => {
                 self.shell
                     .set_status(format!("tunnel {} closed", event.tunnel_id));
             }
             Err(error) => {
-                self.notify_background_operation(
-                    "tunnel-failed",
-                    zzclawterm_ui::notification::ZzClawNotificationKind::Error,
-                    format!("{}: {error}", event.tunnel_id),
-                    cx,
-                );
+                // A batch reports its own failures together, by tunnel name.
+                if !owned_by_batch {
+                    self.notify_background_operation(
+                        "tunnel-failed",
+                        zzclawterm_ui::notification::ZzClawNotificationKind::Error,
+                        format!("{}: {error}", event.tunnel_id),
+                        cx,
+                    );
+                }
                 self.shell
                     .set_status(format!("tunnel {} failed: {error}", event.tunnel_id));
             }
         }
+        self.pump_tunnel_batches(cx);
     }
 }

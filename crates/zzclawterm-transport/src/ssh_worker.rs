@@ -120,12 +120,37 @@ pub(crate) struct PendingSshIntegrationUpload {
     pub(crate) join: tokio::task::JoinHandle<ssh_shell_integration::ScriptUploadOutcome>,
 }
 
+/// Worker readiness must not let tmux publish projections before its host is registered.
+async fn confirm_ssh_registration(
+    ready: &mpsc::Sender<Result<(), String>>,
+    registered: tokio::sync::oneshot::Receiver<()>,
+) -> bool {
+    ready.send(Ok(())).is_ok() && registered.await.is_ok()
+}
+
+async fn discard_open_ssh_shell(session_id: &str, session: OpenSshShellSession) {
+    let _ = tokio::time::timeout(Duration::from_millis(250), async {
+        let _ = session.channel.eof().await;
+        let _ = session.channel.close().await;
+    })
+    .await;
+    disconnect_open_ssh_shell(
+        session_id,
+        &session.handle,
+        session.jump_handles,
+        session.disconnect_on_close,
+        session.x11_multiplex_registration,
+    )
+    .await;
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_ssh_worker(
     session_id: String,
     config: SshSessionConfig,
     command_rx: ssh_mailbox::Receiver,
     ready_tx: mpsc::Sender<Result<(), String>>,
+    registered_rx: tokio::sync::oneshot::Receiver<()>,
     event_queue: SessionEventQueue,
     multiplex: Option<SshMultiplexHandle>,
     shell_environment: Arc<ShellEnvironmentCache>,
@@ -159,7 +184,9 @@ pub(crate) fn run_ssh_worker(
             .await;
             match result {
                 Ok(()) => {
-                    let _ = ready_tx.send(Ok(()));
+                    if !confirm_ssh_registration(&ready_tx, registered_rx).await {
+                        return;
+                    }
                     run_sftp_only_session(
                         &session_id,
                         command_rx,
@@ -180,6 +207,7 @@ pub(crate) fn run_ssh_worker(
                 config,
                 command_rx,
                 ready_tx,
+                registered_rx,
                 event_queue,
                 multiplex,
                 shell_environment,
@@ -197,7 +225,10 @@ pub(crate) fn run_ssh_worker(
             match open_ssh_shell(&session_id, &config, multiplex.as_ref(), shell_environment).await
             {
                 Ok(session) => {
-                    let _ = ready_tx.send(Ok(()));
+                    if !confirm_ssh_registration(&ready_tx, registered_rx).await {
+                        discard_open_ssh_shell(&session_id, session).await;
+                        return;
+                    }
                     session
                 }
                 Err(_)
@@ -220,7 +251,9 @@ pub(crate) fn run_ssh_worker(
                         return;
                     }
                     config.attempt.record_shell_reply(false);
-                    let _ = ready_tx.send(Ok(()));
+                    if !confirm_ssh_registration(&ready_tx, registered_rx).await {
+                        return;
+                    }
                     run_sftp_only_session(
                         &session_id,
                         command_rx,
@@ -256,6 +289,7 @@ pub(crate) async fn run_deferred_ssh_worker(
     config: SshSessionConfig,
     mut command_rx: ssh_mailbox::Receiver,
     ready_tx: mpsc::Sender<Result<(), String>>,
+    registered_rx: tokio::sync::oneshot::Receiver<()>,
     event_queue: SessionEventQueue,
     multiplex: Option<SshMultiplexHandle>,
     shell_environment: Arc<ShellEnvironmentCache>,
@@ -268,7 +302,10 @@ pub(crate) async fn run_deferred_ssh_worker(
     let pending_session =
         match open_pending_ssh_shell(&config, multiplex.as_ref(), shell_environment).await {
             Ok(session) => {
-                let _ = ready_tx.send(Ok(()));
+                if !confirm_ssh_registration(&ready_tx, registered_rx).await {
+                    disconnect_pending_ssh_shell(session).await;
+                    return;
+                }
                 session
             }
             Err(error) => {
@@ -497,8 +534,8 @@ pub(crate) async fn run_open_ssh_shell_session(
 
     let mut pending_upload: Option<PendingSshIntegrationUpload> = None;
 
-    // Passive tmux control-mode detector: input-side arming happens on
-    // `SshCommand::Write`, output-side startup framing on channel data.
+    // Double-C discovery continuously follows stdout framing. Input only
+    // enables launch advisories and explicit single-C compatibility.
     let mut tmux_detector = tmux::TmuxControlDetector::new();
 
     post_login = post_login.filter(|command| command.enabled && !command.command.trim().is_empty());
@@ -544,8 +581,8 @@ pub(crate) async fn run_open_ssh_shell_session(
                 if let Some(command) = post_login.take() {
                     let mut text = command.command.replace("\r\n", "\r").replace('\n', "\r");
                     if !text.ends_with('\r') { text.push('\r'); }
-                    // A configured post-login `tmux -CC` arm detection exactly
-                    // like a user-typed command line.
+                    // Post-login commands provide the same explicit launch
+                    // evidence as user input, including single-C compatibility.
                     tmux_detector.feed_input(text.as_bytes());
                     let channel = channel.clone();
                     pending_send = Some(Box::pin(async move { channel.data_bytes(text.into_bytes()).await }));
@@ -609,37 +646,17 @@ pub(crate) async fn run_open_ssh_shell_session(
                 if let Some(deadline) = tmux_detector.deadline() {
                     tokio::time::sleep_until(deadline).await;
                 }
-            }, if tmux_detector.deadline().is_some() => {
-                // The candidate line outlived its confirm window without a
-                // decision: release the withheld bytes into the shell stream.
-                let was_armed = tmux_detector.expiry_is_attempt();
-                let bytes = tmux_detector.expire_candidate();
-                if !bytes.is_empty() {
-                    if was_armed {
-                        event_queue.push_async(SessionEvent::Notice {
-                            session_id: session_id.clone(),
-                            notice: SessionNotice::TmuxControlUnconfirmed,
-                        }).await;
-                    }
-                    let display = bytes;
-                    let output = shell_integration.filter_output(&display);
-                    pending_output = Some(ssh_output_future(event_queue.clone(), session_id.clone(), output));
-                }
-            }
-            () = async {
-                if let Some(deadline) = tmux_detector.silence_deadline() {
-                    tokio::time::sleep_until(deadline).await;
-                }
-            }, if tmux_detector.silence_deadline().is_some() => {
-                // A submitted `tmux -CC` produced no channel output at all —
-                // typically a pre-2.x tmux that cannot speak the protocol.
-                // Advisory only: detection stays armed so a slow attach can
-                // still take over afterwards.
-                if tmux_detector.expire_silence() {
+            }, if tmux_detector.deadline().is_some() && pending_output.is_none() => {
+                let expired = tmux_detector.expire();
+                if expired.notice {
                     event_queue.push_async(SessionEvent::Notice {
                         session_id: session_id.clone(),
                         notice: SessionNotice::TmuxControlUnconfirmed,
                     }).await;
+                }
+                if !expired.bytes.is_empty() {
+                    let output = shell_integration.filter_output(&expired.bytes);
+                    pending_output = Some(ssh_output_future(event_queue.clone(), session_id.clone(), output));
                 }
             }
             command = command_rx.recv() => {
@@ -675,17 +692,31 @@ pub(crate) async fn run_open_ssh_shell_session(
             }
             message = channel_rx.wait(), if pending_output.is_none() => {
                 match message {
-                    Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        let data = match tmux_detector.feed(&data) {
+                    Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        // stderr is not part of tmux's stdout framing.
+                        tmux_detector.observe_extended_output(&data);
+                        pending_output = Some(ssh_output_future(event_queue.clone(), session_id.clone(), SshIntegrationOutput { visible: data.to_vec(), ..Default::default() }));
+                    }
+                    Some(ChannelMsg::Data { data }) => {
+                        let detection = tmux_detector.feed_output(&data);
+                        if detection.notice {
+                            event_queue.push_async(SessionEvent::Notice {
+                                session_id: session_id.clone(),
+                                notice: SessionNotice::TmuxControlUnconfirmed,
+                            }).await;
+                        }
+                        let data = match detection.output {
                             tmux::TmuxFeed::Passthrough(data) => data,
                             tmux::TmuxFeed::Detected {
                                 passthrough,
                                 startup,
                                 rest,
                             } => {
+                                // Verification gate, not proof of an active control session.
                                 // Disable binary transfers before any awaited
                                 // output flush, upload cancellation or input drain.
                                 tmux_active.store(true, Ordering::Release);
+                                pending_writes.clear();
                                 // The confirmed startup frame and everything
                                 // after it belong to the control channel, not
                                 // the terminal. Bytes before it (the echoed
@@ -761,6 +792,8 @@ pub(crate) async fn run_open_ssh_shell_session(
                                         }
                                     }
                                     tmux::handshake::Verification::Exited(leftover) => {
+                                        command_rx.discard_writes();
+                                        tmux_cmd_rx.discard_pending();
                                         tmux_active.store(false, Ordering::Release);
                                         let output = shell_integration.filter_output(&leftover);
                                         ssh_output_future(event_queue.clone(), session_id.clone(), output).await;
@@ -842,6 +875,7 @@ pub(crate) async fn run_open_ssh_shell_session(
             }
         }
     }
+    tmux_active.store(false, Ordering::Release);
     drop(pending_send);
     drop(pending_resize);
     drop(pending_output);

@@ -198,6 +198,10 @@ impl ZzClawTermApp {
         }).detach();
         self.start_terminal_execution(
             TerminalExecutionRequest {
+                mcp_owned: false,
+                async_job: false,
+                return_job: false,
+                operation_id: None,
                 id: execution_id.clone(),
                 owner: format!("ai-session:{}", self.ai.chat_session_id()),
                 source: "ZzClawTerm Agent".into(),
@@ -245,9 +249,11 @@ impl ZzClawTermApp {
                 SessionKind::LocalPty | SessionKind::Telnet | SessionKind::RawTcp => {
                     AiExecutionProfile::Posix
                 }
-                SessionKind::Serial | SessionKind::Rdp | SessionKind::Vnc => {
-                    AiExecutionProfile::SendOnly
-                }
+                SessionKind::AdbFiles | SessionKind::AdbScreen => AiExecutionProfile::Disabled,
+                SessionKind::AdbShell
+                | SessionKind::Serial
+                | SessionKind::Rdp
+                | SessionKind::Vnc => AiExecutionProfile::SendOnly,
             })
             .unwrap_or(AiExecutionProfile::SendOnly)
     }

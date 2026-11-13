@@ -1,18 +1,14 @@
 use crate::models::{TransferJobEvent, TransferJobOutput, TransferJobResult};
 use futures::channel::mpsc::UnboundedSender;
 use gpui::PromisedFileProvider;
-use std::{
-    io,
-    path::Path,
-    sync::{Arc, Weak},
-};
-use zzclawterm_files::remote_file::RemoteFileService;
+use std::{io, path::Path, sync::Arc};
+use zzclawterm_files::file_browser::WeakFileBrowserService;
 use zzclawterm_files::sftp::{SftpFileEntry, SftpTransferControl};
 use zzclawterm_files::sftp_transfer_types::{SftpPathTransferOptions, SftpTransferOptions};
 
 pub(super) struct RemoteDownloadProvider {
     session_id: String,
-    service: Weak<RemoteFileService>,
+    service: WeakFileBrowserService,
     entry: SftpFileEntry,
     options: SftpPathTransferOptions,
     _lifetime: Arc<zzclawterm_files::drag_export::DragSourceLifetime>,
@@ -22,7 +18,7 @@ pub(super) struct RemoteDownloadProvider {
 impl RemoteDownloadProvider {
     pub(super) fn new(
         session_id: String,
-        service: Weak<RemoteFileService>,
+        service: WeakFileBrowserService,
         entry: SftpFileEntry,
         options: SftpTransferOptions,
         sender: UnboundedSender<TransferJobResult>,
@@ -42,14 +38,6 @@ impl RemoteDownloadProvider {
 }
 impl PromisedFileProvider for RemoteDownloadProvider {
     fn write_to(&self, target: &Path) -> io::Result<()> {
-        let source = self
-            .service
-            .upgrade()
-            .ok_or_else(|| io::Error::other("source session is closed"))?;
-        // A snapshot owns the active operation; the authoritative connection can
-        // still disappear and cancel it, even during a stalled network request.
-        let service = (*source).clone();
-        drop(source);
         let control = self.control.child();
         let path_options = self.options.clone();
         let remote_path = self.entry.remote_path();
@@ -78,11 +66,30 @@ impl PromisedFileProvider for RemoteDownloadProvider {
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<_> {
                 control.check_cancelled()?;
-                let name = target
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .ok_or_else(|| anyhow::anyhow!("invalid promised destination"))?;
-                zzclawterm_files::download_path::validate_name(name)?;
+                let service = self.service.upgrade().ok_or_else(|| {
+                    anyhow::Error::new(
+                        zzclawterm_files::file_browser::FileTransferEntryError::Unavailable,
+                    )
+                })?;
+                let name = target.file_name().and_then(|name| name.to_str()).ok_or(
+                    zzclawterm_files::file_browser::FileTransferEntryError::InvalidDestination,
+                )?;
+                zzclawterm_files::download_path::validate_name(name).map_err(|_| {
+                    zzclawterm_files::file_browser::FileTransferEntryError::InvalidDestination
+                })?;
+                if matches!(service, zzclawterm_files::file_browser::FileBrowserService::Adb(_))
+                    && self.entry.is_directory()
+                {
+                    // Finder requests the promise on a worker. Validate the same
+                    // inventory limits and representable names as virtual exports
+                    // before creating anything in its negotiated destination.
+                    zzclawterm_files::drag_export::tree::enumerate_file_browser_drag_with_root_controls(
+                        &service,
+                        vec![self.entry.clone()],
+                        &control,
+                        vec![control.clone()],
+                    )?;
+                }
                 // Finder resolves top-level naming conflicts. A race must never turn
                 // its negotiated promise into an overwrite of another user's file.
                 let summary = service.download_remote_path_with_progress_and_path_options(
@@ -94,21 +101,32 @@ impl PromisedFileProvider for RemoteDownloadProvider {
                         progress_sender.send(progress);
                     },
                 )?;
-                anyhow::ensure!(!summary.skipped, "promised destination already exists");
+                anyhow::ensure!(
+                    !summary.skipped,
+                    zzclawterm_files::file_browser::FileTransferEntryError::TargetExists
+                );
                 Ok(summary)
             }))
-            .unwrap_or_else(|_| Err(anyhow::anyhow!("drag download failed")))
-            .map_err(|error| error.to_string());
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("drag download failed")));
+        if let Err(error) = &result {
+            crate::features::android::labels::log_file_error(
+                "drag-download",
+                self.service.kind(),
+                &id,
+                error,
+            );
+        }
         match result {
             Ok(summary) => {
-                send(TransferJobEvent::Finished(Ok(TransferJobOutput::Summary(
-                    summary,
-                ))));
+                send(TransferJobEvent::FileFinished(Ok(
+                    TransferJobOutput::Summary(summary),
+                )));
                 Ok(())
             }
             Err(error) => {
-                send(TransferJobEvent::Finished(Err(error.clone())));
-                Err(io::Error::other(error))
+                let message = crate::features::android::labels::file_error_message(&error);
+                send(TransferJobEvent::FileFinished(Err(error)));
+                Err(io::Error::other(message))
             }
         }
     }
@@ -119,5 +137,75 @@ impl PromisedFileProvider for RemoteDownloadProvider {
 impl Drop for RemoteDownloadProvider {
     fn drop(&mut self) {
         self.control.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RemoteDownloadProvider;
+    use crate::features::android::labels::file_error_code;
+    use crate::models::TransferJobEvent;
+    use gpui::PromisedFileProvider as _;
+    use std::sync::Arc;
+    use zzclawterm_files::adb::AdbFileService;
+    use zzclawterm_files::drag_export::DragSourceLifetime;
+    use zzclawterm_files::file_browser::FileBrowserService;
+    use zzclawterm_files::sftp::{SftpFileEntry, SftpFileType, SftpTransferControl};
+
+    #[test]
+    fn cancelled_file_promises_create_a_terminal_task_without_fetching_content() {
+        let service = FileBrowserService::Adb(Arc::new(AdbFileService::new(
+            zzclawterm_android::adb::client::DeviceBinding {
+                server: "127.0.0.1:1".parse().unwrap(),
+                serial: "fixture".into(),
+                transport_id: None,
+                generation: 1,
+            },
+        )));
+        let weak = service.downgrade().unwrap();
+        let control = SftpTransferControl::new();
+        let lifetime =
+            Arc::new(DragSourceLifetime::new(weak.clone(), vec![control.clone()]).unwrap());
+        let (sender, mut receiver) = futures::channel::mpsc::unbounded();
+        let provider = RemoteDownloadProvider::new(
+            "original".into(),
+            weak,
+            SftpFileEntry {
+                name: "file".into(),
+                path: "/device/file".into(),
+                file_type: SftpFileType::File,
+                size: Some(7),
+                permissions: None,
+                owner: String::new(),
+                group: String::new(),
+                modified_at: None,
+                raw_path_token: None,
+                symlink_target_is_directory: false,
+            },
+            Default::default(),
+            sender,
+            control,
+            lifetime,
+        );
+        provider.cancel();
+        assert!(provider.write_to(std::path::Path::new("unused")).is_err());
+        let opened = receiver.try_recv().unwrap();
+        let TransferJobEvent::DragExportOpened {
+            session_id,
+            destination,
+            ..
+        } = opened.event
+        else {
+            panic!("promise must create a task")
+        };
+        assert_eq!(session_id, "original");
+        assert!(destination.is_some());
+        let finished = receiver.try_recv().unwrap();
+        assert_eq!(finished.id, opened.id);
+        let TransferJobEvent::FileFinished(Err(error)) = finished.event else {
+            panic!("cancelled promise must finish")
+        };
+        assert_eq!(file_error_code(&error), "Cancelled");
+        assert!(receiver.try_recv().is_err());
     }
 }

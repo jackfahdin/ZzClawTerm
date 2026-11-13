@@ -11,7 +11,7 @@
 ## 简介
 
 ZzClawTerm 是一个使用 Rust 和 GPUI 编写的原生桌面终端工作区，在一个客户端中统一处理
-SSH、本地 Shell、Telnet、串口、RDP、VNC、SFTP、隧道、OTP、AI 辅助，以及加密同步与备份。
+SSH、本地 Shell、Telnet、串口、Android 设备、RDP、VNC、SFTP、隧道、OTP、AI 辅助，以及加密同步与备份。
 
 本项目 fork 自 [NyaTerm](https://github.com/nyakang/nyaterm)（上游作者 Kang），
 在其基础上进行独立品牌改造与后续维护，感谢原作者的工作。上游项目基于 Apache-2.0 许可证开源。
@@ -23,6 +23,10 @@ SSH、本地 Shell、Telnet、串口、RDP、VNC、SFTP、隧道、OTP、AI 辅�
 | **Windows** | Windows 10/11，x64 / arm64 |
 | **macOS** | macOS 12+，Intel / Apple Silicon |
 | **Linux** | x64：Ubuntu 22.04+；arm64：Ubuntu 24.04+。Fedora、Arch Linux 等需满足对应架构的系统库要求 |
+
+定制 Ubuntu 20.04 x86-64 桌面（glibc 2.31）可使用专门的
+[focal 离线兼容包](scripts/compat/linux-focal/README.md)，其中包含全部运行时 helper、
+ABI 报告和系统 / 软件 OpenGL 启动回退。
 
 ## 下载
 

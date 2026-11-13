@@ -5,17 +5,23 @@ use gpui::{App, Bounds, ClickEvent, Context, Modifiers, MouseMoveEvent, Pixels, 
 use gpui::{ClipboardItem, Window};
 
 use crate::action_links::{
-    ActionLinkAction, ActionLinkMatch, ActionLinkTarget, actions_for_match, match_at_offset,
+    ActionLinkAction, ActionLinkMatch, ActionLinkPlatform, ActionLinkTarget, actions_for_match_on,
+    match_at_offset,
 };
 use crate::features::ZzClawTermApp;
 use crate::features::terminal::terminal_runtime::{
     TERMINAL_INPUT_LATENCY_WINDOW, TERMINAL_USER_SCROLL_ACTIVE_WINDOW,
 };
 use crate::models::{
-    ActionLinkMenuAction, ActionLinkMenuState, ActionLinkTooltipState, TerminalPerformanceMode,
-    terminal_action_link_matcher_key, terminal_expensive_interactions_enabled,
+    ActionLinkMenuAction, ActionLinkMenuState, ActionLinkTooltipState, SessionLaunchConfig,
+    TerminalPerformanceMode, terminal_action_link_matcher_key,
+    terminal_expensive_interactions_enabled,
 };
 use crate::terminal::terminal_byte_index_for_cell_col;
+use zzclawterm_core::terminal::input_tracker::known_terminal_prompt_prefix;
+use zzclawterm_core::terminal::shell_prompt::classify_shell_prompt;
+use zzclawterm_remote_ops::host::HostOs;
+use zzclawterm_transport::local_shell::LocalShellPathStyle;
 
 fn action_link_hover_should_yield_to_terminal_latency(
     last_input_at: Option<Instant>,
@@ -184,20 +190,11 @@ impl ZzClawTermApp {
         if self.terminal.menus.action_link_hover.set_matched(true) {
             cx.notify();
         }
-        let preview = match &default.target {
-            ActionLinkTarget::CopyText(text) | ActionLinkTarget::PasteText(text) => {
-                format!("{} {text}", default.label)
-            }
-            target => target.text().to_owned(),
-        };
         let next = ActionLinkTooltipState {
             session_id,
             x: event.position.x,
             y: event.position.y,
-            kind_label: item.kind.label().to_string(),
-            value: item.value.clone(),
-            default_action_label: default.label.clone(),
-            default_action_preview: preview,
+            default_action: default,
             has_more_actions: actions.len() > 1,
             match_key: match_key.clone(),
         };
@@ -240,6 +237,59 @@ impl ZzClawTermApp {
         if visible_changed {
             cx.notify();
         }
+    }
+
+    /// Platform whose command spelling applies to an action link.
+    ///
+    /// This is about where the command executes, not where ZzClawTerm runs: a
+    /// Current prompt evidence precedes launch hints: local WSL and nested SSH
+    /// commands can execute on a different platform than the application.
+    fn action_link_platform_for_session(&self, session_id: Option<&str>) -> ActionLinkPlatform {
+        let Some(session_id) = session_id.filter(|id| !id.is_empty()) else {
+            return ActionLinkPlatform::default();
+        };
+        let snapshot = self.terminal_snapshot_for_session(Some(session_id), 0);
+        let prompt_row = self
+            .terminal
+            .editing
+            .sessions
+            .get(session_id)
+            .and_then(|state| state.mapping.as_ref())
+            .and_then(|mapping| mapping.cells.first())
+            .map_or(snapshot.cursor.row, |cell| cell.row);
+        if let Some(platform) = snapshot
+            .row(prompt_row)
+            .and_then(|row| known_terminal_prompt_prefix(&row.text))
+            .and_then(classify_shell_prompt)
+            .and_then(|prompt| prompt.platform)
+        {
+            return platform;
+        }
+        if let Some(platform) = self
+            .commands
+            .command_context(session_id)
+            .and_then(|context| context.dialect.action_link_platform())
+        {
+            return platform;
+        }
+        if self.session.metadata(session_id).is_some_and(|metadata| {
+            matches!(&metadata.launch_config, SessionLaunchConfig::Local(config)
+                if config.shell_path.as_deref().is_some_and(|program|
+                    LocalShellPathStyle::from_program(program) == LocalShellPathStyle::Wsl))
+        }) {
+            return ActionLinkPlatform::Posix;
+        }
+        let local_session = self.session.metadata(session_id).is_some_and(|metadata| {
+            matches!(metadata.launch_config, SessionLaunchConfig::Local(_))
+        });
+        if local_session {
+            return if HostOs::local() == HostOs::Windows {
+                ActionLinkPlatform::Windows
+            } else {
+                ActionLinkPlatform::Posix
+            };
+        }
+        ActionLinkPlatform::default()
     }
 
     pub(in crate::features) fn action_link_at_point(
@@ -311,7 +361,8 @@ impl ZzClawTermApp {
                 let matchers = &self.settings.summary().terminal_action_links_matchers;
                 match_at_offset(line, byte_offset, matchers)
             })?;
-        let actions = actions_for_match(&item);
+        let actions =
+            actions_for_match_on(&item, self.action_link_platform_for_session(session_id));
         Some((item, actions))
     }
 
@@ -632,6 +683,67 @@ mod tests {
     use crate::models::{SmartSplitMode, TerminalWindowNode, WorkspaceTabId};
     use crate::test_support::TestAppCleanup;
 
+    #[test]
+    fn action_links_use_current_windows_remote_and_posix_powershell_prompts() {
+        use crate::models::SessionLaunchConfig;
+        use zzclawterm_core::action_links::ActionLinkPlatform;
+        use zzclawterm_core::completion::types::{
+            CompletionScope, ShellCommandContext, ShellDialect,
+        };
+
+        let dir = TestTempDir::new("zzclawterm-action-link-platform");
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+        cx.update_entity(&app, |app, _| {
+            let mut wsl_launch = app.session.metadata("s1").unwrap().launch_config.clone();
+            for local in [false, true] {
+                let launch = app.session.metadata("s1").unwrap().launch_config.clone();
+                if !local {
+                    app.session.metadata_mut("s1").unwrap().launch_config =
+                        SessionLaunchConfig::Ssh(Box::default());
+                }
+                app.commands.set_command_context(
+                    "s1".into(),
+                    ShellCommandContext {
+                        scope: CompletionScope::legacy(),
+                        dialect: ShellDialect::Unknown,
+                        command_events: false,
+                    },
+                );
+                for (prompt, expected) in [
+                    ("PS C:\\Users> ", ActionLinkPlatform::Windows),
+                    ("C:\\Users>", ActionLinkPlatform::Windows),
+                    ("PS /home/user> ", ActionLinkPlatform::Posix),
+                    ("user@host:~$ ", ActionLinkPlatform::Posix),
+                ] {
+                    app.terminal
+                        .seed_session_view("s1".into(), prompt.into(), "UTF-8");
+                    assert_eq!(app.action_link_platform_for_session(Some("s1")), expected);
+                }
+                app.session.metadata_mut("s1").unwrap().launch_config = launch;
+            }
+            app.session.metadata_mut("s1").unwrap().launch_config =
+                SessionLaunchConfig::Ssh(Box::default());
+            app.terminal
+                .seed_session_view("s1".into(), "custom> ".into(), "UTF-8");
+            assert_eq!(
+                app.action_link_platform_for_session(Some("s1")),
+                ActionLinkPlatform::Posix
+            );
+            if let SessionLaunchConfig::Local(config) = &mut wsl_launch {
+                config.shell_path = Some("C:\\Windows\\System32\\wsl.exe".into());
+            }
+            app.session.metadata_mut("s1").unwrap().launch_config = wsl_launch;
+            app.terminal
+                .seed_session_view("s1".into(), String::new(), "UTF-8");
+            assert_eq!(
+                app.action_link_platform_for_session(Some("s1")),
+                ActionLinkPlatform::Posix
+            );
+        });
+    }
+
     use super::{
         ActionLinkTooltipState, action_link_hover_should_yield_to_terminal_latency,
         clear_action_link_tooltip_state,
@@ -783,10 +895,15 @@ mod tests {
             session_id: "local".to_string(),
             x: px(10.0),
             y: px(20.0),
-            kind_label: "host".to_string(),
-            value: "example.com".to_string(),
-            default_action_label: "Open".to_string(),
-            default_action_preview: "https://example.com".to_string(),
+            default_action: crate::action_links::ActionLinkAction {
+                id: "open".into(),
+                label: "Open Link".into(),
+                target: crate::action_links::ActionLinkTarget::OpenUrl(
+                    "https://example.com".into(),
+                ),
+                mac_format: None,
+                is_default: true,
+            },
             has_more_actions: false,
             match_key: match_key.to_string(),
         }
@@ -826,6 +943,36 @@ mod tests {
         assert!(clear_action_link_tooltip_state(&mut visible, &mut pending));
         assert!(visible.is_none());
         assert!(pending.is_none());
+    }
+
+    #[test]
+    fn dragging_terminal_selection_cancels_visible_and_pending_action_link_tooltips() {
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let root = TestTempDir::new("zzclawterm-selection-hides-action-link-tooltip");
+        let app = app_with_visible_local_session(&mut cx, root.path(), "local");
+        app.update(&mut cx, |app, cx| {
+            let mut settings = app.settings.summary().clone();
+            settings.terminal_action_links_enabled = true;
+            app.settings.replace_summary(settings);
+            app.terminal.layout.surface_bounds =
+                Some(Bounds::new(point(px(0.), px(0.)), size(px(500.), px(300.))));
+            app.terminal.menus.action_link_tooltip = Some(tooltip("visible"));
+            app.terminal.menus.action_link_hover_pending =
+                Some(("pending".into(), 1, tooltip("pending")));
+            app.terminal.selection.dragging = true;
+            app.update_action_link_hover(
+                &gpui::MouseMoveEvent {
+                    position: point(px(10.), px(20.)),
+                    pressed_button: Some(gpui::MouseButton::Left),
+                    modifiers: gpui::Modifiers::default(),
+                },
+                cx,
+            );
+            assert!(app.terminal.menus.action_link_tooltip.is_none());
+            assert!(app.terminal.menus.action_link_hover_pending.is_none());
+            assert!(!app.apply_action_link_tooltip_delay(1));
+        });
     }
 
     #[test]

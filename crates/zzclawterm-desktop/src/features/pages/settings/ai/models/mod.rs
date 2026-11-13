@@ -658,6 +658,7 @@ impl SettingsPanel {
                     .unwrap_or(&DEFAULT_MODEL_REASONING_EFFORTS);
                 let mut choices = div().flex().flex_wrap().gap_2();
                 for effort in MODEL_REASONING_EFFORTS {
+                    let selected = supported.contains(&effort);
                     let value = serde_json::to_value(effort)
                         .ok()
                         .and_then(|value| value.as_str().map(str::to_string))
@@ -665,7 +666,16 @@ impl SettingsPanel {
                     choices = choices.child(
                         ZzClawButton::new(format!("ai-model-effort-{model_id}-{value}"), value)
                             .small()
-                            .selected(supported.contains(&effort))
+                            .text_color(rgb(if selected {
+                                palette.primary
+                            } else {
+                                palette.text
+                            }))
+                            .font_weight(if selected {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
                             .on_click(cx.listener({
                                 let id = model_id.clone();
                                 move |panel, _, _, cx| {

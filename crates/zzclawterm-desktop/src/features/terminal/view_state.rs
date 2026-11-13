@@ -105,6 +105,7 @@ impl TerminalFeatureState {
                     self.selection.session_id = None;
                     self.selection.click_anchor = None;
                     self.selection.dragging = false;
+                    self.selection.block_gesture = None;
                     self.selection.drag_pointer_position = None;
                     self.selection.autoscroll = None;
                     self.selection.scroll_rehit_armed = false;
@@ -345,6 +346,7 @@ impl TerminalFeatureState {
     pub(in crate::features) fn clear_session_pressed_keys(&mut self, session_id: &str) {
         if let Some(view) = self.view.views.get_mut(session_id) {
             view.pressed_keys.clear();
+            view.tab_action_pressed = false;
         }
     }
 

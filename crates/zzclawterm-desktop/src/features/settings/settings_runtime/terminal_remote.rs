@@ -7,6 +7,15 @@ use crate::features::ZzClawTermApp;
 use super::general_interaction::SettingsSaveKind;
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn apply_android_adb_path(
+        &mut self,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.set_android_adb_path(text);
+        self.save_general_settings(cx);
+        cx.notify();
+    }
     /// Apply an edit from the X11 display box.
     pub(in crate::features) fn apply_terminal_x11_display(
         &mut self,
@@ -248,25 +257,11 @@ impl ZzClawTermApp {
         self.save_terminal_settings(cx);
     }
 
-    pub(in crate::features) fn toggle_terminal_wrap_markers(&mut self, cx: &mut Context<Self>) {
-        self.settings.toggle_terminal_wrap_markers();
-        self.save_terminal_settings(cx);
-    }
-
     pub(in crate::features) fn toggle_terminal_zebra_stripes_by_row(
         &mut self,
         cx: &mut Context<Self>,
     ) {
         self.settings.toggle_terminal_zebra_stripes_by_row();
-        self.save_terminal_settings(cx);
-    }
-
-    pub(in crate::features) fn set_terminal_wrap_mode(
-        &mut self,
-        mode: zzclawterm_core::models::settings::TerminalWrapMode,
-        cx: &mut Context<Self>,
-    ) {
-        self.settings.set_terminal_wrap_mode(mode);
         self.save_terminal_settings(cx);
     }
 
@@ -333,6 +328,39 @@ impl ZzClawTermApp {
     pub(in crate::features) fn toggle_terminal_line_numbers(&mut self, cx: &mut Context<Self>) {
         self.settings.toggle_terminal_line_numbers();
         self.save_terminal_settings(cx);
+    }
+
+    pub(in crate::features) fn set_terminal_wrap_mode(
+        &mut self,
+        mode: zzclawterm_core::models::settings::TerminalWrapMode,
+        cx: &mut Context<Self>,
+    ) {
+        if mode == zzclawterm_core::models::settings::TerminalWrapMode::None {
+            self.clear_terminal_block_selection(cx);
+        }
+        self.settings.set_terminal_wrap_mode(mode);
+        self.save_terminal_settings(cx);
+        let session_ids = self
+            .visible_terminal_session_ids()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        for session_id in session_ids {
+            self.notify_terminal_surface_only(Some(&session_id), cx);
+        }
+    }
+
+    pub(in crate::features) fn toggle_terminal_wrap_markers(&mut self, cx: &mut Context<Self>) {
+        self.settings.toggle_terminal_wrap_markers();
+        self.save_terminal_settings(cx);
+        let session_ids = self
+            .visible_terminal_session_ids()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        for session_id in session_ids {
+            self.notify_terminal_surface_only(Some(&session_id), cx);
+        }
     }
 
     pub(in crate::features) fn toggle_terminal_timestamps(&mut self, cx: &mut Context<Self>) {

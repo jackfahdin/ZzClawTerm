@@ -11,6 +11,7 @@ use gpui_kit::component::input::{
 
 use crate::input_focus::{preserve_nya_input_focus_on_pointer_down, register_nya_input_focus};
 use crate::sizing::{form_control_height, form_control_size};
+use crate::theme_bridge::input_surface_color;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ZzClawNumberStep {
@@ -296,13 +297,16 @@ impl ZzClawNumberInputState {
                         }
                         cx.emit(ZzClawNumberInputEvent::Changed(value));
                     }
-                    InputEvent::PressEnter { .. } => {
+                    // Same contract as `forward_input_event` in input.rs:
+                    // `Shift+Enter` is the newline gesture, not a submit.
+                    InputEvent::PressEnter { shift, .. } if !shift => {
                         let committed = this.committed_value(input.read(cx).value().as_ref());
                         input.update(cx, |input, cx| {
                             input.set_value(SharedString::from(committed.clone()), window, cx);
                         });
                         cx.emit(ZzClawNumberInputEvent::Submitted(committed));
                     }
+                    InputEvent::PressEnter { .. } => {}
                     InputEvent::Blur if this.options.allow_infinity => {
                         // The native blur clamp only applies to numeric masks.
                         let value = input.read(cx).value().to_string();
@@ -350,6 +354,7 @@ impl Render for ZzClawNumberInputState {
         NumberInput::new(&state)
             .with_size(form_control_size())
             .h(form_control_height())
+            .bg(input_surface_color(cx))
             .disabled(self.options.disabled)
             .when_some(self.options.prefix.clone(), |this, prefix| {
                 this.prefix(text_affix(prefix).into_any_element())
@@ -408,6 +413,7 @@ impl RenderOnce for ZzClawNumberInput {
                     .with_size(form_control_size())
                     .h(form_control_height())
                     .appearance(self.appearance)
+                    .when(self.appearance, |this| this.bg(input_surface_color(cx)))
                     .disabled(options.disabled)
                     .when_some(options.prefix, |this, prefix| {
                         this.prefix(text_affix(prefix).into_any_element())
@@ -486,8 +492,9 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use gpui::{
-        AppContext as _, ClipboardItem, IntoElement, Modifiers, ParentElement as _, Render,
-        Styled as _, TestAppContext, VisualTestContext, div, point, px,
+        AppContext as _, ClipboardItem, IntoElement, Modifiers, MouseButton, MouseDownEvent,
+        MouseUpEvent, ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext,
+        div, point, px,
     };
     use gpui_kit::component::input::{Paste, SelectAll};
 
@@ -534,6 +541,44 @@ mod tests {
             _ = window.draw(cx);
         });
         (field, cx)
+    }
+
+    #[gpui::test]
+    fn scrollback_number_selection_keeps_editor_focus_with_accessibility_active(
+        cx: &mut TestAppContext,
+    ) {
+        let (field, cx) = number_fixture(
+            cx,
+            "10000",
+            ZzClawNumberInputOptions::default()
+                .range(100., 100_000.)
+                .step(100.)
+                .decimal_places(0),
+        );
+        assert!(cx.activate_accessibility());
+        cx.update(|window, cx| window.blur(cx));
+        cx.simulate_click(point(px(100.), px(16.)), Modifiers::default());
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: point(px(100.), px(16.)),
+            modifiers: Modifiers::default(),
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: point(px(100.), px(16.)),
+            modifiers: Modifiers::default(),
+            click_count: 2,
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(window.is_a11y_active());
+            assert!(field.read(cx).component_focus_handle(cx).is_focused(window));
+            let input = field.read(cx).component_state().unwrap();
+            assert_eq!(input.read(cx).selected_value(), "10000");
+            assert_eq!(field.read(cx).value(cx), "10000");
+        });
     }
 
     #[gpui::test]
@@ -721,6 +766,37 @@ mod tests {
                 ZzClawNumberInputEvent::Stepped(_) => false,
             }));
         }
+    }
+
+    #[gpui::test]
+    fn shift_enter_does_not_submit(cx: &mut TestAppContext) {
+        let (field, cx) = number_fixture(cx, "100", ZzClawNumberInputOptions::default());
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = cx.update(|_, cx| {
+            let events = events.clone();
+            cx.subscribe(&field, move |_, event, _| {
+                events.borrow_mut().push(event.clone())
+            })
+        });
+
+        cx.simulate_keystrokes("shift-enter");
+        cx.run_until_parked();
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .all(|event| !matches!(event, ZzClawNumberInputEvent::Submitted(_))),
+            "shift-enter must not submit"
+        );
+
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .any(|event| matches!(event, ZzClawNumberInputEvent::Submitted(_)))
+        );
     }
 
     #[gpui::test]

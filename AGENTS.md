@@ -20,12 +20,44 @@ must include explicit conversion logic and tests.
   contracts, and shared pure logic. Do not add GPUI dependencies here.
 * `crates/zzclawterm-desktop`: GPUI application composition, `AppShell`,
   `ZzClawTermApp`, feature state, views, platform adapters, background-job
-  coordination, native HTTP adapters, and GPUI Entity stores.
+  coordination, service adapters, and GPUI Entity stores.
+* `crates/zzclawterm-mcp-host`: UI-independent loopback MCP service, authentication,
+  client identities, cancellation routing, and atomic discovery-file I/O. It may
+  depend on core and mcp-protocol only among workspace crates. Desktop injects
+  discovery permissions and owns approval, capability execution, configuration
+  paths, generation registration, and ephemeral credential lifetime.
+* `crates/zzclawterm-agent-client`: UI-independent Codex and Claude Code CLI clients,
+  executable discovery, account/version/authentication probes, and owned child
+  process trees and pipe readers. Only core is allowed as a workspace dependency,
+  including tests. Desktop injects MCP helper paths/environment and callbacks,
+  retaining task scheduling, UI state, persistence, and credential guards.
+* `crates/zzclawterm-ai-client`: UI-independent native AI provider HTTP clients,
+  request and streaming-response adapters, model discovery, and proxy handling.
+  Runtime/task ownership and AI feature orchestration remain in desktop.
+* `crates/zzclawterm-preview`: UI-independent image/PDF decoding, text preview
+  parsing, pixel transformations and decoded-content contracts. Desktop owns
+  fetching, job lifecycle, GPUI image conversion and preview caches. Its `icons`,
+  `wallpaper` and `qr` modules own decoding; OTP URI interpretation stays in desktop.
+* `crates/zzclawterm-translation-client`: UI-independent native translation HTTP
+  clients and provider request/response adapters. Desktop owns translation
+  tasks, settings persistence, credential state and presentation.
+* `crates/zzclawterm-cloud-storage`: UI-independent native and OpenDAL cloud-storage
+  adapters, OAuth device authorization, token-refresh sinks, and HTTP I/O counters.
+  Sync orchestration, caches, and credential persistence remain in desktop/store.
+  Its default-off `test-support` feature exposes local fixtures only for tests.
+* `crates/zzclawterm-updater`: UI-independent native update HTTP checks, signed
+  downloads, installation preparation, helper execution, and portable recovery.
+  Desktop owns update state, scheduling, close guards, and native progress UI;
+  cancellation and helper progress execution are injected through callbacks.
+  These adapter crates may depend on `zzclawterm-core`, but not GPUI, desktop,
+  store, other business crates, or each other, including in development dependencies.
 * `crates/zzclawterm-terminal`: terminal state machine, snapshots,
   control-sequence handling, encoding, and graphics protocols. It must remain
   independent of UI frameworks.
 * `crates/zzclawterm-terminal-gpui`: GPUI-specific terminal layout, input,
-  highlighting, images, and painting.
+  highlighting, images, and painting. Its `scrollbar`, `decorations` and `ime`
+  modules own reusable presentation; desktop retains drag/session routing,
+  action-link cache selection and composition editing state.
 * `crates/zzclawterm-transport`: local PTY, SSH authentication and channels, Telnet,
   Serial, tunnels, session lifecycle, tmux, and transfer-protocol runtime. It
   exposes file-session probe injection and must not depend on the file,
@@ -36,12 +68,19 @@ must include explicit conversion logic and tests.
   GPU/NPU operations over transport execution APIs. Docker state is shared by
   the desktop SSH connection lease, not owned by transport.
 * `crates/zzclawterm-recording`: recording, transcripts, rotation, and terminal
-  history search over the core and terminal contracts.
+  history search over the core and terminal contracts. Its `pipeline` module
+  owns the recording writer, bounded queues, and coalesced events; desktop owns
+  lifecycle coordination. Its default-off `test-support` feature exposes only
+  cross-crate test helpers.
 * These four crates remain independent of GPUI and desktop presentation types;
   the three business crates must not depend on each other.
 * `crates/zzclawterm-ui`: shared GPUI theme tokens, the `gpui-kit`
   integration boundary, and reusable ZzClawTerm presentation and interaction
-  widgets.
+  widgets. `markdown::lightweight` retains the lightweight Markdown renderer
+  separately from `ZzClawMarkdown`; `presentation` owns stateless menu rows.
+* `crates/zzclawterm-sync`: UI-independent sync protocol and policies. Its
+  `auto_sync` schedule receives time from callers; desktop owns operations,
+  task cancellation, safe-window checks, result mapping and history persistence.
 * `crates/zzclawterm-store`: persistence implementation, transactions, redb
   schema, encryption adapters, and database compatibility readers. Keep pure
   data models and serialization policies in `zzclawterm-core`.
@@ -49,6 +88,12 @@ must include explicit conversion logic and tests.
   framebuffer and input models, certificate policy, clipboard state, and the
   RDP/VNC helper IPC contracts. It owns no protocol decoder; both live in the
   helper crates below.
+* `crates/zzclawterm-android`: UI-independent ADB server client, shared device
+  tracker, native Shell v2 and Sync channels, bounded Android helper IPC and
+  screen process supervision. It may depend on core, but not GPUI, desktop,
+  store, transport, files, or decoder libraries.
+* `crates/zzclawterm-android-helper`: isolated scrcpy protocol, H.264 decoding,
+  BGRA conversion and Android input enforcement. Only this helper links FFmpeg.
 * `crates/zzclawterm-rdp-helper`: isolated IronRDP helper process that communicates
   with the application through the typed IPC protocol in
   `zzclawterm-remote-desktop`.
@@ -67,13 +112,13 @@ must include explicit conversion logic and tests.
   rendering distinction when adding assets.
 * Third-party dependencies that ZzClawTerm patches are not vendored. Each is a
   patch series on a fork under <https://github.com/jackfahdin> on branch
-  `nyaterm` (forked from the original series under
+  `zzclawterm` (forked from the original series under
   <https://github.com/nyakang>). All ten forks are consumed from GitHub at a
   revision pinned in the root `Cargo.toml`: `alacritty` (`alacritty_terminal`),
   `gpui-kit`, `IronRDP` (`ironrdp-client`, `ironrdp-connector`), `portable-pty`,
   `russh`, `russh-sftp`, `sspi-rs`, `vnc-rs`, `zed` (`gpui`, `gpui_platform`),
   and `zmodem2`. <https://gitcode.com/JackfahdinImport> is only a mirror for
-  faster access in mainland China. Each branch carries a `NYATERM.md` recording
+  faster access in mainland China. Each branch carries a `ZZCLAWTERM.md` recording
   its base revision, its patches, and how they were validated.
 * `temp/vendor/`: untracked, read-only copies of those sources, kept only so
   they can be read locally. Nothing under `temp/` is compiled. **Editing
@@ -234,7 +279,7 @@ buffers where practical.
 Patching a third-party dependency means committing to its fork branch, pushing,
 and bumping the pinned revision in the root `Cargo.toml`. Do not edit `temp/`.
 Record the reason for the change and the validation performed on the patch
-commit and in that branch's `NYATERM.md`, and keep the patch series split by
+commit and in that branch's `ZZCLAWTERM.md`, and keep the patch series split by
 concern rather than squashed. Prefer rebasing the series onto a newer upstream
 revision over accumulating snapshots.
 
@@ -246,18 +291,21 @@ Use package-specific checks while iterating:
 * `cargo test -p <crate-name>`
 * `cargo run -p zzclawterm-app --bin zzclawterm`
 
-Builtin/IronRDP and VNC run in helper processes that the application resolves
+Builtin/IronRDP, VNC and Android screen run in helper processes that the application resolves
 beside its own executable. Windows Native RDP is the explicitly selected
 in-process system-component exception and requires MSVC with ATL when building.
 `cargo run -p zzclawterm-app --bin zzclawterm` builds only the application, so build the
 helpers into the same target directory first or the helper backends fail with
 `HelperMissing`:
 
-* `cargo build -p zzclawterm-rdp-helper -p zzclawterm-vnc-helper`
+* `python3 scripts/release/prepare_android.py` (export its reported `FFMPEG_DIR`)
+* `cargo build -p zzclawterm-rdp-helper -p zzclawterm-vnc-helper -p zzclawterm-android-helper`
 
-A bare `cargo build` or `cargo check` covers all three: they are the workspace
+A bare `cargo build` or `cargo check` covers the app and helpers: they are the workspace
 `default-members`. `ZZCLAWTERM_RDP_HELPER` and `ZZCLAWTERM_VNC_HELPER` override the
-lookup with an explicit path. `scripts/release/package_native.py` is what puts the
+lookup with an explicit path; `ZZCLAWTERM_ANDROID_HELPER` does the same for Android.
+See `crates/zzclawterm-android/README.md` for pinned dependencies and acceptance probes.
+`scripts/release/package_native.py` is what puts the
 helpers next to the application in release packages; its `HELPER_BINS` list must
 name every helper. Windows packages may additionally bundle the VcXsrv X server
 (GPLv3, resolved from `ZZCLAWTERM_VCXSRV_DIST` or `vendor/vcxsrv/`, never
@@ -310,6 +358,10 @@ Add tests beside the behavior being changed.
   the handshake, an ordinary disconnect, and crash/hang reaping; keep both in
   step when the IPC contract changes.
 * Storage changes require round-trip and supported-format compatibility tests.
+* Update HTTP, signature, package validation, replacement, and recovery tests
+  belong in `zzclawterm-updater`. GPUI update state and native progress presentation
+  tests remain in desktop. Release jobs run `portable_release_archive_round_trip`
+  from the updater crate against the actual packaged ZIP.
 * Credential and encryption changes require success, invalid-password,
   corrupted-data, and compatibility-format tests.
 * GPUI state changes should test state transitions separately from visual

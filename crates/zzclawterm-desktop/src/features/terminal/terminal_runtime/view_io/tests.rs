@@ -3,12 +3,12 @@ use super::{
     lost_mouse_report_release_button, mouse_report_allowed_by_alt,
     terminal_cursor_position_changed, terminal_cursor_visible_for_display_offset,
     terminal_input_latency_active, terminal_key_bytes_for_mode_and_settings,
-    terminal_keyword_highlight_updates_allowed, terminal_live_action_link_enrichment_allowed,
-    terminal_mouse_report_button, terminal_paint_snapshot_for_view,
-    terminal_paint_window_snapshot_for_view, terminal_retained_snapshot_matches_view,
-    terminal_scroll_retained_window_extra_rows, terminal_scroll_snapshot_request_offset,
-    terminal_scroll_text_first_decorations, terminal_selection_for_session,
-    terminal_session_write_failure_log, terminal_should_defer_key_text_to_input_handler_for_state,
+    terminal_live_action_link_enrichment_allowed, terminal_mouse_report_button,
+    terminal_paint_snapshot_for_view, terminal_paint_window_snapshot_for_view,
+    terminal_retained_snapshot_matches_view, terminal_scroll_retained_window_extra_rows,
+    terminal_scroll_snapshot_request_offset, terminal_scroll_text_first_decorations,
+    terminal_selection_for_session, terminal_session_write_failure_log,
+    terminal_should_defer_key_text_to_input_handler_for_state,
     terminal_should_track_command_suggestion_input, terminal_snapshot_covers_display_offset,
     terminal_snapshot_with_newer_edge_row, terminal_snapshot_with_retained_scroll_window,
     terminal_status_changed, terminal_user_scroll_active, terminal_visual_display_offset,
@@ -25,6 +25,67 @@ use std::io::Read as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zzclawterm_terminal::TerminalScreen;
+
+#[test]
+fn command_block_layout_changes_replace_retained_frames_without_scrolling_or_resizing() {
+    for unwrapped in [false, true] {
+        let mut view = TerminalViewState::new();
+        view.screen = TerminalScreen::new(40, 4);
+        view.screen.set_logical_line_snapshots(unwrapped);
+        for _ in 0..2 {
+            view.screen
+                .advance(b"$ \x1b]133;B\x07run\r\n\x1b]133;C\x07");
+            for _ in 0..12 {
+                view.screen.advance(b"output\r\n");
+            }
+            view.screen.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07");
+        }
+        view.screen.advance(b"$ \x1b]133;B\x07");
+        let blocks = view.screen.snapshot().command_blocks;
+        let first = blocks[0].id;
+        let second = blocks[1].id;
+        let offset = 2;
+        // Expanding one of several folds, expanding the last fold, and collapsing
+        // all leave the source rows and terminal geometry unchanged.
+        for (before, after) in [
+            (vec![first, second], vec![second]),
+            (vec![second], vec![]),
+            (vec![], vec![first]),
+        ] {
+            view.screen
+                .set_collapsed_commands(before.into_iter().collect());
+            let retained = Arc::new(view.screen.viewport_snapshot_with_window(offset, 100, 100));
+            view.screen
+                .set_collapsed_commands(after.into_iter().collect());
+            let replacement = Arc::new(view.screen.viewport_snapshot_with_window(offset, 100, 100));
+            view.frame_snapshot = Some(Arc::new(view.screen.snapshot()));
+            view.scrollback_snapshots
+                .insert(offset, replacement.clone());
+
+            assert_eq!(retained.history, replacement.history);
+            assert_eq!(retained.rows(), replacement.rows());
+            assert!(terminal_snapshot_covers_display_offset(
+                &retained,
+                offset,
+                4,
+                view.screen.scrollback_len(),
+            ));
+            assert!(!terminal_retained_snapshot_matches_view(
+                &retained, &view, offset, 4
+            ));
+            let painted =
+                terminal_paint_window_snapshot_for_view(Some(&view), offset, 4, Some(retained))
+                    .unwrap();
+            assert!(Arc::ptr_eq(&painted, &replacement));
+            assert!(terminal_retained_snapshot_matches_view(
+                &replacement,
+                &view,
+                offset,
+                4
+            ));
+        }
+    }
+}
 
 #[test]
 fn terminal_mouse_report_buttons_map_to_their_gpui_capture_button() {
@@ -934,17 +995,6 @@ fn terminal_scroll_text_first_decorations_keep_partially_covered_bottom_links() 
         decorations[snapshot.row_count() - 1].link_ranges,
         vec![(3, 8)]
     );
-}
-
-#[test]
-fn terminal_keyword_highlight_updates_stay_enabled_for_active_surface() {
-    assert!(terminal_keyword_highlight_updates_allowed(true, false));
-    assert!(!terminal_keyword_highlight_updates_allowed(true, true));
-}
-
-#[test]
-fn terminal_keyword_highlight_updates_pause_for_inactive_surface() {
-    assert!(!terminal_keyword_highlight_updates_allowed(false, false));
 }
 
 #[test]
@@ -2276,4 +2326,33 @@ fn option_arrows_follow_meta_setting_and_target_session_kitty_flags() {
             }
         }
     });
+}
+
+#[test]
+fn cached_history_rows_use_the_latest_navigation_target_after_reset() {
+    use zzclawterm_terminal::command_navigation::CommandNavigationAction;
+    let mut view = TerminalViewState::new();
+    view.screen.resize(20, 3);
+    for _ in 0..5 {
+        view.screen.advance(
+            b"\x1b]133;A\x07$ \x1b]133;B\x07echo\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07",
+        );
+    }
+    view.screen
+        .navigate_command(CommandNavigationAction::Previous)
+        .unwrap();
+    let result = view
+        .screen
+        .navigate_command(CommandNavigationAction::Previous)
+        .unwrap();
+    let old = Arc::new(view.screen.viewport_snapshot(result.display_offset));
+    view.scrollback_snapshots
+        .insert(result.display_offset, old.clone());
+    view.screen.reset_command_navigation();
+    view.frame_snapshot = Some(Arc::new(view.screen.snapshot()));
+    let painted =
+        terminal_paint_window_snapshot_for_view(Some(&view), result.display_offset, 3, None)
+            .unwrap();
+    assert_eq!(painted.command_navigation_target, None);
+    assert!(Arc::ptr_eq(&painted.row_data, &old.row_data));
 }

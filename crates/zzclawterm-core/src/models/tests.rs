@@ -410,6 +410,36 @@ fn tauri_telnet_username_auth_and_encoding_fields_round_trip() {
 }
 
 #[test]
+fn telnet_network_fields_round_trip_and_legacy_connections_remain_direct() {
+    let legacy: SavedConnection = serde_json::from_value(serde_json::json!({
+        "id":"legacy-telnet", "name":"Legacy", "type":"telnet", "host":"device.internal"
+    }))
+    .unwrap();
+    assert!(legacy.network.is_none());
+    for raw_tcp_cli in [false, true] {
+        let mut connection = legacy.clone();
+        if let ConnectionType::Telnet {
+            raw_tcp_cli: raw, ..
+        } = &mut connection.config
+        {
+            *raw = raw_tcp_cli;
+        }
+        connection.network = Some(crate::models::network::ConnectionNetwork {
+            proxy_id: Some("proxy".into()),
+            proxy_jump_id: Some("jump".into()),
+            host_key_alias: Some("existing-alias".into()),
+        });
+        let json = serde_json::to_value(&connection).unwrap();
+        assert_eq!(json["network"]["proxy_id"], "proxy");
+        assert_eq!(json["network"]["proxy_jump_id"], "jump");
+        assert_eq!(
+            serde_json::from_value::<SavedConnection>(json).unwrap(),
+            connection
+        );
+    }
+}
+
+#[test]
 fn validates_sftp_shell_detection_timeout_range() {
     for value in [
         MIN_SFTP_SHELL_DETECTION_TIMEOUT_MS,
@@ -476,6 +506,7 @@ fn local_terminal_endpoint_uses_shell_and_working_dir() {
         icon_auto_detect: None,
         auth: None,
         ssh_algorithms: None,
+        ssh_compatibility_mode: false,
         ssh_profile: Default::default(),
         terminal_type: None,
         sftp: Default::default(),
@@ -655,6 +686,28 @@ fn ssh_agent_legacy_fields_migrate_to_canonical_without_secrets() {
         !serialized.contains("\"agent_forwarding\":"),
         "{serialized}"
     );
+}
+
+#[test]
+fn legacy_agent_migration_keeps_inactive_endpoints_and_is_idempotent() {
+    for mode in ["password", "key", "none"] {
+        let mut connection: SavedConnection = serde_json::from_value(serde_json::json!({
+            "id":"inactive-agent", "name":"SSH", "type":"ssh", "host":"example.test",
+            "auth":{"mode":mode}, "agent_endpoint":{"type":"environment", "variable":"FIXTURE_SSH_AGENT"},
+            "agent_forwarding":true
+        })).unwrap();
+        assert!(migrate_legacy_ssh_agent_settings(&mut connection));
+        let expected_endpoint = SshAgentEndpoint::Environment {
+            variable: "FIXTURE_SSH_AGENT".into(),
+        };
+        assert!(
+            matches!(&connection.config, ConnectionType::Ssh { auth_agent_endpoint: Some(endpoint), .. } if endpoint == &expected_endpoint)
+        );
+        assert!(!migrate_legacy_ssh_agent_settings(&mut connection));
+        let reloaded: SavedConnection =
+            serde_json::from_value(serde_json::to_value(&connection).unwrap()).unwrap();
+        assert_eq!(reloaded, connection);
+    }
 }
 
 #[test]
@@ -1450,4 +1503,44 @@ fn rdp_backend_legacy_aliases_and_unknown_values_survive_editing() {
             saved
         );
     }
+}
+
+#[test]
+fn ssh_compatibility_mode_defaults_and_round_trips_without_resurrecting_cleared_values() {
+    let legacy = serde_json::json!({
+        "name":"Legacy SSH", "type":"ssh", "host":"example.test", "username":"user"
+    });
+    let mut connection: SavedConnection = serde_json::from_value(legacy).unwrap();
+    assert!(!connection.ssh_compatibility_mode);
+    assert!(
+        serde_json::to_value(&connection)
+            .unwrap()
+            .get("ssh_compatibility_mode")
+            .is_none()
+    );
+    for profile in [SshProfile::Standard, SshProfile::NetworkDevice] {
+        connection.ssh_profile = profile;
+        for enabled in [true, false, true, false] {
+            connection.ssh_compatibility_mode = enabled;
+            let mut encoded = serde_json::to_value(&connection).unwrap();
+            encoded["future_option"] = serde_json::json!({"retained":true});
+            let mut loaded: SavedConnection = serde_json::from_value(encoded).unwrap();
+            assert_eq!(loaded.ssh_compatibility_mode, enabled);
+            assert_eq!(loaded.ssh_profile, profile);
+            loaded.ssh_compatibility_mode = false;
+            let cleared = serde_json::to_value(&loaded).unwrap();
+            assert!(cleared.get("ssh_compatibility_mode").is_none());
+            assert_eq!(cleared["future_option"]["retained"], true);
+        }
+    }
+    let explicit_false: SavedConnection = serde_json::from_value(serde_json::json!({
+        "name":"SSH", "type":"ssh", "host":"example.test", "ssh_compatibility_mode":false
+    }))
+    .unwrap();
+    assert!(
+        serde_json::to_value(explicit_false)
+            .unwrap()
+            .get("ssh_compatibility_mode")
+            .is_none()
+    );
 }

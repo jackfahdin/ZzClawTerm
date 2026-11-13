@@ -22,6 +22,7 @@ base64.workspace = true
 crypto_secretbox.workspace = true
 dirs.workspace = true
 encoding_rs.workspace = true
+flate2.workspace = true
 futures.workspace = true
 glob.workspace = true
 zzclawterm-mcp-protocol.workspace = true
@@ -50,3 +51,6 @@ unicode-segmentation.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 zip.workspace = true
+
+[build-dependencies]
+flate2.workspace = true

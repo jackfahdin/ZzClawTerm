@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
-import platform
 import plistlib
 import shutil
 import struct
@@ -26,7 +26,7 @@ MIN_ARTIFACT_SIZE = 1024
 
 def helper_filenames(target: str) -> list[str]:
     suffix = ".exe" if "windows" in target else ""
-    return [f"{name}{suffix}" for name in package_native.HELPER_BINS]
+    return [f"{name}{suffix}" for name in package_native.helper_bins(target)]
 
 
 def require_safe_archive_path(name: str) -> None:
@@ -234,11 +234,9 @@ def verify_linux_desktop(
         "Type": "Application",
         "Name": identity.display_name,
         "Icon": identity.desktop_id,
-        "StartupWMClass": identity.desktop_id,
+        "StartupWMClass": identity.display_name,
         "Exec": f"{expected_executable} %U",
-        "MimeType": "".join(
-            f"x-scheme-handler/{scheme};" for scheme in identity.url_schemes
-        ),
+        "MimeType": "".join(f"x-scheme-handler/{scheme};" for scheme in identity.url_schemes),
     }
     for key, value in expected.items():
         if fields.get(key) != value:
@@ -283,6 +281,48 @@ def read_rpm_member(path: Path, member: str) -> bytes:
             return archive[offset:data_end]
         offset = (data_end + 3) & ~3
     raise RuntimeError(f"{path.name} is missing {member}")
+
+
+def verify_android_resources(read, target: str) -> None:
+    """Validate resource inventory and each component's real architecture."""
+    import prepare_android
+    try:
+        manifest = json.loads(read("android-resources.json"))
+    except (KeyError, FileNotFoundError, ValueError) as error:
+        raise RuntimeError("Android resource manifest is missing or invalid") from error
+    if manifest.get("schema") != 1 or manifest.get("target") != target or manifest.get("dependencies") != prepare_android.METADATA:
+        raise RuntimeError("Android resource provenance does not match pinned dependencies")
+    files = manifest.get("files", {})
+    required = {"adb/SOURCE.json", "adb/NOTICE.txt", "android-libs/SOURCE.json", "android-libs/LICENSE.txt"}
+    if "windows" in target:
+        required.update(["adb/adb.exe", "adb/AdbWinApi.dll", "adb/AdbWinUsbApi.dll", "avcodec-62.dll", "avformat-62.dll", "avutil-60.dll", "swscale-9.dll"])
+    elif "apple" in target:
+        required.update(["adb/adb", *[f"android-libs/lib{name}.{version}.dylib" for name, version in [("avcodec", 62), ("avformat", 62), ("avutil", 60), ("swscale", 9)]]])
+    else:
+        required.update(["adb/adb", *[f"android-libs/lib{name}.so.{version}" for name, version in [("avcodec", 62), ("avformat", 62), ("avutil", 60), ("swscale", 9)]]])
+    if not required <= files.keys():
+        raise RuntimeError(f"Android resource inventory is incomplete: {required - files.keys()}")
+    for name, expected in files.items():
+        require_safe_archive_path(name)
+        if not (name.startswith(("adb/", "android-libs/")) or name in required):
+            raise RuntimeError("Unexpected Android resource path")
+        data = read(name)
+        if hashlib.sha256(data).hexdigest() != expected:
+            raise RuntimeError(f"Android resource checksum mismatch: {name}")
+        if name.endswith((".exe", ".dll")):
+            actual = pe_machine(data)
+            machine = 0x14C if name.startswith("adb/") else 0xAA64 if target.startswith("aarch64") else 0x8664
+            if actual != machine: raise RuntimeError(f"Android resource PE architecture mismatch: {name}")
+        elif data.startswith(b"\x7fELF"):
+            if elf_machine(data) != (183 if target.startswith("aarch64") else 62): raise RuntimeError(f"Android resource ELF architecture mismatch: {name}")
+        elif name == "adb/adb" and "apple" in target:
+            if data[:4] != b"\xca\xfe\xba\xbe": raise RuntimeError("Bundled macOS ADB must be universal")
+            count = int.from_bytes(data[4:8], "big")
+            if count > 16 or len(data) < 8 + count * 20: raise RuntimeError("Invalid universal ADB header")
+            cpus = {int.from_bytes(data[8+i*20:12+i*20], "big") for i in range(count)}
+            if not {0x01000007, 0x0100000C} <= cpus: raise RuntimeError("Bundled macOS ADB is missing an architecture")
+        elif name.endswith(".dylib"):
+            if macho_cpu_type(data) != (0x0100000C if target.startswith("aarch64") else 0x01000007): raise RuntimeError(f"Android resource Mach-O architecture mismatch: {name}")
 
 
 def verify_windows_portable(path: Path, target: str, version: str) -> None:
@@ -470,6 +510,7 @@ def verify_macos_archive(path: Path, target: str, version: str) -> None:
         missing = required - names
         if missing:
             raise RuntimeError(f"{path.name} is missing: {', '.join(sorted(missing))}")
+        verify_android_resources(lambda name: archive.extractfile(f"{bundle}/Contents/MacOS/{name}").read(), target)
         packaged_version = archive.extractfile(version_file).read().decode().strip()  # type: ignore[union-attr]
         plist = plistlib.loads(archive.extractfile(info_plist).read())  # type: ignore[union-attr]
         binary = archive.extractfile(executable).read()  # type: ignore[union-attr]
@@ -500,7 +541,8 @@ def verify_macos_archive(path: Path, target: str, version: str) -> None:
             )
 
 
-def verify_dmg(path: Path) -> None:
+def verify_dmg(path: Path, version: str) -> None:
+    identity = package_native.release_identity(version)
     if sys.platform != "darwin":
         return
     result = subprocess.run(
@@ -519,7 +561,19 @@ def verify_dmg(path: Path) -> None:
     try:
         if not mount_point:
             raise RuntimeError(f"{path.name} did not expose a mounted volume")
-        executable = Path(mount_point) / "ZzClawTerm.app" / "Contents" / "MacOS" / "ZzClawTerm"
+        executable = Path(mount_point) / identity.macos_bundle_name / "Contents" / "MacOS" / "ZzClawTerm"
+        bundle = Path(mount_point) / identity.macos_bundle_name
+        plist = plistlib.loads((bundle / "Contents" / "Info.plist").read_bytes())
+        if plist.get("CFBundleIdentifier") != identity.macos_identifier or plist.get("CFBundleDisplayName") != identity.display_name:
+            raise RuntimeError(f"{path.name} contains the wrong bundle identity")
+        verify_macos_url_scheme(plist, path.name, identity)
+        if not (Path(mount_point) / "Applications").is_symlink() or os.readlink(Path(mount_point) / "Applications") != "/Applications":
+            raise RuntimeError(f"{path.name} is missing the Applications link")
+        for name in helper_filenames("aarch64-apple-darwin"):
+            if not (bundle / "Contents" / "MacOS" / name).is_file():
+                raise RuntimeError(f"{path.name} is missing {name}")
+        if (bundle / "Contents" / "Resources" / "VERSION").read_text().strip() != version:
+            raise RuntimeError(f"{path.name} contains the wrong version")
         if not executable.is_file():
             raise RuntimeError(f"{path.name} does not contain the ZzClawTerm application")
     finally:
@@ -528,6 +582,7 @@ def verify_dmg(path: Path) -> None:
 
 
 def verify_appimage(path: Path, target: str, version: str) -> None:
+    identity = package_native.release_identity(version)
     expected_machine = {
         "x86_64-unknown-linux-gnu": 62,
         "aarch64-unknown-linux-gnu": 183,
@@ -548,17 +603,20 @@ def verify_appimage(path: Path, target: str, version: str) -> None:
             env={**os.environ, "APPIMAGE_EXTRACT_AND_RUN": "1"},
         )
         root = Path(directory) / "squashfs-root"
+        verify_android_resources(lambda name: (root / "usr/bin" / name).read_bytes(), target)
         executables = [
             root / "usr" / "bin" / name
             for name in ("zzclawterm", *helper_filenames(target))
         ]
-        version_file = root / "usr" / "share" / "doc" / "zzclawterm" / "VERSION"
-        desktop_file = root / "usr" / "share" / "applications" / "zzclawterm.desktop"
+        version_file = root / "usr" / "share" / "doc" / identity.desktop_id / "VERSION"
+        desktop_file = root / "usr" / "share" / "applications" / identity.linux_desktop_file
         required = [
             root / "AppRun",
             *executables,
             desktop_file,
-            root / "usr" / "share" / "doc" / "zzclawterm" / "LICENSE",
+            root / identity.linux_desktop_file,
+            root / f"{identity.desktop_id}.png",
+            root / "usr" / "share" / "doc" / identity.desktop_id / "LICENSE",
             version_file,
         ]
         missing = [item for item in required if not item.exists()]
@@ -566,13 +624,20 @@ def verify_appimage(path: Path, target: str, version: str) -> None:
             raise RuntimeError(f"{path.name} is missing AppImage entries: {missing}")
         packaged_version = version_file.read_text(encoding="utf-8").strip()
         desktop_content = desktop_file.read_text(encoding="utf-8")
+        verify_linux_desktop((root / identity.linux_desktop_file).read_text(encoding="utf-8"), package_native.APP_BIN, path.name, identity)
+        for size in package_native.linux_icons.ICON_SIZES:
+            icon = root / "usr" / "share" / "icons" / "hicolor" / size / "apps" / f"{identity.desktop_id}.png"
+            if not icon.is_file():
+                raise RuntimeError(f"{path.name} is missing {icon.name}")
+            if icon.stat().st_mode & 0o777 != 0o644:
+                raise RuntimeError(f"{path.name} has unreadable or executable icons")
         machines = {}
         for executable in executables:
             with executable.open("rb") as handle:
                 machines[executable.name] = elf_machine(handle.read(64))
     if packaged_version != version:
         raise RuntimeError(f"{path.name} contains inconsistent version")
-    verify_linux_desktop(desktop_content, package_native.APP_BIN, path.name)
+    verify_linux_desktop(desktop_content, package_native.APP_BIN, path.name, identity)
     for name, binary_machine in machines.items():
         if binary_machine != expected_machine:
             raise RuntimeError(
@@ -582,23 +647,27 @@ def verify_appimage(path: Path, target: str, version: str) -> None:
 
 
 def verify_deb(path: Path, target: str, version: str) -> None:
+    identity = package_native.release_identity(version)
     expected_arch = package_native.linux_deb_arch(target)
     fields = subprocess.check_output(
         ["dpkg-deb", "--field", str(path), "Package", "Version", "Architecture"],
         text=True,
     )
-    if "Package: zzclawterm" not in fields:
+    metadata = dict(line.split(": ", 1) for line in fields.splitlines())
+    if metadata.get("Package") != identity.desktop_id:
         raise RuntimeError(f"{path.name} has the wrong Debian package name")
-    if f"Version: {version.replace('-', '~')}" not in fields:
+    if metadata.get("Version") != version.replace("-", "~"):
         raise RuntimeError(f"{path.name} has the wrong Debian version")
-    if f"Architecture: {expected_arch}" not in fields:
+    if metadata.get("Architecture") != expected_arch:
         raise RuntimeError(f"{path.name} has the wrong Debian architecture")
     contents = subprocess.check_output(["dpkg-deb", "--contents", str(path)], text=True)
+    if any(line.split()[1] != "root/root" for line in contents.splitlines() if line.strip()):
+        raise RuntimeError(f"{path.name} contains files not owned by root/root")
     for required in (
-        "./opt/zzclawterm/zzclawterm",
-        "./opt/zzclawterm/VERSION",
-        "./usr/share/applications/zzclawterm.desktop",
-        *(f"./opt/zzclawterm/{name}" for name in helper_filenames(target)),
+        f"./opt/{identity.desktop_id}/zzclawterm",
+        f"./opt/{identity.desktop_id}/VERSION",
+        f"./usr/share/applications/{identity.linux_desktop_file}",
+        *(f"./opt/{identity.desktop_id}/{name}" for name in helper_filenames(target)),
     ):
         if required not in contents:
             raise RuntimeError(f"{path.name} is missing {required}")
@@ -608,15 +677,29 @@ def verify_deb(path: Path, target: str, version: str) -> None:
             check=True,
             stdout=subprocess.DEVNULL,
         )
+        root = Path(directory)
+        verify_android_resources(lambda name: (root / "opt" / identity.desktop_id / name).read_bytes(), target)
         desktop_content = (
-            Path(directory) / "usr" / "share" / "applications" / "zzclawterm.desktop"
+            root / "usr" / "share" / "applications" / identity.linux_desktop_file
         ).read_text(encoding="utf-8")
-    verify_linux_desktop(desktop_content, "/opt/zzclawterm/zzclawterm", path.name)
+        if (root / "opt" / identity.desktop_id / "VERSION").read_text(encoding="utf-8").strip() != version:
+            raise RuntimeError(f"{path.name} contains the wrong installed version")
+        for name in (package_native.APP_BIN, *helper_filenames(target)):
+            if not (root / "opt" / identity.desktop_id / name).is_file():
+                raise RuntimeError(f"{path.name} is missing {name}")
+        for size in package_native.linux_icons.ICON_SIZES:
+            icon = root / "usr/share/icons/hicolor" / size / "apps" / f"{identity.desktop_id}.png"
+            if not icon.is_file():
+                raise RuntimeError(f"{path.name} is missing its {size} icon")
+            if icon.stat().st_mode & 0o777 != 0o644:
+                raise RuntimeError(f"{path.name} has unreadable or executable icons")
+    verify_linux_desktop(desktop_content, f"/opt/{identity.desktop_id}/zzclawterm", path.name, identity)
 
 
 def verify_rpm(path: Path, target: str, version: str) -> None:
+    identity = package_native.release_identity(version)
     rpm_version, rpm_release = package_native.linux_rpm_version(version)
-    expected = f"zzclawterm|{rpm_version}|{rpm_release}|{package_native.linux_rpm_arch(target)}"
+    expected = f"{identity.desktop_id}|{rpm_version}|{rpm_release}|{package_native.linux_rpm_arch(target)}"
     actual = subprocess.check_output(
         ["rpm", "-qp", "--qf", "%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}", str(path)],
         text=True,
@@ -625,17 +708,22 @@ def verify_rpm(path: Path, target: str, version: str) -> None:
         raise RuntimeError(f"{path.name} has RPM metadata {actual!r}, expected {expected!r}")
     contents = subprocess.check_output(["rpm", "-qlp", str(path)], text=True)
     for required in (
-        "/opt/zzclawterm/zzclawterm",
-        "/opt/zzclawterm/VERSION",
-        "/usr/share/applications/zzclawterm.desktop",
-        *(f"/opt/zzclawterm/{name}" for name in helper_filenames(target)),
+        f"/opt/{identity.desktop_id}/zzclawterm",
+        f"/opt/{identity.desktop_id}/VERSION",
+        f"/usr/share/applications/{identity.linux_desktop_file}",
+        *(f"/opt/{identity.desktop_id}/{name}" for name in helper_filenames(target)),
+        *(f"/usr/share/icons/hicolor/{size}/apps/{identity.desktop_id}.png"
+          for size in package_native.linux_icons.ICON_SIZES),
     ):
         if required not in contents.splitlines():
             raise RuntimeError(f"{path.name} is missing {required}")
+    if read_rpm_member(path, f"/opt/{identity.desktop_id}/VERSION").decode("utf-8").strip() != version:
+        raise RuntimeError(f"{path.name} contains the wrong installed version")
+    verify_android_resources(lambda name: read_rpm_member(path, f"/opt/{identity.desktop_id}/{name}"), target)
     desktop_content = read_rpm_member(
-        path, "/usr/share/applications/zzclawterm.desktop"
+        path, f"/usr/share/applications/{identity.linux_desktop_file}"
     ).decode("utf-8")
-    verify_linux_desktop(desktop_content, "/opt/zzclawterm/zzclawterm", path.name)
+    verify_linux_desktop(desktop_content, f"/opt/{identity.desktop_id}/zzclawterm", path.name, identity)
 
 
 def verify_release(
@@ -664,7 +752,7 @@ def verify_release(
         verify_windows_installer(dist / f"{prefix}-setup.exe", target, version)
     elif info.os_name == "macos":
         verify_macos_archive(dist / f"{prefix}.app.tar.gz", target, version)
-        verify_dmg(dist / f"{prefix}.dmg")
+        verify_dmg(dist / f"{prefix}.dmg", version)
     else:
         verify_appimage(dist / f"{prefix}.AppImage", target, version)
         verify_deb(dist / f"{prefix}.deb", target, version)

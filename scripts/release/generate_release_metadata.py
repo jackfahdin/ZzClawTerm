@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import package_native
+import artifact_catalog
 
 
 DOWNLOAD_ARTIFACTS = {
@@ -49,11 +50,51 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def expected_artifacts(version: str) -> set[str]:
-    names: set[str] = set()
-    for target in package_native.TARGETS:
-        names.update(package_native.artifact_names(target, version))
-    return names
+def expected_artifacts(version: str, *, include_focal: bool = False) -> set[str]:
+    return artifact_catalog.expected(version, include_focal=include_focal)
+
+
+def updater_artifacts(version: str) -> dict[str, str]:
+    package_native.validate_version(version)
+    return UPDATER_ARTIFACTS
+
+
+def download_artifacts(version: str) -> dict[str, str]:
+    package_native.validate_version(version)
+    return DOWNLOAD_ARTIFACTS
+
+
+def validate_release_manifest(
+    manifest: dict[str, object],
+    *,
+    version: str,
+    tag: str,
+    base_url: str,
+    artifacts: dict[str, str],
+    integrity_field: str,
+) -> set[str]:
+    version = package_native.validate_version(version)
+    if tag != f"v{version}":
+        raise ValueError(f"release tag {tag} does not match version {version}")
+    if manifest.get("version") != version:
+        raise ValueError("release manifest version does not match the release")
+    platforms = manifest.get("platforms")
+    if not isinstance(platforms, dict) or set(platforms) != set(artifacts):
+        raise ValueError("release manifest platform table is incomplete")
+    urls: set[str] = set()
+    for platform, template in artifacts.items():
+        entry = platforms.get(platform)
+        if not isinstance(entry, dict):
+            raise ValueError(f"invalid release manifest entry: {platform}")
+        filename = template.format(version=version)
+        expected_url = artifact_url(base_url, tag, filename)
+        if entry.get("url") != expected_url:
+            raise ValueError(f"noncanonical release URL for {platform}")
+        integrity = entry.get(integrity_field)
+        if not isinstance(integrity, str) or not integrity.strip():
+            raise ValueError(f"missing {integrity_field} for {platform}")
+        urls.add(expected_url)
+    return urls
 
 
 def artifact_url(base_url: str, tag: str, filename: str) -> str:
@@ -75,6 +116,7 @@ def generate(
     base_url: str,
     notes: str,
     pub_date: str,
+    include_focal: bool = False,
 ) -> tuple[dict[str, object], dict[str, object]]:
     version = package_native.validate_version(version)
     if tag == SNAPSHOT_TAG:
@@ -88,7 +130,7 @@ def generate(
     elif tag != f"v{version}":
         raise ValueError(f"release tag {tag} does not match version {version}")
 
-    expected = expected_artifacts(version)
+    expected = expected_artifacts(version, include_focal=include_focal)
     missing = sorted(name for name in expected if not (directory / name).is_file())
     if missing:
         raise RuntimeError(f"missing release artifacts: {', '.join(missing)}")
@@ -155,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--notes-file", type=Path, required=True)
     parser.add_argument("--pub-date", required=True)
+    parser.add_argument("--include-focal", action="store_true")
     args = parser.parse_args(argv)
 
     directory = args.dist.resolve()
@@ -168,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
         base_url=args.base_url,
         notes=args.notes_file.read_text(encoding="utf-8"),
         pub_date=args.pub_date,
+        include_focal=args.include_focal,
     )
     print(f"Generated SHA256SUMS, downloads.json and latest.json in {directory}")
     return 0

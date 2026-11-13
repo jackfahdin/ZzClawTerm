@@ -12,6 +12,7 @@ use gpui::{Context, Entity, IntoElement, ListState, SharedString, div, list, pre
 use rust_i18n::t;
 use std::borrow::Cow;
 use std::sync::Arc;
+use zzclawterm_remote_ops::process_control::ProcessControlCapabilities;
 use zzclawterm_remote_ops::remote_process::{PROCESS_LIST_UNSUPPORTED_ERROR, RemoteProcess};
 use zzclawterm_ui::{
     ZzClawInputState, ZzClawNumberInputState, ZzClawScrollable, ZzClawSearchInput,
@@ -25,6 +26,8 @@ use zzclawterm_ui::{
 #[allow(clippy::too_many_arguments)]
 pub(in crate::features::pages::remote) fn processes_panel(
     chrome: PanelChrome,
+    capabilities: ProcessControlCapabilities,
+    host_identity: crate::features::remote::remote_runtime::host_tools::HostInteractionIdentity,
     has_session: bool,
     process_state: ProcessPresentationState,
     filtered_processes: Arc<[RemoteProcess]>,
@@ -131,6 +134,7 @@ pub(in crate::features::pages::remote) fn processes_panel(
                     };
                     process_details(
                         palette,
+                        host_identity.clone(),
                         &process,
                         mode,
                         rows_detail_labels.clone(),
@@ -149,6 +153,7 @@ pub(in crate::features::pages::remote) fn processes_panel(
                 process_table_row(
                     ProcessTableRowPresentation {
                         palette,
+                        capabilities,
                         menu_bg,
                         mode,
                         labels: rows_table_labels.clone(),
@@ -192,35 +197,60 @@ pub(in crate::features::pages::remote) fn processes_panel(
                                 });
                             }
                         }),
-                        on_term: cx.listener(move |panel, _, window, cx| {
-                            panel.with_app(cx, |this, cx| {
-                                this.remote_ops.close_process_menu();
-                                this.request_process_signal(pid, "TERM", window, cx);
-                            });
+                        on_term: cx.listener({
+                            let identity = host_identity.clone();
+                            move |panel, _, window, cx| {
+                                panel.with_app(cx, |this, cx| {
+                                    if this.host_interaction_identity(cx) == identity {
+                                        this.remote_ops.close_process_menu();
+                                        this.request_process_signal(pid, "TERM", window, cx);
+                                    }
+                                });
+                            }
                         }),
-                        on_hup: cx.listener(move |panel, _, window, cx| {
-                            panel.with_app(cx, |this, cx| {
-                                this.remote_ops.close_process_menu();
-                                this.request_process_signal(pid, "HUP", window, cx);
-                            });
+                        on_hup: cx.listener({
+                            let identity = host_identity.clone();
+                            move |panel, _, window, cx| {
+                                panel.with_app(cx, |this, cx| {
+                                    if this.host_interaction_identity(cx) == identity {
+                                        this.remote_ops.close_process_menu();
+                                        this.request_process_signal(pid, "HUP", window, cx);
+                                    }
+                                });
+                            }
                         }),
-                        on_stop: cx.listener(move |panel, _, window, cx| {
-                            panel.with_app(cx, |this, cx| {
-                                this.remote_ops.close_process_menu();
-                                this.request_process_signal(pid, "STOP", window, cx);
-                            });
+                        on_stop: cx.listener({
+                            let identity = host_identity.clone();
+                            move |panel, _, window, cx| {
+                                panel.with_app(cx, |this, cx| {
+                                    if this.host_interaction_identity(cx) == identity {
+                                        this.remote_ops.close_process_menu();
+                                        this.request_process_signal(pid, "STOP", window, cx);
+                                    }
+                                });
+                            }
                         }),
-                        on_cont: cx.listener(move |panel, _, window, cx| {
-                            panel.with_app(cx, |this, cx| {
-                                this.remote_ops.close_process_menu();
-                                this.request_process_signal(pid, "CONT", window, cx);
-                            });
+                        on_cont: cx.listener({
+                            let identity = host_identity.clone();
+                            move |panel, _, window, cx| {
+                                panel.with_app(cx, |this, cx| {
+                                    if this.host_interaction_identity(cx) == identity {
+                                        this.remote_ops.close_process_menu();
+                                        this.request_process_signal(pid, "CONT", window, cx);
+                                    }
+                                });
+                            }
                         }),
-                        on_kill: cx.listener(move |panel, _, window, cx| {
-                            panel.with_app(cx, |this, cx| {
-                                this.remote_ops.close_process_menu();
-                                this.request_process_signal(pid, "KILL", window, cx);
-                            });
+                        on_kill: cx.listener({
+                            let identity = host_identity.clone();
+                            move |panel, _, window, cx| {
+                                panel.with_app(cx, |this, cx| {
+                                    if this.host_interaction_identity(cx) == identity {
+                                        this.remote_ops.close_process_menu();
+                                        this.request_process_signal(pid, "KILL", window, cx);
+                                    }
+                                });
+                            }
                         }),
                     },
                 )

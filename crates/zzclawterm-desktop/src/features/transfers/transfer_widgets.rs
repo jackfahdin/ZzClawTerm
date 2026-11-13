@@ -1,4 +1,5 @@
 use crate::models::TransferJobKind;
+use rust_i18n::t;
 use zzclawterm_files::sftp_transfer_types::{
     SftpDuplicateDecision, SftpDuplicatePolicy, SftpTransferProgress,
 };
@@ -70,7 +71,10 @@ pub(in crate::features) fn transfer_job_title(kind: &TransferJobKind) -> String 
         TransferJobKind::OpenExternal {
             remote_path,
             local_path,
-        } => format!("Open {remote_path} -> {}", local_path.display()),
+        } => match local_path {
+            Some(local_path) => format!("Open {remote_path} -> {}", local_path.display()),
+            None => format!("Open {remote_path}"),
+        },
         TransferJobKind::AiFileAction {
             remote_path,
             action_name,
@@ -113,6 +117,15 @@ pub(in crate::features) fn transfer_job_title(kind: &TransferJobKind) -> String 
 }
 
 pub(in crate::features) fn format_transfer_progress(progress: &SftpTransferProgress) -> String {
+    if let Some(phase) = progress.phase {
+        use zzclawterm_files::sftp_transfer_types::FileTransferPhase;
+        match phase {
+            FileTransferPhase::Scanning => return t!("fileTransfer.scanning").into_owned(),
+            FileTransferPhase::Committing => return t!("fileTransfer.committing").into_owned(),
+            FileTransferPhase::Transferring => {}
+        }
+    }
+
     let transferred = format_file_size(Some(progress.bytes_transferred));
     match progress.total_bytes.filter(|total| *total > 0) {
         Some(total) => {

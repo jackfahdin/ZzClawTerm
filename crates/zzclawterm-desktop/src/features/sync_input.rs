@@ -10,7 +10,7 @@ mod window;
 use super::ZzClawTermApp;
 use crate::models::SyncInputGroup;
 
-const GROUP_COLORS: [u32; 8] = [
+pub(in crate::features) const GROUP_COLORS: [u32; 8] = [
     0x3b82f6, 0xef4444, 0x22c55e, 0xf59e0b, 0x8b5cf6, 0xec4899, 0x06b6d4, 0xf97316,
 ];
 
@@ -202,7 +202,7 @@ impl SyncInputFeatureState {
         let index = self.groups.len();
         let group = SyncInputGroup {
             id: format!("sync-group-{}", uuid()),
-            name: format!("Sync Group {}", index + 1),
+            name: rust_i18n::t!("syncGroup.defaultGroupName", index = index + 1).to_string(),
             color: self.next_group_color(),
             session_ids: Vec::new(),
             paused_session_ids: Vec::new(),
@@ -724,6 +724,7 @@ impl ZzClawTermApp {
             return;
         }
         self.shell.set_status("sync group deleted".to_string());
+        self.reconcile_command_suggestion_availability(cx);
         cx.notify();
     }
 
@@ -759,12 +760,14 @@ impl ZzClawTermApp {
         }
         self.sync_input.ensure_selected_group();
         if self.sync_input.replace_selected_sessions(session_ids) {
+            self.reconcile_command_suggestion_availability(cx);
             cx.notify();
         }
     }
 
     pub(in crate::features) fn clear_sync_group_sessions(&mut self, cx: &mut Context<Self>) {
         if self.sync_input.clear_selected_sessions() {
+            self.reconcile_command_suggestion_availability(cx);
             cx.notify();
         }
     }
@@ -783,6 +786,7 @@ impl ZzClawTermApp {
         }
         self.sync_input.ensure_selected_group();
         if self.sync_input.add_selected_sessions(session_ids) {
+            self.reconcile_command_suggestion_availability(cx);
             cx.notify();
         }
     }
@@ -800,6 +804,7 @@ impl ZzClawTermApp {
             .map(|session| session.id)
             .collect::<HashSet<_>>();
         if self.sync_input.remove_selected_sessions(&remove_ids) {
+            self.reconcile_command_suggestion_availability(cx);
             cx.notify();
         }
     }
@@ -832,6 +837,7 @@ impl ZzClawTermApp {
             .map(|session| session.id)
             .collect::<Vec<_>>();
         if self.sync_input.replace_selected_sessions(matching_ids) {
+            self.reconcile_command_suggestion_availability(cx);
             cx.notify();
         }
     }
@@ -875,6 +881,7 @@ impl ZzClawTermApp {
     ) {
         let Some(enabled) = self.sync_input.toggle_selected_enabled() else {
             self.shell.set_status("no sync group selected".to_string());
+            self.reconcile_command_suggestion_availability(cx);
             cx.notify();
             return;
         };
@@ -883,6 +890,7 @@ impl ZzClawTermApp {
         } else {
             "sync group disabled".to_string()
         });
+        self.reconcile_command_suggestion_availability(cx);
         cx.notify();
     }
 
@@ -895,6 +903,7 @@ impl ZzClawTermApp {
         let Some(added) = self.sync_input.toggle_selected_session(session_id) else {
             self.shell
                 .set_status("create or select a sync group first".to_string());
+            self.reconcile_command_suggestion_availability(cx);
             cx.notify();
             return;
         };
@@ -905,6 +914,7 @@ impl ZzClawTermApp {
             self.shell
                 .set_status("session removed from sync group".to_string());
         }
+        self.reconcile_command_suggestion_availability(cx);
         cx.notify();
     }
 
@@ -922,6 +932,7 @@ impl ZzClawTermApp {
             }
             .to_string(),
         );
+        self.reconcile_command_suggestion_availability(cx);
         cx.notify();
     }
 
@@ -932,6 +943,8 @@ impl ZzClawTermApp {
                 metadata.launch_config,
                 crate::models::SessionLaunchConfig::Rdp(_)
                     | crate::models::SessionLaunchConfig::Vnc(_)
+                    | crate::models::SessionLaunchConfig::AdbFiles(_)
+                    | crate::models::SessionLaunchConfig::AdbScreen(_)
             )
         })
     }
@@ -965,6 +978,7 @@ impl ZzClawTermApp {
             } else {
                 "broadcast to all sessions disabled".to_string()
             });
+        self.reconcile_command_suggestion_availability(cx);
         cx.notify();
     }
 
@@ -995,6 +1009,7 @@ impl ZzClawTermApp {
         } else {
             "session sync paused".to_string()
         });
+        self.reconcile_command_suggestion_availability(cx);
         cx.notify();
     }
 
@@ -1014,6 +1029,7 @@ impl ZzClawTermApp {
             }
             .to_string(),
         );
+        self.reconcile_command_suggestion_availability(cx);
         cx.notify();
     }
 
@@ -1026,10 +1042,12 @@ impl ZzClawTermApp {
         if !self.sync_input.leave_active_group(&session_id) {
             self.shell
                 .set_status("session is not in an active sync group".to_string());
+            self.reconcile_command_suggestion_availability(cx);
             cx.notify();
             return;
         }
         self.shell.set_status("left sync group".to_string());
+        self.reconcile_command_suggestion_availability(cx);
         cx.notify();
     }
 
@@ -1042,10 +1060,12 @@ impl ZzClawTermApp {
         if !self.sync_input.close_active_group(&session_id) {
             self.shell
                 .set_status("session is not in an active sync group".to_string());
+            self.reconcile_command_suggestion_availability(cx);
             cx.notify();
             return;
         }
         self.shell.set_status("sync group closed".to_string());
+        self.reconcile_command_suggestion_availability(cx);
         cx.notify();
     }
 }

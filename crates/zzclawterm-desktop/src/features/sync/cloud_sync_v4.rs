@@ -1,4 +1,6 @@
 //! Blocking V4 orchestration. Prepare is read-only; the Store owns atomic Apply.
+mod legacy;
+mod local;
 mod rotation;
 pub(in crate::features) use rotation::rotate_master_password;
 use std::collections::{BTreeMap, BTreeSet};
@@ -6,17 +8,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 use zzclawterm_core::cloud_sync::{CloudSyncRemote, control::CloudSyncOperationControl};
-use zzclawterm_core::sync_schema::{encryption, project_entities};
+use zzclawterm_core::sync_schema::{FIXED_CLOUD_SYNC_SCOPE, encryption};
 use zzclawterm_core::{CloudSyncError, CloudSyncSettings, LocalCloudSyncOptions};
 use zzclawterm_store::sync_v4::{LocalReplica, PreparedApply};
-use zzclawterm_store::{StoreBlockingClient, StoreDomain};
+use zzclawterm_store::{StoreBlockingClient, StoreClientError, StoreDomain};
 use zzclawterm_sync::engine::{SyncReplica, digest, prepare};
 use zzclawterm_sync::protocol::{
     MAX_PUBLICATION_BYTES, PendingPublication, ProviderCapabilities, PublicationId,
     PublishedReplica,
 };
 
-const REGISTRY: &str = "sync/v4/registry";
+const REGISTRY: &str = "sync/v5/registry";
 const MAX_OBJECTS: usize = 20_000;
 
 pub(super) struct Preview {
@@ -33,14 +35,6 @@ pub(in crate::features) struct PreviewSummary {
     pub migration: bool,
     pub conflicts: Vec<ConflictSummary>,
     pub deferred: Vec<String>,
-    pub trust: Vec<TrustSummary>,
-}
-
-#[derive(Clone, PartialEq)]
-pub(in crate::features) struct TrustSummary {
-    pub key: String,
-    pub token: String,
-    pub description: String,
 }
 
 #[derive(Clone, PartialEq)]
@@ -61,28 +55,6 @@ impl Preview {
             resources: self.resource_count,
             migration: self.migration,
             deferred: self.presentation.deferred.clone(),
-            trust: zzclawterm_sync::trust::reviews(
-                &self.apply.plan.expected_local.values,
-                &self.apply.plan.effective,
-            )
-            .into_iter()
-            .filter(|review| self.apply.trust_approvals.get(&review.key) != Some(&review.token))
-            .map(|review| TrustSummary {
-                description: format!(
-                    "{} → {}",
-                    zzclawterm_core::sync_schema::trust::describe(
-                        &review.resource.kind,
-                        &review.previous
-                    ),
-                    zzclawterm_core::sync_schema::trust::describe(
-                        &review.resource.kind,
-                        &review.proposed
-                    )
-                ),
-                key: review.key,
-                token: review.token,
-            })
-            .collect(),
             conflicts: self
                 .apply
                 .plan
@@ -200,27 +172,6 @@ impl Preview {
         self.presentation = self.compute_summary();
         Ok(())
     }
-
-    pub fn confirm_trust(
-        &mut self,
-        store: &StoreBlockingClient,
-        password: &str,
-        key: &str,
-        token: &str,
-    ) -> Result<(), CloudSyncError> {
-        let reviews = zzclawterm_sync::trust::reviews(
-            &self.apply.plan.expected_local.values,
-            &self.apply.plan.effective,
-        );
-        if !reviews
-            .iter()
-            .any(|review| review.key == key && review.token == token)
-        {
-            return Err(CloudSyncError::LocalChangedDuringSync);
-        }
-        self.apply.trust_approvals.insert(key.into(), token.into());
-        self.refresh_summary(store, password)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -236,11 +187,28 @@ fn invalid() -> CloudSyncError {
         "Invalid or incompatible Cloud Sync V3 data; no data was overwritten".into(),
     )
 }
-fn store_error(_: impl std::fmt::Display) -> CloudSyncError {
+fn store_error(error: StoreClientError) -> CloudSyncError {
+    if let StoreClientError::Operation(error) = &error
+        && let Some(limit_bytes) = error.local_replica_payload_limit()
+    {
+        return CloudSyncError::PortableSnapshot(
+            zzclawterm_core::PortableSnapshotError::LocalReplicaPayloadTooLarge { limit_bytes },
+        );
+    }
     CloudSyncError::LocalChangedDuringSync
 }
 
 fn destination(settings: &CloudSyncSettings, options: &LocalCloudSyncOptions) -> String {
+    digest(
+        format!(
+            "fixed-cloud-sync-v5:{}",
+            legacy_destination(settings, options)
+        )
+        .as_bytes(),
+    )
+}
+
+fn legacy_destination(settings: &CloudSyncSettings, options: &LocalCloudSyncOptions) -> String {
     // Passwords and rotating access tokens are not destination identities.
     if settings.provider == "s3" {
         return digest(
@@ -282,6 +250,35 @@ pub(super) fn preview(
     preview_with_import(store, settings, options, control, false)
 }
 
+pub(super) fn preview_on_change(
+    store: &StoreBlockingClient,
+    settings: &CloudSyncSettings,
+    options: &LocalCloudSyncOptions,
+    remote_available: bool,
+    control: &CloudSyncOperationControl,
+) -> Result<Option<Preview>, CloudSyncError> {
+    control.checkpoint()?;
+    let view = local::load(store, settings, options)?;
+    let caches =
+        super::io_runtime::CloudSyncIoRuntime::shared().caches(store, settings, Some(options))?;
+    if !remote_available
+        && !caches
+            .pending_remote
+            .load(std::sync::atomic::Ordering::Acquire)
+        && !local::needs_remote(&view, &FIXED_CLOUD_SYNC_SCOPE)?
+    {
+        control.checkpoint()?;
+        return Ok(None);
+    }
+    validate_provider(settings)?;
+    control.checkpoint()?;
+    super::cloud_sync_provider::with_remote(store, settings, options, "v4_prepare", |remote, _| {
+        let remote = control.remote(remote);
+        prepare_remote_with_view(store, settings, options, &remote, false, view)
+    })
+    .map(Some)
+}
+
 pub(super) fn preview_manual(
     store: &StoreBlockingClient,
     settings: &CloudSyncSettings,
@@ -298,6 +295,14 @@ fn preview_with_import(
     control: &CloudSyncOperationControl,
     allow_legacy_import: bool,
 ) -> Result<Preview, CloudSyncError> {
+    validate_provider(settings)?;
+    super::cloud_sync_provider::with_remote(store, settings, options, "v4_prepare", |remote, _| {
+        let remote = control.remote(remote);
+        prepare_remote(store, settings, options, &remote, allow_legacy_import)
+    })
+}
+
+fn validate_provider(settings: &CloudSyncSettings) -> Result<(), CloudSyncError> {
     if !ProviderCapabilities::for_provider(&settings.provider)
         .is_some_and(|capabilities| capabilities.supports_v4())
     {
@@ -305,10 +310,7 @@ fn preview_with_import(
             "This provider has not yet passed V4 capability validation".into(),
         ));
     }
-    super::cloud_sync_provider::with_remote(store, settings, options, "v4_prepare", |remote, _| {
-        let remote = control.remote(remote);
-        prepare_remote(store, settings, options, &remote, allow_legacy_import)
-    })
+    Ok(())
 }
 
 fn prepare_remote(
@@ -318,15 +320,19 @@ fn prepare_remote(
     remote: &dyn CloudSyncRemote,
     allow_legacy_import: bool,
 ) -> Result<Preview, CloudSyncError> {
+    let view = local::load(store, settings, options)?;
+    prepare_remote_with_view(store, settings, options, remote, allow_legacy_import, view)
+}
+
+fn prepare_remote_with_view(
+    store: &StoreBlockingClient,
+    settings: &CloudSyncSettings,
+    options: &LocalCloudSyncOptions,
+    remote: &dyn CloudSyncRemote,
+    allow_legacy_import: bool,
+    view: zzclawterm_store::sync_v4::LocalView,
+) -> Result<Preview, CloudSyncError> {
     let destination = destination(settings, options);
-    let dest = destination.clone();
-    let password = options.master_password.clone();
-    let scope = settings.v4_scope.clone();
-    let view = store
-        .request_fn(StoreDomain::CloudSync, move |store| {
-            store.load_v4_view(&dest, password.expose_secret(), &scope)
-        })
-        .map_err(store_error)?;
     let mut local = view.record;
     let previous_observations = local.observed.clone();
     // All legacy branches are decoded before any mutation; no absent resource
@@ -334,8 +340,18 @@ fn prepare_remote(
     let legacy = zzclawterm_core::cloud_sync::read_legacy_sync_branches(store, remote, options)?;
     let mut fingerprints = legacy
         .iter()
-        .map(|snapshot| snapshot.sync_content_hash())
+        .map(|snapshot| {
+            Ok::<_, zzclawterm_core::PortableSnapshotError>(
+                snapshot.source_payload_hash().to_string(),
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
+    let legacy_fields = legacy::read(remote, options)?;
+    fingerprints.extend(
+        legacy_fields
+            .iter()
+            .map(|(fingerprint, _)| fingerprint.clone()),
+    );
     fingerprints.sort();
     let fingerprint = digest(
         serde_json::to_string(&fingerprints)
@@ -353,33 +369,20 @@ fn prepare_remote(
     let mut snapshots = Vec::new();
     if migration {
         for snapshot in legacy {
-            let mut projection =
-                project_entities(&snapshot.entities, &settings.v4_scope).map_err(|_| invalid())?;
-            if settings.v4_scope.trusted_hosts {
-                let snapshot = snapshot.clone();
-                let trust = store
-                    .request_fn(StoreDomain::CloudSync, move |store| {
-                        store.project_v4_legacy_trust(&snapshot)
-                    })
-                    .map_err(store_error)?;
-                projection.values.extend(trust.values);
-            }
-            if settings.v4_scope.secrets {
-                let password = options.master_password.clone();
-                let (secrets, objects) = store
-                    .request_fn(StoreDomain::CloudSync, move |store| {
-                        store.project_v4_legacy_secrets(&snapshot, password.expose_secret())
-                    })
-                    .map_err(store_error)?;
-                projection.values.extend(secrets.values);
-                projection.complete.extend(secrets.complete);
-                local.secret_objects.extend(objects);
-            }
+            let projection =
+                zzclawterm_core::portable_snapshot::project_fixed_sync_entities(&snapshot)?;
             let mut replica = SyncReplica::new(Uuid::new_v4());
             replica
-                .capture(&BTreeMap::new(), &projection, &settings.v4_scope)
+                .capture(&BTreeMap::new(), &projection, &FIXED_CLOUD_SYNC_SCOPE)
                 .map_err(|_| invalid())?;
             snapshots.push(replica.snapshot());
+        }
+    }
+    if migration {
+        for (_, snapshot) in legacy_fields {
+            let mut replica =
+                SyncReplica::load(&snapshot, Uuid::new_v4()).map_err(|_| invalid())?;
+            snapshots.push(replica.fixed_snapshot().map_err(|_| invalid())?);
         }
     }
     local.legacy_fingerprint = Some(fingerprint);
@@ -418,7 +421,7 @@ fn prepare_remote(
     }
     let mut objects = 0;
     for writer in writers {
-        let prefix = path(options, &format!("sync/v4/writers/{writer}"));
+        let prefix = path(options, &format!("sync/v5/writers/{writer}"));
         for entry in remote.list_sync_files(&prefix)? {
             objects += 1;
             if objects > MAX_OBJECTS {
@@ -466,19 +469,13 @@ fn prepare_remote(
             )?;
             let published: PublishedReplica =
                 serde_json::from_slice(&plaintext).map_err(|_| invalid())?;
-            if published.schema != 4
+            if published.schema != 5
                 || published.writer != id.writer
                 || published.sequence != id.sequence
             {
                 return Err(invalid());
             }
-            for (version, object) in published.secret_objects {
-                if version != object.reference.version {
-                    return Err(invalid());
-                }
-                local.secret_objects.entry(version).or_insert(object);
-            }
-            SyncReplica::load(&published.replica, Uuid::new_v4()).map_err(|_| invalid())?;
+            published.validate_fixed().map_err(|_| invalid())?;
             snapshots.push(published.replica);
             local.observed.insert(relative.into(), id);
         }
@@ -489,7 +486,7 @@ fn prepare_remote(
         &local.effective,
         view.projection,
         &snapshots,
-        settings.v4_scope.clone(),
+        FIXED_CLOUD_SYNC_SCOPE,
     )
     .map_err(|_| invalid())?;
     let resource_count = plan
@@ -680,17 +677,8 @@ fn publish(
     if record.published_document.as_ref() != Some(&document_hash) {
         let sequence = record.next_sequence;
         record.next_sequence = sequence.checked_add(1).ok_or_else(invalid)?;
-        let publication = PublishedReplica {
-            schema: 4,
-            writer: record.writer,
-            sequence,
-            replica,
-            secret_objects: if record.scope.secrets {
-                record.secret_objects.clone()
-            } else {
-                BTreeMap::new()
-            },
-        };
+        let publication =
+            PublishedReplica::fixed(record.writer, sequence, &replica).map_err(|_| invalid())?;
         let plaintext = Zeroizing::new(serde_json::to_vec(&publication).map_err(|_| invalid())?);
         if plaintext.len() > MAX_PUBLICATION_BYTES / 2 {
             return Err(invalid());
@@ -744,8 +732,20 @@ fn publish_bytes(
     if !pending.id.verifies(&pending.bytes) {
         return Err(invalid());
     }
-    let writer_dir = path(options, &format!("sync/v4/writers/{}", pending.id.writer));
-    for suffix in ["sync", "sync/v4", REGISTRY, "sync/v4/writers"] {
+    let plaintext = encryption::open(
+        options.master_password.expose_secret(),
+        "publication",
+        &format!("{}/{}", pending.id.writer, pending.id.sequence),
+        &pending.bytes,
+    )?;
+    let publication: PublishedReplica =
+        serde_json::from_slice(&plaintext).map_err(|_| invalid())?;
+    publication.validate_fixed().map_err(|_| invalid())?;
+    if publication.writer != pending.id.writer || publication.sequence != pending.id.sequence {
+        return Err(invalid());
+    }
+    let writer_dir = path(options, &format!("sync/v5/writers/{}", pending.id.writer));
+    for suffix in ["sync", "sync/v5", REGISTRY, "sync/v5/writers"] {
         remote.create_dir(&path(options, suffix))?;
     }
     remote.create_dir(&writer_dir)?;
@@ -775,5 +775,7 @@ fn publish_bytes(
     Ok(())
 }
 
+#[cfg(test)]
+mod change_tests;
 #[cfg(test)]
 mod tests;

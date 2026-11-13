@@ -1,3 +1,4 @@
+pub mod action_links;
 pub mod activation;
 pub mod agent_capture;
 pub mod ai;
@@ -28,6 +29,8 @@ pub mod note_export;
 pub mod packaging;
 pub mod plugins;
 pub mod portable_snapshot;
+pub mod quick_command_import;
+pub mod quick_command_script;
 pub mod raw_cli_capture;
 pub mod remote_preview;
 pub mod runtime;
@@ -35,10 +38,12 @@ pub mod secret;
 pub mod session_import;
 pub mod ssh_keys;
 pub mod sync_schema;
+pub mod temporary_connection;
 pub mod terminal;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod vnc_known_hosts;
+pub mod workspace_layout;
 pub mod terminal_file_drop {
     pub use super::terminal::file_drop::*;
 }
@@ -177,9 +182,11 @@ pub use diagnostics::{
     LOG_FILE_PREFIX, LOG_FILE_SUFFIX, export_diagnostics_archive,
 };
 pub use keyword_highlight_presets::{
-    ResolvedKeywordHighlightRule, builtin_keyword_rule_ids, builtin_keyword_rule_label,
-    builtin_keyword_rule_swatch, get_builtin_keyword_rules, keyword_highlight_color_palette,
-    merge_keyword_highlight_rules_for_paint,
+    ResolvedKeywordHighlightRule, builtin_keyword_rule_ansi, builtin_keyword_rule_ids,
+    builtin_keyword_rule_is_specialized, builtin_keyword_rule_label, builtin_keyword_rule_swatch,
+    builtin_keyword_rule_swatch_ansi, get_builtin_keyword_rules,
+    get_builtin_keyword_rules_with_ansi, keyword_highlight_color_palette,
+    merge_keyword_highlight_rules_for_paint, merge_keyword_highlight_rules_for_paint_with_ansi,
 };
 pub use models::*;
 pub use natural_order::natural_compare;

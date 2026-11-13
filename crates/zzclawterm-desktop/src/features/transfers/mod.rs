@@ -1,5 +1,6 @@
 //! Transfer jobs, transfer options, path prompts and transfer widgets.
 
+pub(in crate::features) mod browser_paths;
 pub(in crate::features) mod clipboard_copy;
 mod cwd_sync;
 mod delete_runtime;
@@ -12,12 +13,14 @@ mod external_sync_window;
 pub(in crate::features) mod file_open;
 pub(in crate::features) mod file_operations;
 pub(in crate::features) mod preview;
+pub(in crate::features) mod privilege_runtime;
 mod remote_text_editor;
 mod state;
 pub(in crate::features) use state::TransferSessionTransferBundle;
 pub(in crate::features) use state::TransferTreePresentation;
 pub(in crate::features) use state::{BrowserFilterCache, BrowserFilterKey};
 mod transfer_events;
+mod transfer_feedback;
 pub(in crate::features) mod transfer_jobs;
 mod transfer_options;
 mod transfer_paths;
@@ -25,6 +28,7 @@ mod transfer_widgets;
 mod tree_runtime;
 
 use crate::features::ZzClawTermApp;
+use crate::features::session::remote_files::FileAccessPurpose;
 use std::sync::Arc;
 use zzclawterm_files::file_browser::FileBrowserService;
 use zzclawterm_files::remote_file::{
@@ -35,9 +39,9 @@ use zzclawterm_store::{StoreBlockingClient, StoreDomain};
 use zzclawterm_transport::SshSessionConfig;
 
 #[derive(Clone)]
-pub(in crate::features) struct SftpJobSession {
+pub(in crate::features) struct FileTransferSession {
     pub session_id: Option<String>,
-    pub service: RemoteFileService,
+    pub service: FileBrowserService,
 }
 
 struct ConnectionStoreBackendPreferences {
@@ -99,6 +103,7 @@ impl ZzClawTermApp {
         tx: futures::channel::mpsc::UnboundedSender<crate::models::TransferJobResult>,
         run: impl FnOnce() + Send + 'static,
     ) {
+        self.mark_file_job_access(&job_id);
         if self.transfer.supports_bulk_admission(&job_id) {
             self.transfer
                 .admit_bulk_job(&job_id, name, tx, Box::new(run));
@@ -126,12 +131,13 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn submit_transfer_blocking_job(
-        &self,
+        &mut self,
         name: &'static str,
         rejection_job_id: String,
         rejection_tx: futures::channel::mpsc::UnboundedSender<crate::models::TransferJobResult>,
         run: impl FnOnce() + Send + 'static,
     ) {
+        self.mark_file_job_access(&rejection_job_id);
         transfer_jobs::submit_transfer_blocking_job(
             &self.blocking_jobs,
             name,
@@ -145,6 +151,7 @@ impl ZzClawTermApp {
         &mut self,
         session_id: &str,
         config: SshSessionConfig,
+        purpose: FileAccessPurpose,
     ) -> anyhow::Result<RemoteFileService> {
         let preferences: Arc<dyn RemoteFileBackendPreferenceStore> = Arc::new(
             ConnectionStoreBackendPreferences::new(self.store_blocking_client()),
@@ -154,7 +161,7 @@ impl ZzClawTermApp {
         // the real session (and all panes reuse the one service).
         let session_id = self.ssh_scoped_session_id(session_id);
         self.session
-            .remote_file_service_for_session(&session_id, config, preferences)
+            .remote_file_service_for_session(&session_id, config, preferences, purpose)
     }
 
     pub(in crate::features) fn active_remote_file_service(
@@ -168,7 +175,7 @@ impl ZzClawTermApp {
             .session
             .active_ssh_config_owned()
             .ok_or_else(|| anyhow::anyhow!("active session is not SSH"))?;
-        self.remote_file_service_for_session(&session_id, config)
+        self.remote_file_service_for_session(&session_id, config, FileAccessPurpose::Interactive)
     }
 
     pub(in crate::features) fn file_browser_service_for_session(
@@ -176,6 +183,11 @@ impl ZzClawTermApp {
         session_id: &str,
     ) -> anyhow::Result<FileBrowserService> {
         match self.session.file_browser_backend_for_session(session_id) {
+            Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Adb) => self
+                .android_config_for_session(session_id)
+                .ok_or_else(|| anyhow::Error::new(zzclawterm_android::error::AdbError::Offline))
+                .and_then(|config| self.android.file_service(&config.device_key))
+                .map(FileBrowserService::Adb),
             Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Local) => {
                 Ok(FileBrowserService::local())
             }
@@ -187,8 +199,12 @@ impl ZzClawTermApp {
                     .ok_or_else(|| {
                         anyhow::anyhow!("SSH file browser configuration is unavailable")
                     })?;
-                self.remote_file_service_for_session(session_id, config)
-                    .map(FileBrowserService::remote)
+                self.remote_file_service_for_session(
+                    session_id,
+                    config,
+                    FileAccessPurpose::Interactive,
+                )
+                .map(FileBrowserService::remote)
             }
             None => anyhow::bail!("session does not provide a file browser"),
         }
@@ -223,7 +239,7 @@ impl ZzClawTermApp {
             .or_else(|| self.session.active_id())
             .ok_or_else(|| anyhow::anyhow!("source SSH session is unavailable"))?
             .to_string();
-        self.remote_file_service_for_session(&session_id, config)
+        self.remote_file_service_for_session(&session_id, config, FileAccessPurpose::Interactive)
     }
 }
 

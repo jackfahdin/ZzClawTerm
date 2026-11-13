@@ -2,25 +2,41 @@
 
 use std::time::Instant;
 use zeroize::Zeroize;
+use zzclawterm_core::command_suggestion_suppression::CommandSuggestionSuppression;
 
 use gpui::Context;
 use zzclawterm_core::command_starts_suggestion_suppressing_program;
 use zzclawterm_core::command_suggestion_suppression::command_starts_line_editor;
-use zzclawterm_core::terminal::editing::{EDIT_CONFIRMATION_TIMEOUT, EditCapability, EditPhase};
+use zzclawterm_core::completion::types::ShellDialect;
+use zzclawterm_core::terminal::editing::{
+    EDIT_CONFIRMATION_TIMEOUT, EditCapability, EditPhase, ShellLineEditing,
+};
 use zzclawterm_core::terminal::input_tracker::{
     MAX_TRACKED_INPUT_BYTES, TerminalInputState, get_tracked_submission_command,
     strip_terminal_command_prompt,
 };
+use zzclawterm_core::terminal::shell_prompt::{ShellPrompt, classify_shell_prompt};
 use zzclawterm_terminal::editing::{recover_marked_input, resolve_input};
 
 use super::editing_state::SnapshotEvidence;
 use crate::features::ZzClawTermApp;
 
 impl ZzClawTermApp {
-    /// This runs once after a successful logical write, regardless of suggestions.
+    /// Test adapter for callers that do not own a transport write.
+    #[cfg(test)]
     pub(in crate::features) fn note_shell_editing_input(
         &mut self,
         bytes: &[u8],
+        cx: &mut Context<Self>,
+    ) {
+        let candidate = self.prepare_command_navigation_input(bytes);
+        self.note_shell_editing_input_with_navigation(bytes, candidate, cx);
+    }
+
+    pub(in crate::features) fn note_shell_editing_input_with_navigation(
+        &mut self,
+        bytes: &[u8],
+        candidate: Option<zzclawterm_terminal::command_navigation::CommandSubmissionEvidence>,
         cx: &mut Context<Self>,
     ) {
         let Some(id) = self.session.active_id_owned() else {
@@ -28,6 +44,18 @@ impl ZzClawTermApp {
         };
         self.terminal.editing.activate(&id);
         self.terminal.editing.state_mut().suggestion_fill = None;
+        let fallback = candidate.as_ref().and_then(|evidence| {
+            self.terminal
+                .editing
+                .state_mut()
+                .command_navigation
+                .accept_submission(evidence)
+        });
+        self.terminal
+            .view
+            .frame_pipeline
+            .note_command_input(id.clone(), fallback);
+        self.terminal.view.frame_pipeline.arm_event_wakes();
         if self.active_terminal_uses_alternate_screen()
             || self.is_credential_prompt_input_mode()
             || self.terminal.assist.credential_suggestions.is_some()
@@ -43,31 +71,21 @@ impl ZzClawTermApp {
         if text.is_empty() {
             return;
         }
-        let submitted_for_navigation =
-            get_tracked_submission_command(self.terminal.editing.predicted_input());
-        let interactive = self
-            .terminal
+        self.terminal
             .editing
             .state_mut()
-            .command_navigation_interactive;
-        let eligible = text == "\r"
-            && !submitted_for_navigation.is_empty()
-            && !interactive
-            && !self.mcp.capabilities.terminal_executions.capturing(&id)
-            && self
-                .session
-                .metadata(&id)
-                .is_some_and(|metadata| match &metadata.launch_config {
-                    crate::models::SessionLaunchConfig::Local(_) => true,
-                    crate::models::SessionLaunchConfig::Ssh(config) => {
-                        !config.effective_terminal_shell_integration()
-                    }
-                    _ => false,
-                });
-        self.terminal
-            .view
-            .frame_pipeline
-            .note_command_input(id.clone(), eligible);
+            .note_suggestion_input(text);
+        if self
+            .terminal
+            .editing
+            .state()
+            .is_some_and(|state| state.browsing_history)
+        {
+            // Cancel queued searches as well as the visible popup before echo arrives.
+            self.dismiss_command_suggestions(cx);
+        }
+        let submitted_for_navigation =
+            get_tracked_submission_command(self.terminal.editing.predicted_input());
         if text.contains(['\r', '\n']) {
             let state = self.terminal.editing.state_mut();
             state.launched_line_editor = command_starts_line_editor(&submitted_for_navigation);
@@ -75,39 +93,32 @@ impl ZzClawTermApp {
         } else if matches!(text, "\u{3}" | "\u{4}") {
             self.terminal.editing.state_mut().launched_line_editor = false;
         }
-        if text == "\u{4}"
-            || (text == "\r"
-                && matches!(
-                    submitted_for_navigation.trim(),
-                    "exit" | "quit" | "exit()" | "quit()" | ".exit" | ".quit" | "\\q"
-                ))
-        {
-            self.terminal
-                .editing
-                .state_mut()
-                .command_navigation_interactive = false;
-        } else if text == "\r"
-            && zzclawterm_core::command_starts_interactive_input(&submitted_for_navigation)
-        {
-            self.terminal
-                .editing
-                .state_mut()
-                .command_navigation_interactive = true;
-        }
-        let was_suppressed = self.terminal.assist.command_suggestions_suppressed;
+        self.terminal
+            .editing
+            .state_mut()
+            .command_navigation
+            .note_input(text);
+        let was_suppressed = self
+            .terminal
+            .assist
+            .command_suggestion_suppression
+            .is_suppressed();
         if text == "\u{3}" || (was_suppressed && text == "q") {
-            self.terminal.assist.command_suggestions_suppressed = false;
+            self.terminal.assist.command_suggestion_suppression =
+                CommandSuggestionSuppression::None;
         }
-        if !was_suppressed
-            && self.terminal.assist.pending_command_history_entry.is_none()
-            && text.contains(['\r', '\n'])
-        {
+        if !was_suppressed && text.contains(['\r', '\n']) {
             let submitted = get_tracked_submission_command(self.terminal.editing.predicted_input());
             if !submitted.is_empty() {
                 if command_starts_suggestion_suppressing_program(&submitted) {
-                    self.terminal.assist.command_suggestions_suppressed = true;
+                    self.terminal.assist.command_suggestion_suppression =
+                        CommandSuggestionSuppression::InteractiveProgram;
                 }
-                self.terminal.assist.pending_command_history_entry = Some(submitted);
+                // The outer `su` history entry may remain pending throughout
+                // the child shell. It must not disable pager suppression there.
+                if self.terminal.assist.pending_command_history_entry.is_none() {
+                    self.terminal.assist.pending_command_history_entry = Some(submitted);
+                }
             }
         }
         let snapshot = self.terminal_snapshot_for_session(Some(&id), 0);
@@ -121,6 +132,8 @@ impl ZzClawTermApp {
         state.selection_origin_version = None;
         state.mapping = None;
         self.schedule_shell_edit_confirmation_timeout(cx);
+        self.retain_command_suggestions_during_edit(text, cx);
+        self.reconcile_command_suggestion_availability(cx);
     }
 
     pub(in crate::features) fn schedule_shell_edit_confirmation_timeout(
@@ -169,6 +182,39 @@ impl ZzClawTermApp {
         if self.session.active_id() != Some(id) {
             return;
         }
+        let before = self.command_suggestion_input_is_confirmed().then(|| {
+            (
+                self.command_suggestion_fill_policy(id),
+                self.terminal.editing.state().unwrap().model.version,
+            )
+        });
+        let filling = self
+            .terminal
+            .editing
+            .state()
+            .is_some_and(|state| state.suggestion_fill.is_some());
+        self.reconcile_shell_editing_snapshot(id, cx);
+        self.reconcile_command_suggestion_availability(cx);
+        let after = self.command_suggestion_input_is_confirmed().then(|| {
+            (
+                self.command_suggestion_fill_policy(id),
+                self.terminal.editing.state().unwrap().model.version,
+            )
+        });
+        if after.is_some()
+            && after != before
+            && !filling
+            && self.command_suggestions_allowed_for_session(id)
+            && !self.terminal.editing.assist_input().value.is_empty()
+        {
+            self.refresh_command_suggestions(cx);
+        }
+    }
+
+    fn reconcile_shell_editing_snapshot(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.session.active_id() != Some(id) {
+            return;
+        }
         self.terminal.editing.activate(id);
         if self.session.is_disconnected(id)
             || self.active_terminal_uses_alternate_screen()
@@ -179,6 +225,11 @@ impl ZzClawTermApp {
             return;
         }
         let snapshot = self.terminal_snapshot_for_session(Some(id), 0);
+        self.terminal
+            .editing
+            .state_mut()
+            .command_navigation
+            .observe(&snapshot);
         let Some(cursor_row) = snapshot.row(snapshot.cursor.row) else {
             return;
         };
@@ -194,6 +245,28 @@ impl ZzClawTermApp {
                     | crate::models::SessionLaunchConfig::Ssh(_)
             )
         });
+        let windows_console_session = self.commands.command_context(id).is_some_and(|context| {
+            matches!(
+                context.dialect,
+                ShellDialect::Cmd | ShellDialect::PowerShell
+            )
+        }) || (cfg!(windows)
+            && self.session.metadata(id).is_some_and(|metadata| {
+                matches!(
+                    metadata.launch_config,
+                    crate::models::SessionLaunchConfig::Local(_)
+                )
+            }));
+        // An unclassified remote prompt may belong to CMD even if the launch
+        // context says Unknown or POSIX. Only a native POSIX local session can
+        // safely infer ANSI from the existing child-editor evidence alone.
+        let unclassified_ansi_editor = !windows_console_session
+            && self.session.metadata(id).is_some_and(|metadata| {
+                matches!(
+                    metadata.launch_config,
+                    crate::models::SessionLaunchConfig::Local(_)
+                )
+            });
         let state = self.terminal.editing.state_mut();
         state.cancel_stale_suggestion_fill(Instant::now(), sync_revision);
         if state.awaiting_snapshot {
@@ -254,6 +327,9 @@ impl ZzClawTermApp {
             state.model.version = state.model.version.wrapping_add(1);
             mapping = resolve_input(&snapshot, &state.model.input.value, cursor);
         }
+        // Confirmed echo at a recognized shell prompt proves that a shell line
+        // editor owns this line again; see the recovery below.
+        let mut confirmed_shell_prompt = false;
         let queued = if let Some(mapping) = mapping {
             // A unique echo can also come from canonical TTY input (cat/tee).
             // Require a shell prompt or a positively identified child line editor.
@@ -272,16 +348,39 @@ impl ZzClawTermApp {
                     })
                     .collect::<String>()
             });
-            let known_prompt = prompt.as_ref().is_some_and(|prefix| {
-                !prefix.trim().is_empty()
-                    && (strip_terminal_command_prompt(prefix).is_empty()
-                        || state.line_editor_prompt.as_ref() == Some(prefix))
+            let shell_prompt = prompt.as_ref().is_some_and(|prefix| {
+                !prefix.trim().is_empty() && strip_terminal_command_prompt(prefix).trim().is_empty()
             });
+            let known_prompt = shell_prompt
+                || prompt.as_ref().is_some_and(|prefix| {
+                    !prefix.trim().is_empty() && state.line_editor_prompt.as_ref() == Some(prefix)
+                });
             let has_prompt = prompt
                 .as_ref()
                 .is_some_and(|prefix| !prefix.trim().is_empty());
             state.echo_line_editor =
                 shell_session && (known_prompt || (state.launched_line_editor && has_prompt));
+            let backend = prompt
+                .as_deref()
+                .and_then(classify_shell_prompt)
+                .or_else(|| {
+                    if snapshot.shell_input_anchor.is_some() {
+                        Some(ShellPrompt {
+                            dialect: None,
+                            line_editing: ShellLineEditing::Marked,
+                            platform: None,
+                        })
+                    } else if state.echo_line_editor && unclassified_ansi_editor {
+                        Some(ShellPrompt {
+                            dialect: None,
+                            line_editing: ShellLineEditing::AnsiLineEditor,
+                            platform: None,
+                        })
+                    } else {
+                        None
+                    }
+                });
+            state.observe_editor_evidence(backend);
             if state.echo_line_editor
                 && prompt
                     .as_ref()
@@ -289,6 +388,8 @@ impl ZzClawTermApp {
             {
                 state.line_editor_prompt = prompt;
             }
+            confirmed_shell_prompt =
+                shell_session && shell_prompt && !state.model.input.value.trim().is_empty();
             if state.mapping.as_ref().is_some_and(|old| old != &mapping) {
                 state.selection = None;
                 state.selection_origin_version = None;
@@ -316,6 +417,25 @@ impl ZzClawTermApp {
             }
             None
         };
+        // A child shell hides the OSC 133 lifecycle from us: the outer shell
+        // emits C for the command that started it, but its matching D arrives
+        // only after the child exits, and the child emits no marks itself.
+        // Without a D the suppression would outlive that command for the whole
+        // child shell (`su`, `sudo -i`, `docker exec`, nested `ssh`). A locally
+        // predicted line echoed back behind a recognized prompt is structural
+        // evidence that a shell line editor is accepting input again, so
+        // release the suppression instead of waiting for a D that cannot come.
+        // Pagers and child REPLs echo without a shell prompt prefix and keep
+        // their suppression.
+        if confirmed_shell_prompt
+            && self
+                .terminal
+                .assist
+                .command_suggestion_suppression
+                .release_at_shell_prompt()
+        {
+            self.schedule_command_suggestion_refresh(cx);
+        }
         if let Some(target) = queued {
             let _ = self.move_smart_input_cursor(target, cx);
         }
@@ -343,6 +463,7 @@ mod tests {
     use std::net::TcpListener;
     use std::time::Duration;
     use std::time::Instant;
+    use zzclawterm_core::command_suggestion_suppression::CommandSuggestionSuppression;
 
     use gpui::{
         AppContext as _, EntityInputHandler, IntoElement, MouseButton, MouseUpEvent, Render,
@@ -413,6 +534,7 @@ mod tests {
                         end_side,
                     ),
                     all_buffer: false,
+                    mode: zzclawterm_terminal::selection::TerminalSelectionMode::Linear,
                 });
                 app.begin_smart_input_selection();
                 app.commit_smart_input_selection();
@@ -552,6 +674,7 @@ mod tests {
                 anchor: TerminalBufferCellPos::new(0, 3).into(),
                 head: TerminalBufferCellPos::new(0, 6).into(),
                 all_buffer: false,
+                mode: zzclawterm_terminal::selection::TerminalSelectionMode::Linear,
             });
             app.begin_smart_input_selection();
             app.commit_smart_input_selection();
@@ -619,7 +742,8 @@ mod tests {
             let mut settings = app.settings.summary().clone();
             settings.interaction_command_suggestions_enabled = false;
             app.settings.replace_summary(settings);
-            app.terminal.assist.command_suggestions_suppressed = true;
+            app.terminal.assist.command_suggestion_suppression =
+                CommandSuggestionSuppression::CommandRunning;
             app.note_shell_editing_input(b"echo abc", cx);
             app.terminal
                 .seed_session_view("s1".into(), "$ echo abc".into(), "UTF-8");
@@ -649,7 +773,8 @@ mod tests {
             );
             app.reconcile_shell_editing("s1", cx);
             app.note_shell_editing_input(b"\r", cx);
-            app.terminal.assist.command_suggestions_suppressed = true;
+            app.terminal.assist.command_suggestion_suppression =
+                CommandSuggestionSuppression::CommandRunning;
             // Child typing may precede delivery of the outer shell's OSC C.
             app.note_shell_editing_input(b"echo abc", cx);
             app.terminal
@@ -666,7 +791,14 @@ mod tests {
                 EditCapability::EchoMatched
             );
             assert!(app.can_use_smart_cursor_selection());
-            assert!(app.terminal.assist.command_suggestions_suppressed);
+            // The unmarked child shell never emits OSC 133; a confirmed prompt
+            // echo releases the outer command's suppression instead.
+            assert!(
+                !app.terminal
+                    .assist
+                    .command_suggestion_suppression
+                    .is_suppressed()
+            );
         });
     }
 

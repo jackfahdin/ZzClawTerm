@@ -2,7 +2,7 @@
 //! publication permits an atomic password/root/replica switch.
 use std::collections::BTreeMap;
 
-use redb::{ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -18,6 +18,7 @@ use crate::storage::{
     SETTINGS_TABLE, StorageError, TEXT_DOCS_TABLE, set_nested_json_value, write_json_in_txn,
 };
 use crate::sync_v4::{LocalReplica, PasswordRotationPublication, PreparedApply};
+use zzclawterm_core::sync_schema::FIXED_CLOUD_SYNC_SCOPE;
 
 const ROTATIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("sync_v4_password_rotations");
 const STAGED: &str = "pending";
@@ -62,6 +63,15 @@ fn matches(txn: &redb::WriteTransaction, stage: &StagedRotation) -> Result<bool,
 }
 
 impl ConnectionStore {
+    pub(in crate::storage) fn has_staged_v4_password_rotation(&self) -> Result<bool, StorageError> {
+        let txn = self.db.begin_read()?;
+        let table = match txn.open_table(ROTATIONS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        Ok(table.get(STAGED)?.is_some())
+    }
     pub fn has_v4_replicas(&self) -> Result<bool, StorageError> {
         let txn = self.db.begin_write()?;
         Ok(txn.open_table(REPLICAS)?.len()? > 0)
@@ -94,6 +104,13 @@ impl ConnectionStore {
         if stage.source != source
             || !matches(&txn, &stage)?
             || encryption::open(next_password, "rotation-proof", source, &stage.proof).is_err()
+            || !serde_json::from_slice::<PublishedReplica>(&encryption::open(
+                next_password,
+                "publication",
+                &format!("{}/{}", stage.pending.id.writer, stage.pending.id.sequence),
+                &stage.pending.bytes,
+            )?)
+            .is_ok_and(|publication| publication.validate_fixed().is_ok())
         {
             return Ok(None);
         }
@@ -118,6 +135,7 @@ impl ConnectionStore {
             || next_password == password.expose_secret()
             || target == source.destination
             || !source.local.migration_approved
+            || source.plan.scope != FIXED_CLOUD_SYNC_SCOPE
         {
             return Err(invalid());
         }
@@ -175,17 +193,8 @@ impl ConnectionStore {
         rewrap_record(&mut record)?;
         let replica = record.replica.clone().ok_or_else(invalid)?;
         let document_hash = digest(&replica.document);
-        let publication = PublishedReplica {
-            schema: 4,
-            writer: record.writer,
-            sequence: 1,
-            replica,
-            secret_objects: if record.scope.secrets {
-                record.secret_objects.clone()
-            } else {
-                BTreeMap::new()
-            },
-        };
+        let publication =
+            PublishedReplica::fixed(record.writer, 1, &replica).map_err(|_| invalid())?;
         let plaintext = Zeroizing::new(serde_json::to_vec(&publication)?);
         if plaintext.len() > MAX_PUBLICATION_BYTES / 2 {
             return Err(invalid());
@@ -232,13 +241,18 @@ impl ConnectionStore {
             let plaintext = Zeroizing::new(serde_json::to_vec(&archived)?);
             replacements.insert(
                 key.value().to_owned(),
-                encryption::seal(next_password, "local-replica", key.value(), &plaintext)?,
+                encryption::seal_compressed(
+                    next_password,
+                    "local-replica",
+                    key.value(),
+                    &plaintext,
+                )?,
             );
         }
         let plaintext = Zeroizing::new(serde_json::to_vec(&record)?);
         replacements.insert(
             target.into(),
-            encryption::seal(next_password, "local-replica", target, &plaintext)?,
+            encryption::seal_compressed(next_password, "local-replica", target, &plaintext)?,
         );
         let stage = StagedRotation {
             source: source.destination.clone(),
@@ -264,6 +278,18 @@ impl ConnectionStore {
             STAGED,
             &plaintext,
         )?;
+        let old_stage = txn
+            .open_table(ROTATIONS)?
+            .get(STAGED)?
+            .map(|value| value.value().to_vec());
+        if let Some(old_stage) = old_stage {
+            // An old-version exact-byte ticket is retained, never retried by
+            // the fixed-scope publisher or overwritten without preservation.
+            txn.open_table(ROTATIONS)?.insert(
+                format!("retained/{}", digest(&old_stage)).as_str(),
+                old_stage.as_slice(),
+            )?;
+        }
         txn.open_table(ROTATIONS)?
             .insert(STAGED, bytes.as_slice())?;
         txn.commit()?;

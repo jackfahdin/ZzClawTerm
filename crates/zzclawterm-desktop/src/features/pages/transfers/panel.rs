@@ -41,6 +41,7 @@ pub(in crate::features) struct TransferBrowserPresentation {
     pub tree_focus: FocusHandle,
     pub local_backend: bool,
     pub path: String,
+    pub terminal_cwd: Option<String>,
     pub home_dir: String,
     pub path_editing: bool,
     pub expanded_children_path: Option<String>,
@@ -250,7 +251,7 @@ mod tests {
     impl Render for AppHost {
         fn render(
             &mut self,
-            _window: &mut gpui::Window,
+            window: &mut gpui::Window,
             cx: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
             let overlay = self
@@ -262,8 +263,27 @@ mod tests {
                 .is_some()
                 .then(|| {
                     self.app.update(cx, |app, cx| {
-                        app.transfer_browser_path_menu_overlay(cx)
-                            .into_any_element()
+                        crate::features::view_widgets::full_window_overlay_layer(
+                            "transfer-path-menu-input-layer",
+                            app.transfer_browser_path_menu_overlay(window, cx),
+                        )
+                        .into_any_element()
+                    })
+                });
+            let favorites_overlay = self
+                .app
+                .read(cx)
+                .transfer
+                .browser_view()
+                .favorites_menu
+                .is_some()
+                .then(|| {
+                    self.app.update(cx, |app, cx| {
+                        crate::features::view_widgets::full_window_overlay_layer(
+                            "transfer-favorites-menu-input-layer",
+                            app.transfer_browser_favorites_menu_overlay(cx),
+                        )
+                        .into_any_element()
                     })
                 });
             div()
@@ -282,6 +302,7 @@ mod tests {
                     ),
                 )
                 .children(overlay)
+                .children(favorites_overlay)
         }
     }
 
@@ -356,6 +377,194 @@ mod tests {
     }
 
     #[test]
+    fn file_row_ctrl_toggle_and_plain_click_update_the_selection() {
+        for remote in [false, true] {
+            for name_column in [false, true] {
+                let test_dir = TestConfigDir::new("zzclawterm-file-selection");
+                let mut cx = TestAppContext::single();
+                let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+                let (app, vcx) = hosted_file_browser(&mut cx, test_dir.path());
+                let entries: Vec<_> = (0..4)
+                    .map(super::super::tests_support::browser_entry)
+                    .collect();
+                vcx.update(|_, cx| {
+                    app.update(cx, |app, cx| {
+                        if remote {
+                            let config = zzclawterm_transport::SshSessionConfig::default();
+                            app.session.register_session_metadata(
+                                "path-test",
+                                crate::models::SessionRuntimeMetadata {
+                                    ssh_config: Some(config.clone()),
+                                    ssh_multiplex_key: None,
+                                    source_connection_id: None,
+                                    ai_execution_profile:
+                                        zzclawterm_core::AiExecutionProfile::Posix,
+                                    launch_config: crate::models::SessionLaunchConfig::Ssh(
+                                        Box::new(config),
+                                    ),
+                                    disconnected: false,
+                                },
+                            );
+                        }
+                        app.transfer
+                            .replace_browser_entries_for_test(entries.clone());
+                        app.transfer.replace_browser_selection(
+                            entries
+                                .iter()
+                                .take(3)
+                                .map(zzclawterm_files::sftp::SftpFileEntry::identity_key)
+                                .collect(),
+                            Some(entries[0].identity_key()),
+                        );
+                        app.flush_transfer_panel_snapshot(cx);
+                    });
+                });
+                draw_path_fixture(vcx);
+                let row = vcx
+                    .debug_bounds("transfer-browser-entry-/remote/entry-0000")
+                    .unwrap();
+                let pointer = gpui::point(
+                    row.left() + px(if name_column { 80. } else { 280. }),
+                    row.center().y,
+                );
+                let ctrl = Modifiers {
+                    control: true,
+                    ..Modifiers::none()
+                };
+                vcx.simulate_mouse_move(pointer, None, ctrl);
+                vcx.simulate_mouse_down(pointer, MouseButton::Left, ctrl);
+                draw_path_fixture(vcx);
+                // Even a small move with the button down must not reselect A.
+                vcx.simulate_mouse_move(
+                    pointer + gpui::point(px(1.), px(0.)),
+                    MouseButton::Left,
+                    ctrl,
+                );
+                vcx.simulate_mouse_up(pointer, MouseButton::Left, ctrl);
+                draw_path_fixture(vcx);
+                vcx.update(|_, cx| {
+                    let app = app.read(cx);
+                    let browser = app.transfer.browser_view();
+                    assert_eq!(
+                        browser.selected_remote_paths,
+                        &std::collections::HashSet::from([
+                            entries[1].identity_key(),
+                            entries[2].identity_key()
+                        ])
+                    );
+                    assert_eq!(
+                        browser.selected_remote_path.as_deref(),
+                        Some(entries[1].path.as_str())
+                    );
+                    assert!(!app.transfer.rename_dialog_is_open());
+                });
+                vcx.simulate_click(pointer, ctrl);
+                draw_path_fixture(vcx);
+                vcx.simulate_mouse_down(pointer, MouseButton::Left, Modifiers::none());
+                vcx.update(|_, cx| {
+                    assert_eq!(
+                        app.read(cx)
+                            .transfer
+                            .browser_view()
+                            .selected_remote_paths
+                            .len(),
+                        3
+                    )
+                });
+                vcx.simulate_mouse_up(pointer, MouseButton::Left, Modifiers::none());
+                draw_path_fixture(vcx);
+                vcx.update(|_, cx| {
+                    let app = app.read(cx);
+                    assert_eq!(
+                        app.transfer.browser_view().selected_remote_paths,
+                        &std::collections::HashSet::from([entries[0].identity_key()])
+                    );
+                    assert!(
+                        !app.transfer.rename_dialog_is_open(),
+                        "collapsing a multi-selection must not rename"
+                    );
+                });
+                let last_row = vcx
+                    .debug_bounds("transfer-browser-entry-/remote/entry-0002")
+                    .unwrap();
+                let last = gpui::point(pointer.x, last_row.center().y);
+                vcx.simulate_click(
+                    last,
+                    Modifiers {
+                        shift: true,
+                        ..Modifiers::none()
+                    },
+                );
+                draw_path_fixture(vcx);
+                vcx.update(|_, cx| {
+                    assert_eq!(
+                        app.read(cx)
+                            .transfer
+                            .browser_view()
+                            .selected_remote_paths
+                            .len(),
+                        3
+                    )
+                });
+                // Ctrl+Shift extends the existing selection with the next range.
+                let last_row = vcx
+                    .debug_bounds("transfer-browser-entry-/remote/entry-0003")
+                    .unwrap();
+                vcx.simulate_click(
+                    gpui::point(pointer.x, last_row.center().y),
+                    Modifiers {
+                        shift: true,
+                        control: true,
+                        ..Modifiers::none()
+                    },
+                );
+                draw_path_fixture(vcx);
+                vcx.update(|_, cx| {
+                    assert_eq!(
+                        app.read(cx)
+                            .transfer
+                            .browser_view()
+                            .selected_remote_paths
+                            .len(),
+                        4
+                    )
+                });
+                // Crossing rows activates range selection, including when the
+                // pointer subsequently returns to the original pressed row.
+                vcx.simulate_mouse_down(pointer, MouseButton::Left, ctrl);
+                vcx.simulate_mouse_move(last, MouseButton::Left, ctrl);
+                vcx.simulate_mouse_move(pointer, MouseButton::Left, ctrl);
+                vcx.simulate_mouse_up(pointer, MouseButton::Left, ctrl);
+                draw_path_fixture(vcx);
+                vcx.update(|_, cx| {
+                    assert_eq!(
+                        app.read(cx)
+                            .transfer
+                            .browser_view()
+                            .selected_remote_paths
+                            .len(),
+                        4
+                    );
+                });
+                // Releasing outside the pressed row must abandon the deferred
+                // click rather than collapse the selection on a later event.
+                vcx.simulate_mouse_down(pointer, MouseButton::Left, Modifiers::none());
+                vcx.simulate_mouse_up(last, MouseButton::Left, Modifiers::none());
+                draw_path_fixture(vcx);
+                vcx.update(|_, cx| {
+                    app.update(cx, |app, _| {
+                        assert_eq!(app.transfer.browser_view().selected_remote_paths.len(), 4);
+                        assert!(
+                            !app.transfer
+                                .consume_browser_selection_click(&entries[0].identity_key())
+                        );
+                    });
+                });
+            }
+        }
+    }
+
+    #[test]
     fn file_row_starts_visible_export_from_first_press_and_preserves_multiselection() {
         for remote in [false, true] {
             let test_dir = TestConfigDir::new("zzclawterm-file-drag");
@@ -411,10 +620,20 @@ mod tests {
             );
             draw_path_fixture(vcx);
             if remote && cfg!(target_os = "linux") {
-                // Linux deliberately has no remote file drag export; the local
-                // case must still exercise the first-press drag gesture.
-                vcx.update(|_, cx| assert!(!cx.has_active_drag()));
-                assert!(vcx.debug_bounds("transfer-file-drag-preview").is_none());
+                // The gesture is recognized so unsupported native export is visible.
+                // No native selection or content provider is created on Linux.
+                vcx.update(|_, cx| {
+                    app.update(cx, |app, _| {
+                        assert_eq!(
+                            app.shell.status(),
+                            rust_i18n::t!("fileExplorer.dragPlatformUnsupported").as_ref()
+                        );
+                        assert!(!app.transfer.transfer_jobs().iter().any(|job| matches!(
+                            job.kind,
+                            crate::models::TransferJobKind::DragExport { .. }
+                        )));
+                    })
+                });
                 vcx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
                 continue;
             }
@@ -462,6 +681,18 @@ mod tests {
                 );
             });
             vcx.simulate_mouse_up(start, MouseButton::Left, Modifiers::none());
+            draw_path_fixture(vcx);
+            vcx.update(|_, cx| {
+                assert_eq!(
+                    app.read(cx)
+                        .transfer
+                        .browser_view()
+                        .selected_remote_paths
+                        .len(),
+                    2
+                );
+                assert!(!app.read(cx).transfer.rename_dialog_is_open());
+            });
         }
     }
 
@@ -551,6 +782,237 @@ mod tests {
             );
         });
         assert!(vcx.debug_bounds("transfer-file-drag-preview").is_some());
+    }
+
+    #[test]
+    fn tree_marks_terminal_cwd_and_keeps_scroll_position_hint_in_the_viewport() {
+        use zzclawterm_files::file_browser::{FileBrowserBackendKind, file_browser_root};
+        use zzclawterm_files::sftp::{RemoteFilePath, SftpFileType};
+
+        let test_dir = TestConfigDir::new("zzclawterm-tree-position");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted_file_browser(&mut cx, test_dir.path());
+        let root = file_browser_root(
+            FileBrowserBackendKind::Local,
+            &test_dir.path().display().to_string(),
+        );
+        let mut entries: Vec<_> = (0..500)
+            .map(super::super::tests_support::browser_entry)
+            .collect();
+        for entry in &mut entries {
+            entry.path = Path::new(&root).join(&entry.name).display().to_string();
+        }
+        entries[0].file_type = SftpFileType::Directory;
+        let cwd = entries[0].path.clone();
+        let (scroll, current_key) = vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let mut settings = app.settings.summary().clone();
+                settings.ui_file_explorer_view_mode =
+                    zzclawterm_core::TransferBrowserViewMode::Tree;
+                app.settings.replace_summary(settings);
+                app.session.update_cwd("path-test", cwd.clone());
+                let root = RemoteFilePath::new(root);
+                app.transfer.seed_tree_listing(
+                    "path-test",
+                    FileBrowserBackendKind::Local,
+                    root.clone(),
+                    std::sync::Arc::new(entries),
+                );
+                app.transfer
+                    .reveal_tree_path("path-test", FileBrowserBackendKind::Local, root);
+                let tree = app.transfer.tree_presentation(Some("path-test"), true);
+                let current_key = tree
+                    .rows
+                    .iter()
+                    .find(|row| row.path.display_path == cwd)
+                    .unwrap()
+                    .key
+                    .clone();
+                app.flush_transfer_panel_snapshot(cx);
+                (tree.scroll, current_key)
+            })
+        });
+        draw_path_fixture(vcx);
+        let marker = Box::leak(format!("tree-terminal-cwd:{current_key}").into_boxed_str());
+        assert!(vcx.debug_bounds(marker).is_some());
+        assert!(vcx.debug_bounds("transfer-tree-position").is_none());
+        let row_selector = Box::leak(format!("transfer-tree-row:{current_key}").into_boxed_str());
+        let row_bounds = vcx.debug_bounds(row_selector).unwrap();
+        let viewport = vcx.debug_bounds("transfer-tree-viewport").unwrap();
+        assert_eq!(row_bounds.left() - viewport.left(), px(4.));
+        assert_eq!(row_bounds.size.height, px(24.));
+        let next_key = vcx.update(|_, cx| {
+            app.read(cx)
+                .transfer_panel
+                .read(cx)
+                .snapshot()
+                .unwrap()
+                .browser
+                .tree
+                .rows[2]
+                .key
+                .clone()
+        });
+        let next_selector = Box::leak(format!("transfer-tree-row:{next_key}").into_boxed_str());
+        assert_eq!(
+            vcx.debug_bounds(next_selector).unwrap().top() - row_bounds.top(),
+            px(28.)
+        );
+        vcx.simulate_mouse_move(row_bounds.center(), None, Modifiers::none());
+        draw_path_fixture(vcx);
+        assert_eq!(
+            vcx.debug_bounds(row_selector),
+            Some(row_bounds),
+            "hover must not move or resize a row"
+        );
+        vcx.executor().advance_clock(Duration::from_secs(1));
+        vcx.run_until_parked();
+        draw_path_fixture(vcx);
+        let details = vcx
+            .debug_bounds("transfer-tree-details")
+            .expect("structured file details");
+        assert_eq!(details.size.width, px(208.));
+        vcx.simulate_click(row_bounds.center(), Modifiers::none());
+        vcx.simulate_mouse_move(
+            row_bounds.center() - gpui::point(px(0.), px(56.)),
+            None,
+            Modifiers::none(),
+        );
+        vcx.simulate_mouse_move(row_bounds.center(), None, Modifiers::none());
+        draw_path_fixture(vcx);
+        assert_eq!(vcx.debug_bounds(row_selector), Some(row_bounds));
+        assert!(vcx.debug_bounds(marker).is_some());
+        assert!(vcx.debug_bounds("transfer-tree-details").is_none());
+        vcx.update(|_, cx| {
+            assert!(
+                app.read(cx)
+                    .transfer_panel
+                    .read(cx)
+                    .snapshot()
+                    .unwrap()
+                    .browser
+                    .tree
+                    .selected
+                    .contains(&current_key)
+            );
+        });
+        let mut hint_top = None;
+        for index in [250, 400] {
+            vcx.update(|_, cx| {
+                scroll.scroll_to_item(index, gpui::ScrollStrategy::Top);
+                app.update(cx, |app, cx| app.flush_transfer_panel_snapshot(cx));
+            });
+            draw_path_fixture(vcx);
+            let viewport = vcx.debug_bounds("transfer-tree-viewport").unwrap();
+            let hint = vcx
+                .debug_bounds("transfer-tree-position")
+                .expect("scroll context hint");
+            assert!(hint.top() >= viewport.top());
+            assert!(hint.bottom() <= viewport.bottom());
+            if let Some(previous) = hint_top {
+                assert_eq!(
+                    hint.top(),
+                    previous,
+                    "the hint must not scroll with the rows"
+                );
+            }
+            hint_top = Some(hint.top());
+        }
+        let built = vcx.update(|_, cx| app.read(cx).transfer_panel.read(cx).rows_built());
+        assert!(
+            built < 500,
+            "tree rows must remain virtualized; built {built}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tree_marks_translated_terminal_cwd_for_windows_shells() {
+        use zzclawterm_files::file_browser::{FileBrowserBackendKind, file_browser_root};
+        use zzclawterm_files::sftp::{RemoteFilePath, SftpFileType};
+
+        for (shell, reported, translated) in [
+            ("wsl.exe", "/mnt/d/Projects", r"D:\Projects"),
+            ("wsl.exe", "/home", r"\\wsl.localhost\Ubuntu\home"),
+            (
+                r"C:\Program Files\Git\bin\bash.exe",
+                "/d/Projects",
+                r"D:\Projects",
+            ),
+        ] {
+            let test_dir = TestConfigDir::new("zzclawterm-tree-translated-cwd");
+            let mut cx = TestAppContext::single();
+            let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let (app, vcx) = hosted_file_browser(&mut cx, test_dir.path());
+            let current_key = vcx.update(|_, cx| {
+                app.update(cx, |app, cx| {
+                    let mut settings = app.settings.summary().clone();
+                    settings.ui_file_explorer_view_mode =
+                        zzclawterm_core::TransferBrowserViewMode::Tree;
+                    app.settings.replace_summary(settings);
+                    let crate::models::SessionLaunchConfig::Local(config) =
+                        &mut app.session.metadata_mut("path-test").unwrap().launch_config
+                    else {
+                        panic!("local session");
+                    };
+                    config.shell_path = Some(shell.into());
+                    config.shell_args = if shell == "wsl.exe" {
+                        vec!["-d".into(), "Ubuntu".into()]
+                    } else {
+                        Vec::new()
+                    };
+                    app.session.update_cwd("path-test", reported.into());
+                    let root = RemoteFilePath::new(file_browser_root(
+                        FileBrowserBackendKind::Local,
+                        translated,
+                    ));
+                    let mut entry = super::super::tests_support::browser_entry(0);
+                    entry.name = Path::new(translated)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
+                    entry.path = translated.into();
+                    entry.file_type = SftpFileType::Directory;
+                    app.transfer.seed_tree_listing(
+                        "path-test",
+                        FileBrowserBackendKind::Local,
+                        root.clone(),
+                        std::sync::Arc::new(vec![entry]),
+                    );
+                    app.transfer
+                        .reveal_tree_path("path-test", FileBrowserBackendKind::Local, root);
+                    let tree = app.transfer.tree_presentation(Some("path-test"), true);
+                    let key = tree
+                        .rows
+                        .iter()
+                        .find(|row| row.path.display_path == translated)
+                        .unwrap()
+                        .key
+                        .clone();
+                    app.flush_transfer_panel_snapshot(cx);
+                    assert_eq!(app.session.cwd("path-test"), Some(reported));
+                    assert_eq!(
+                        app.transfer_panel
+                            .read(cx)
+                            .snapshot()
+                            .unwrap()
+                            .browser
+                            .terminal_cwd
+                            .as_deref(),
+                        Some(translated),
+                    );
+                    key
+                })
+            });
+            draw_path_fixture(vcx);
+            let marker = Box::leak(format!("tree-terminal-cwd:{current_key}").into_boxed_str());
+            assert!(
+                vcx.debug_bounds(marker).is_some(),
+                "missing cwd marker for {shell}: {reported}"
+            );
+        }
     }
 
     #[test]
@@ -775,6 +1237,708 @@ mod tests {
         vcx.run_until_parked();
     }
 
+    fn show_path_menu(
+        vcx: &mut VisualTestContext,
+        app: &Entity<ZzClawTermApp>,
+        menu: crate::models::TransferBrowserPathMenuState,
+    ) {
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.transfer.open_browser_path_menu(menu);
+                app.flush_transfer_panel_snapshot(cx);
+                cx.notify();
+            });
+        });
+        draw_path_fixture(vcx);
+    }
+
+    fn show_favorites_menu(
+        vcx: &mut VisualTestContext,
+        app: &Entity<ZzClawTermApp>,
+        x: f32,
+        y: f32,
+    ) {
+        vcx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.open_transfer_browser_favorites_menu(
+                    &MouseDownEvent {
+                        position: gpui::point(px(x), px(y - 18.)),
+                        ..Default::default()
+                    },
+                    window,
+                    cx,
+                );
+            });
+        });
+        draw_path_fixture(vcx);
+    }
+
+    fn activate_favorites_button(vcx: &mut VisualTestContext) {
+        draw_path_fixture(vcx);
+        let keystroke = gpui::Keystroke::parse("enter").unwrap();
+        vcx.simulate_event(gpui::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        vcx.simulate_event(gpui::KeyUpEvent { keystroke });
+        draw_path_fixture(vcx);
+    }
+
+    #[test]
+    fn favorites_menu_add_remove_keyboard_and_focus_restore() {
+        let test_dir = TestConfigDir::new("zzclawterm-favorites-actions");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted_file_browser(&mut cx, test_dir.path());
+        show_favorites_menu(vcx, &app, 20., 100.);
+        assert_eq!(
+            vcx.debug_bounds("transfer-browser-favorites-menu")
+                .unwrap()
+                .size
+                .width,
+            px(220.)
+        );
+        let add = vcx
+            .debug_bounds("transfer-browser-favorite-menu-add-current")
+            .unwrap();
+        assert_eq!(add.size.height, px(32.));
+        for _ in 0..2 {
+            vcx.simulate_click(add.center(), Modifiers::none());
+            draw_path_fixture(vcx);
+            vcx.update(|_, cx| {
+                let browser = app.read(cx).transfer.browser_view();
+                assert!(browser.favorites_menu.is_some());
+                assert_eq!(
+                    browser.favorites.iter().collect::<Vec<_>>(),
+                    vec!["/remote"]
+                );
+            });
+        }
+        let remove = vcx
+            .debug_bounds("transfer-browser-favorite-menu-remove-/remote")
+            .unwrap();
+        vcx.simulate_mouse_move(remove.center(), None, Modifiers::none());
+        vcx.simulate_click(remove.center(), Modifiers::none());
+        draw_path_fixture(vcx);
+        vcx.update(|_, cx| {
+            let browser = app.read(cx).transfer.browser_view();
+            assert!(browser.favorites.is_empty());
+            assert!(browser.favorites_menu.is_some());
+            assert_eq!(browser.path, "/remote");
+        });
+        // Starting from the menu container, Tab reaches add, then the path, then remove.
+        vcx.simulate_keystrokes("tab");
+        activate_favorites_button(vcx);
+        vcx.update(|_, cx| assert_eq!(app.read(cx).transfer.browser_view().favorites.len(), 1));
+        vcx.simulate_keystrokes("tab tab");
+        activate_favorites_button(vcx);
+        vcx.update(|_, cx| {
+            assert!(app.read(cx).transfer.browser_view().favorites.is_empty());
+            assert!(
+                app.read(cx)
+                    .transfer
+                    .browser_view()
+                    .favorites_menu
+                    .is_some()
+            );
+        });
+        for key in ["tab", "shift-tab", "down", "up"] {
+            for _ in 0..4 {
+                vcx.simulate_keystrokes(key);
+                draw_path_fixture(vcx);
+                vcx.update(|window, cx| {
+                    assert!(
+                        app.read(cx)
+                            .transfer
+                            .browser_view()
+                            .favorites_menu
+                            .as_ref()
+                            .unwrap()
+                            .focus
+                            .contains_focused(window, cx)
+                    );
+                });
+            }
+        }
+        vcx.simulate_keystrokes("escape");
+        draw_path_fixture(vcx);
+        vcx.update(|window, cx| {
+            let browser = app.read(cx).transfer.browser_view();
+            assert!(browser.favorites_menu.is_none());
+            assert!(browser.focus.is_focused(window));
+        });
+    }
+
+    #[test]
+    fn favorites_menu_escape_restores_tree_focus() {
+        let test_dir = TestConfigDir::new("zzclawterm-favorites-tree-focus");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted_file_browser(&mut cx, test_dir.path());
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                let mut settings = app.settings.summary().clone();
+                settings.ui_file_explorer_view_mode =
+                    zzclawterm_core::TransferBrowserViewMode::Tree;
+                app.settings.replace_summary(settings);
+                app.flush_transfer_panel_snapshot(cx);
+            })
+        });
+        show_favorites_menu(vcx, &app, 20., 100.);
+        vcx.simulate_keystrokes("escape");
+        draw_path_fixture(vcx);
+        vcx.update(|window, cx| {
+            assert!(
+                app.read(cx)
+                    .transfer
+                    .browser_view()
+                    .favorites_menu
+                    .is_none()
+            );
+            assert!(app.read(cx).transfer.tree_focus().is_focused(window));
+        });
+    }
+
+    #[test]
+    fn favorites_menu_directory_click_navigates_and_closes() {
+        let test_dir = TestConfigDir::new("zzclawterm-favorites-navigation");
+        let target = test_dir.path().join("favorite");
+        std::fs::create_dir_all(&target).unwrap();
+        let target = target.display().to_string();
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted_file_browser(&mut cx, test_dir.path());
+        vcx.update(|_, cx| {
+            app.update(cx, |app, _| {
+                app.transfer.add_browser_favorite(target.clone());
+            })
+        });
+        show_favorites_menu(vcx, &app, 20., 100.);
+        let selector =
+            Box::leak(format!("transfer-browser-favorite-menu-item-{target}").into_boxed_str());
+        let row = vcx.debug_bounds(selector).unwrap();
+        vcx.simulate_click(row.center(), Modifiers::none());
+        wait_for_browser(vcx, &app);
+        vcx.update(|window, cx| {
+            let browser = app.read(cx).transfer.browser_view();
+            assert_eq!(browser.path, &target);
+            assert!(browser.favorites_menu.is_none());
+            assert!(browser.focus.is_focused(window));
+        });
+    }
+
+    #[test]
+    fn favorites_menu_scroll_keeps_add_fixed_and_does_not_scroll_browser() {
+        let test_dir = TestConfigDir::new("zzclawterm-favorites-scroll");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted_file_browser(&mut cx, test_dir.path());
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.shell.set_viewport_size_for_test((320., 240.));
+                app.transfer
+                    .replace_browser_favorites((0..12).map(|i| format!("/favorite-{i}")).collect());
+                app.transfer.replace_browser_entries_for_test(
+                    (0..80)
+                        .map(super::super::tests_support::browser_entry)
+                        .collect(),
+                );
+                app.flush_transfer_panel_snapshot(cx);
+            })
+        });
+        show_favorites_menu(vcx, &app, 300., 200.);
+        let menu = vcx.debug_bounds("transfer-browser-favorites-menu").unwrap();
+        assert!(menu.right() <= px(312.));
+        assert!(menu.bottom() <= px(232.));
+        let add = vcx
+            .debug_bounds("transfer-browser-favorite-menu-add-current")
+            .unwrap();
+        let viewport = vcx
+            .debug_bounds("transfer-browser-favorites-scroll")
+            .unwrap();
+        let list_scroll = vcx.update(|_, cx| {
+            app.read(cx)
+                .transfer
+                .browser_view()
+                .list_scroll
+                .0
+                .borrow()
+                .base_handle
+                .clone()
+        });
+        let before = list_scroll.offset();
+        for _ in 0..2 {
+            vcx.simulate_event(gpui::ScrollEvent {
+                position: viewport.center(),
+                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-10_000.))),
+                touch_phase: gpui::TouchPhase::Moved,
+                ..Default::default()
+            });
+            draw_path_fixture(vcx);
+        }
+        assert_eq!(list_scroll.offset(), before);
+        assert_eq!(
+            vcx.debug_bounds("transfer-browser-favorite-menu-add-current"),
+            Some(add)
+        );
+        let last = vcx
+            .debug_bounds("transfer-browser-favorite-menu-item-/favorite-11")
+            .unwrap();
+        assert!(last.top() >= viewport.top());
+        assert!(last.bottom() <= viewport.bottom() + px(1.));
+        // Keyboard focus must reveal off-screen rows without moving the pinned action.
+        for _ in 0..2 {
+            vcx.simulate_keystrokes("tab");
+            draw_path_fixture(vcx);
+        }
+        let first = vcx
+            .debug_bounds("transfer-browser-favorite-menu-item-/favorite-0")
+            .unwrap();
+        assert!(first.top() >= viewport.top());
+        for _ in 0..22 {
+            vcx.simulate_keystrokes("tab");
+            draw_path_fixture(vcx);
+        }
+        let last = vcx
+            .debug_bounds("transfer-browser-favorite-menu-item-/favorite-11")
+            .unwrap();
+        assert!(last.top() >= viewport.top());
+        assert!(last.bottom() <= viewport.bottom() + px(1.));
+        assert_eq!(list_scroll.offset(), before);
+        assert_eq!(
+            vcx.debug_bounds("transfer-browser-favorite-menu-add-current"),
+            Some(add)
+        );
+    }
+
+    #[test]
+    fn favorites_menu_owns_pointer_gestures_and_outside_click_only_dismisses() {
+        use crate::models::TransferBrowserContextTarget;
+        let test_dir = TestConfigDir::new("zzclawterm-favorites-pointer");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted_file_browser(&mut cx, test_dir.path());
+        let entries = (0..8)
+            .map(super::super::tests_support::browser_entry)
+            .collect::<Vec<_>>();
+        vcx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.transfer
+                    .replace_browser_entries_for_test(entries.clone());
+                app.transfer.select_browser_entry(entries[0].identity_key());
+                window.focus(app.transfer.browser_view().focus, cx);
+                app.flush_transfer_panel_snapshot(cx);
+            });
+        });
+        draw_path_fixture(vcx);
+        let row = vcx
+            .debug_bounds("transfer-browser-entry-/remote/entry-0001")
+            .unwrap();
+        let pointer = gpui::point(row.left() + px(80.), row.center().y);
+        show_favorites_menu(vcx, &app, 20., f32::from(row.top()) - 40.);
+        assert!(
+            vcx.debug_bounds("transfer-browser-favorites-menu")
+                .unwrap()
+                .contains(&pointer)
+        );
+        for (button, click_count) in [
+            (MouseButton::Left, 1),
+            (MouseButton::Left, 2),
+            (MouseButton::Right, 1),
+            (MouseButton::Middle, 1),
+        ] {
+            vcx.simulate_mouse_move(pointer, None, Modifiers::none());
+            vcx.simulate_event(MouseDownEvent {
+                position: pointer,
+                button,
+                click_count,
+                ..Default::default()
+            });
+            vcx.simulate_mouse_move(
+                pointer + gpui::point(px(20.), px(5.)),
+                button,
+                Modifiers::none(),
+            );
+            vcx.simulate_event(MouseUpEvent {
+                position: pointer,
+                button,
+                click_count,
+                ..Default::default()
+            });
+            draw_path_fixture(vcx);
+            vcx.update(|_, cx| {
+                let app = app.read(cx);
+                let browser = app.transfer.browser_view();
+                assert!(browser.favorites_menu.is_some());
+                assert_eq!(browser.path, "/remote");
+                assert_eq!(
+                    browser.selected_remote_path.as_deref(),
+                    Some(entries[0].path.as_str())
+                );
+                assert_eq!(browser.selected_remote_paths.len(), 1);
+                assert_eq!(
+                    browser.context_target,
+                    &TransferBrowserContextTarget::CurrentDirectory
+                );
+                assert!(browser.drag_selection.is_none());
+                assert!(!app.transfer.rename_dialog_is_open());
+                assert!(!cx.has_active_drag());
+            });
+        }
+        let outside_row = vcx
+            .debug_bounds("transfer-browser-entry-/remote/entry-0004")
+            .unwrap();
+        let outside = gpui::point(outside_row.left() + px(280.), outside_row.center().y);
+        assert!(
+            !vcx.debug_bounds("transfer-browser-favorites-menu")
+                .unwrap()
+                .contains(&outside)
+        );
+        vcx.simulate_mouse_down(outside, MouseButton::Left, Modifiers::none());
+        vcx.update(|_, cx| {
+            assert!(
+                app.read(cx)
+                    .transfer
+                    .browser_view()
+                    .favorites_menu
+                    .is_some()
+            )
+        });
+        vcx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::none());
+        draw_path_fixture(vcx);
+        vcx.update(|_, cx| {
+            let app = app.read(cx);
+            assert!(app.transfer.browser_view().favorites_menu.is_none());
+            assert_eq!(
+                app.transfer.browser_view().selected_remote_path.as_deref(),
+                Some(entries[0].path.as_str())
+            );
+        });
+        vcx.simulate_click(outside, Modifiers::none());
+        vcx.update(|_, cx| {
+            assert_eq!(
+                app.read(cx)
+                    .transfer
+                    .browser_view()
+                    .selected_remote_path
+                    .as_deref(),
+                Some(entries[4].path.as_str())
+            );
+        });
+    }
+
+    #[test]
+    fn path_menu_owns_pointer_gestures_and_outside_click_only_dismisses() {
+        use crate::models::{
+            TransferBrowserChildrenMenuStatus, TransferBrowserContextTarget,
+            TransferBrowserPathMenuKind, TransferBrowserPathMenuState,
+        };
+        let test_dir = TestConfigDir::new("zzclawterm-path-pointer");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted_file_browser(&mut cx, test_dir.path());
+        let entries = (0..8)
+            .map(super::super::tests_support::browser_entry)
+            .collect::<Vec<_>>();
+        vcx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.transfer
+                    .replace_browser_entries_for_test(entries.clone());
+                app.transfer.select_browser_entry(entries[0].identity_key());
+                window.focus(app.transfer.browser_view().focus, cx);
+                app.flush_transfer_panel_snapshot(cx);
+            });
+        });
+        draw_path_fixture(vcx);
+        let row = vcx
+            .debug_bounds("transfer-browser-entry-/remote/entry-0001")
+            .unwrap();
+        let pointer = gpui::point(row.left() + px(80.), row.center().y);
+        show_path_menu(
+            vcx,
+            &app,
+            TransferBrowserPathMenuState {
+                session_id: Some("path-test".into()),
+                x: px(20.),
+                y: row.top() - px(8.),
+                kind: TransferBrowserPathMenuKind::Children {
+                    path: "/remote".into(),
+                    branch_child_path: None,
+                    request_id: None,
+                    status: TransferBrowserChildrenMenuStatus::Loading,
+                },
+            },
+        );
+        assert!(
+            vcx.debug_bounds("transfer-browser-path-menu")
+                .unwrap()
+                .contains(&pointer)
+        );
+        for (button, click_count) in [
+            (MouseButton::Left, 1),
+            (MouseButton::Left, 2),
+            (MouseButton::Right, 1),
+            (MouseButton::Middle, 1),
+        ] {
+            vcx.simulate_mouse_move(pointer, None, Modifiers::none());
+            vcx.simulate_event(MouseDownEvent {
+                position: pointer,
+                button,
+                click_count,
+                ..Default::default()
+            });
+            vcx.simulate_mouse_move(
+                pointer + gpui::point(px(20.), px(5.)),
+                button,
+                Modifiers::none(),
+            );
+            vcx.simulate_event(MouseUpEvent {
+                position: pointer,
+                button,
+                click_count,
+                ..Default::default()
+            });
+            draw_path_fixture(vcx);
+            vcx.update(|_, cx| {
+                let app = app.read(cx);
+                let browser = app.transfer.browser_view();
+                assert!(browser.path_menu.is_some());
+                assert_eq!(browser.path, "/remote");
+                assert_eq!(
+                    browser.selected_remote_path.as_deref(),
+                    Some(entries[0].path.as_str())
+                );
+                assert_eq!(browser.selected_remote_paths.len(), 1);
+                assert_eq!(
+                    browser.context_target,
+                    &TransferBrowserContextTarget::CurrentDirectory
+                );
+                assert!(browser.drag_selection.is_none());
+                assert!(!app.transfer.rename_dialog_is_open());
+                assert!(!cx.has_active_drag());
+            });
+        }
+        let outside_row = vcx
+            .debug_bounds("transfer-browser-entry-/remote/entry-0004")
+            .unwrap();
+        let outside = gpui::point(outside_row.left() + px(280.), outside_row.center().y);
+        assert!(
+            !vcx.debug_bounds("transfer-browser-path-menu")
+                .unwrap()
+                .contains(&outside)
+        );
+        vcx.simulate_mouse_down(outside, MouseButton::Left, Modifiers::none());
+        vcx.update(|_, cx| assert!(app.read(cx).transfer.browser_view().path_menu.is_some()));
+        vcx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::none());
+        draw_path_fixture(vcx);
+        vcx.update(|_, cx| {
+            let app = app.read(cx);
+            assert!(app.transfer.browser_view().path_menu.is_none());
+            assert_eq!(
+                app.transfer.browser_view().selected_remote_path.as_deref(),
+                Some(entries[0].path.as_str())
+            );
+        });
+        vcx.simulate_click(outside, Modifiers::none());
+        vcx.update(|_, cx| {
+            assert_eq!(
+                app.read(cx)
+                    .transfer
+                    .browser_view()
+                    .selected_remote_path
+                    .as_deref(),
+                Some(entries[4].path.as_str())
+            );
+        });
+    }
+
+    #[test]
+    fn path_menu_width_tracks_content_status_and_window_edges() {
+        use crate::models::{
+            TransferBrowserBreadcrumbSegment, TransferBrowserChildrenMenuStatus,
+            TransferBrowserPathMenuKind, TransferBrowserPathMenuState,
+        };
+        let test_dir = TestConfigDir::new("zzclawterm-path-width");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted_file_browser(&mut cx, test_dir.path());
+        let menu = |kind| TransferBrowserPathMenuState {
+            session_id: Some("path-test".into()),
+            x: px(10_000.),
+            y: px(100.),
+            kind,
+        };
+        for (label, expected_width) in [("a".to_string(), 160.), ("long-name".repeat(50), 360.)] {
+            show_path_menu(
+                vcx,
+                &app,
+                menu(TransferBrowserPathMenuKind::Overflow {
+                    segments: vec![TransferBrowserBreadcrumbSegment {
+                        label,
+                        path: "/target".into(),
+                    }],
+                }),
+            );
+            let bounds = vcx.debug_bounds("transfer-browser-path-menu").unwrap();
+            assert_eq!(bounds.size.width, px(expected_width));
+            let viewport = vcx.update(|window, _| window.viewport_size());
+            assert!(bounds.right() <= viewport.width - px(8.));
+        }
+        let label = "中文目录名称".repeat(3);
+        let mut entry = super::super::tests_support::browser_entry(0);
+        entry.name = label.clone();
+        entry.file_type = zzclawterm_files::sftp::SftpFileType::Directory;
+        let children = |status| TransferBrowserPathMenuKind::Children {
+            path: "/remote".into(),
+            branch_child_path: None,
+            request_id: None,
+            status,
+        };
+        for status in [
+            TransferBrowserChildrenMenuStatus::Loading,
+            TransferBrowserChildrenMenuStatus::Ready(Vec::new()),
+            TransferBrowserChildrenMenuStatus::Error("failure\n".repeat(30)),
+            TransferBrowserChildrenMenuStatus::Ready(vec![entry.clone()]),
+        ] {
+            show_path_menu(vcx, &app, menu(children(status)));
+            let bounds = vcx.debug_bounds("transfer-browser-path-menu").unwrap();
+            assert!((px(160.)..=px(360.)).contains(&bounds.size.width));
+        }
+        let measured = vcx.update(|window, cx| {
+            let mut run = window.text_style().to_run(label.len());
+            run.font = app.read(cx).gpui_ui_font().font();
+            window
+                .text_system()
+                .shape_line(label.into(), window.rem_size() * 0.75, &[run], None)
+                .width
+        });
+        let bounds = vcx.debug_bounds("transfer-browser-path-menu").unwrap();
+        assert!(bounds.size.width >= (measured + px(26.)).min(px(360.)));
+        let parent = test_dir.path().display().to_string();
+        std::fs::create_dir_all(test_dir.path().join("directory".repeat(25))).unwrap();
+        let mut loading = menu(children(TransferBrowserChildrenMenuStatus::Loading));
+        if let TransferBrowserPathMenuKind::Children { path, .. } = &mut loading.kind {
+            *path = parent.clone();
+        }
+        show_path_menu(vcx, &app, loading);
+        let loading_width = vcx
+            .debug_bounds("transfer-browser-path-menu")
+            .unwrap()
+            .size
+            .width;
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.start_transfer_browser_children_job(parent, cx)
+            });
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            vcx.run_until_parked();
+            let ready = vcx.update(|_, cx| {
+                matches!(
+                    app.read(cx)
+                        .transfer
+                        .browser_view()
+                        .path_menu
+                        .as_ref()
+                        .map(|menu| &menu.kind),
+                    Some(TransferBrowserPathMenuKind::Children {
+                        status: TransferBrowserChildrenMenuStatus::Ready(_),
+                        ..
+                    })
+                )
+            });
+            if ready {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child directory listing timed out"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        draw_path_fixture(vcx);
+        assert!(loading_width < px(360.));
+        assert_eq!(
+            vcx.debug_bounds("transfer-browser-path-menu")
+                .unwrap()
+                .size
+                .width,
+            px(360.)
+        );
+        vcx.simulate_resize(gpui::size(px(150.), px(720.)));
+        draw_path_fixture(vcx);
+        let bounds = vcx.debug_bounds("transfer-browser-path-menu").unwrap();
+        assert_eq!(bounds.size.width, px(134.));
+        assert_eq!(bounds.left(), px(8.));
+        assert!(bounds.right() <= px(142.));
+    }
+
+    #[test]
+    fn path_menu_directory_click_navigates_and_escape_dismisses() {
+        use crate::models::{
+            TransferBrowserBreadcrumbSegment, TransferBrowserPathMenuKind,
+            TransferBrowserPathMenuState,
+        };
+        let test_dir = TestConfigDir::new("zzclawterm-path-navigation");
+        let target = test_dir.path().join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted_file_browser(&mut cx, test_dir.path());
+        let target = target.display().to_string();
+        let menu = TransferBrowserPathMenuState {
+            session_id: Some("path-test".into()),
+            x: px(20.),
+            y: px(100.),
+            kind: TransferBrowserPathMenuKind::Overflow {
+                segments: vec![TransferBrowserBreadcrumbSegment {
+                    label: "target\r\ndirectory".into(),
+                    path: target.clone(),
+                }],
+            },
+        };
+        show_path_menu(vcx, &app, menu.clone());
+        let row = vcx
+            .debug_bounds(Box::leak(
+                format!("transfer-browser-path-menu-entry-{target}").into_boxed_str(),
+            ))
+            .unwrap();
+        assert_eq!(row.size.height, px(28.));
+        vcx.simulate_click(row.center(), Modifiers::none());
+        wait_for_browser(vcx, &app);
+        vcx.update(|window, cx| {
+            let app = app.read(cx);
+            assert!(app.transfer.browser_view().path_menu.is_none());
+            assert_eq!(app.transfer.browser_view().path, &target);
+            assert!(app.transfer.browser_view().focus.is_focused(window));
+        });
+        // A trigger press must acquire browser focus even when another surface
+        // previously owned it, so Escape can dismiss the popup immediately.
+        vcx.update(|window, cx| window.blur(cx));
+        let trigger = vcx
+            .debug_bounds(Box::leak(
+                format!("transfer-browser-breadcrumb-children-{target}").into_boxed_str(),
+            ))
+            .unwrap();
+        vcx.simulate_click(trigger.center(), Modifiers::none());
+        draw_path_fixture(vcx);
+        vcx.update(|window, cx| {
+            assert!(app.read(cx).transfer.browser_view().path_menu.is_some());
+            assert!(
+                app.read(cx)
+                    .transfer
+                    .browser_view()
+                    .focus
+                    .is_focused(window)
+            );
+        });
+        vcx.simulate_keystrokes("escape");
+        draw_path_fixture(vcx);
+        vcx.update(|_, cx| assert!(app.read(cx).transfer.browser_view().path_menu.is_none()));
+    }
+
     #[test]
     fn path_menu_scrolls_to_the_last_directory_and_resets_when_reopened() {
         use crate::models::{
@@ -805,6 +1969,11 @@ mod tests {
         };
         vcx.update(|window, cx| {
             app.update(cx, |app, cx| {
+                app.transfer.replace_browser_entries_for_test(
+                    (0..80)
+                        .map(super::super::tests_support::browser_entry)
+                        .collect(),
+                );
                 app.transfer.open_browser_path_menu(menu.clone());
                 app.flush_transfer_panel_snapshot(cx);
                 cx.notify();
@@ -815,6 +1984,17 @@ mod tests {
         let viewport = vcx
             .debug_bounds("transfer-browser-path-menu-scroll")
             .expect("scroll viewport");
+        let list_scroll = vcx.update(|_, cx| {
+            app.read(cx)
+                .transfer
+                .browser_view()
+                .list_scroll
+                .0
+                .borrow()
+                .base_handle
+                .clone()
+        });
+        let list_offset = list_scroll.offset();
         assert!(viewport.size.height <= px(324.));
         assert!(viewport.size.height > px(300.));
         vcx.update(|_, cx| {
@@ -847,6 +2027,14 @@ mod tests {
         assert!(last.bottom() <= viewport.bottom() + px(1.));
         assert!(last.top() >= viewport.top());
         assert_eq!(last.size.height, px(28.));
+        // Scrolling beyond the popup's last row must not scroll the file list.
+        vcx.simulate_event(gpui::ScrollEvent {
+            position: viewport.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-10_000.))),
+            ..Default::default()
+        });
+        draw_path_fixture(vcx);
+        assert_eq!(list_scroll.offset(), list_offset);
         vcx.update(|window, cx| {
             app.update(cx, |app, cx| {
                 assert!(app.transfer.browser_view().path_menu_scroll.offset().y < px(0.));
@@ -881,6 +2069,7 @@ mod tests {
                     < px(-1_000.)
             );
         });
+        assert_eq!(list_scroll.offset(), list_offset);
         vcx.simulate_click(gpui::point(px(5.), px(5.)), Modifiers::none());
         vcx.update(|_, cx| {
             assert!(

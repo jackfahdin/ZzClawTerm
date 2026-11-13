@@ -1,12 +1,14 @@
 use std::time::Duration;
 
 use gpui::{Context, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
-use zzclawterm_terminal::selection::{TerminalSelectionEndpoint, selected_row_text};
+use zzclawterm_terminal::selection::{TerminalSelectionEndpoint, TerminalSelectionMode};
 use zzclawterm_terminal::{TerminalScreen, TerminalSnapshot};
 
 use crate::features::ZzClawTermApp;
 use crate::features::terminal::LostTerminalSelectionRecovery;
-use crate::features::terminal::state::{TerminalSelectionAutoscroll, TerminalSelectionTextStatus};
+use crate::features::terminal::state::{
+    TerminalBlockSelectionGesture, TerminalSelectionAutoscroll, TerminalSelectionTextStatus,
+};
 use crate::features::terminal::terminal_runtime::TerminalMouseReportRequest;
 use crate::features::terminal::terminal_surface::{
     terminal_absolute_line_for_snapshot_row, terminal_snapshot_absolute_range,
@@ -22,13 +24,29 @@ use super::metrics::{
     terminal_snapshot_row_for_visual_geometry,
 };
 
+#[cfg(test)]
+mod block_tests;
+
 const TERMINAL_SELECTION_DRAG_NOTIFY_DELAY: Duration = Duration::from_millis(8);
 const TERMINAL_SELECTION_AUTOSCROLL_DELAY: Duration = Duration::from_millis(24);
 const TERMINAL_SELECTED_OCCURRENCE_DEBOUNCE: Duration = Duration::from_millis(100);
 const TERMINAL_SELECTED_OCCURRENCE_LIMIT: usize = 2000;
 const TERMINAL_SELECTED_OCCURRENCE_MAX_CHARS: usize = 256;
+const TERMINAL_SELECTION_IMMEDIATE_CELL_LIMIT: usize = 4096;
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn clear_terminal_block_selection(&mut self, cx: &mut Context<Self>) {
+        if self
+            .terminal
+            .selection
+            .selection
+            .is_some_and(|selection| selection.mode == TerminalSelectionMode::Block)
+            || self.terminal.selection.block_gesture.is_some()
+        {
+            self.clear_terminal_selection(cx);
+        }
+    }
+
     pub(in crate::features) fn clear_terminal_selection_state_for_session(
         &mut self,
         session_id: &str,
@@ -51,6 +69,7 @@ impl ZzClawTermApp {
         self.terminal.selection.text.invalidate();
         self.terminal.selection.source_history = None;
         self.terminal.selection.dragging = false;
+        self.terminal.selection.block_gesture = None;
         self.terminal.selection.drag_pointer_position = None;
         self.terminal.selection.scroll_rehit_armed = false;
         self.stop_terminal_selection_autoscroll();
@@ -87,6 +106,7 @@ impl ZzClawTermApp {
             self.terminal.selection.text.invalidate();
             self.terminal.selection.source_history = None;
             self.terminal.selection.dragging = false;
+            self.terminal.selection.block_gesture = None;
             self.terminal.selection.drag_pointer_position = None;
             self.terminal.selection.scroll_rehit_armed = false;
             self.stop_terminal_selection_autoscroll();
@@ -102,9 +122,14 @@ impl ZzClawTermApp {
     pub(in crate::features) fn select_all_terminal(&mut self, cx: &mut Context<Self>) {
         let (_, cols) = self.active_terminal_grid_size();
         self.terminal.selection.click_anchor = None;
-        self.terminal.selection.text.invalidate();
+        if cols > 0 && self.terminal.selection.session_id.as_deref() == self.session.active_id() {
+            self.terminal.selection.text.invalidate_preserving_copy();
+        } else {
+            self.terminal.selection.text.invalidate();
+        }
         self.terminal.selection.source_history = None;
         self.terminal.selection.dragging = false;
+        self.terminal.selection.block_gesture = None;
         self.terminal.selection.drag_pointer_position = None;
         self.terminal.selection.scroll_rehit_armed = false;
         self.stop_terminal_selection_autoscroll();
@@ -163,6 +188,20 @@ impl ZzClawTermApp {
         terminal_selected_text_from_screen(*selection, &self.terminal.view.screen)
     }
 
+    fn terminal_selection_endpoint_in_current_history(
+        &self,
+        position: gpui::Point<gpui::Pixels>,
+        geometry: &TerminalHitTestGeometry,
+        session_id: Option<&str>,
+    ) -> Option<TerminalSelectionEndpoint> {
+        let endpoint = Self::terminal_selection_endpoint_for_visual_geometry(position, geometry)?;
+        let current = session_id
+            .and_then(|id| self.terminal.view.views.get(id))
+            .map(|view| view.history_state())
+            .unwrap_or(geometry.snapshot.history);
+        endpoint.after_eviction(current.changes_since(geometry.snapshot.history)?.evicted)
+    }
+
     pub(in crate::features) fn start_terminal_selection_for_session(
         &mut self,
         session_id: Option<&str>,
@@ -172,6 +211,8 @@ impl ZzClawTermApp {
         if event.button != MouseButton::Left {
             return;
         }
+        self.terminal.selection.block_gesture = None;
+        self.terminal.selection.suppress_action_link_click = false;
         let selection_session_id = session_id
             .filter(|session_id| !session_id.is_empty())
             .map(str::to_string)
@@ -194,6 +235,9 @@ impl ZzClawTermApp {
         else {
             return;
         };
+        if let Some(id) = selection_session_id.as_deref() {
+            self.reanchor_terminal_selection_for_session(id, cx);
+        }
         let previous_selection_session_id = self.terminal.selection.session_id.clone();
         if (self.terminal.selection.selection.is_some()
             || self.terminal.selection.click_anchor.is_some())
@@ -203,6 +247,7 @@ impl ZzClawTermApp {
             self.terminal.selection.click_anchor = None;
             self.terminal.selection.session_id = None;
             self.terminal.selection.dragging = false;
+            self.terminal.selection.block_gesture = None;
             if let Some(previous_selection_session_id) =
                 previous_selection_session_id.filter(|session_id| !session_id.is_empty())
             {
@@ -216,9 +261,11 @@ impl ZzClawTermApp {
         // including while a double/triple-click selection is being formed.
         self.clear_terminal_selected_occurrence(cx);
         let cell = terminal_cell_for_visual_geometry(event.position, &geometry);
-        let Some(endpoint) =
-            Self::terminal_selection_endpoint_for_visual_geometry(event.position, &geometry)
-        else {
+        let Some(endpoint) = self.terminal_selection_endpoint_in_current_history(
+            event.position,
+            &geometry,
+            selection_session_id.as_deref(),
+        ) else {
             return;
         };
         // Applications with mouse tracking (vim/less/tmux) consume left presses.
@@ -237,6 +284,7 @@ impl ZzClawTermApp {
             )
         {
             self.clear_terminal_selection(cx);
+            self.terminal.selection.suppress_action_link_click = true;
             return;
         }
         if !event.modifiers.modified()
@@ -249,19 +297,56 @@ impl ZzClawTermApp {
                 .and_then(|row| row.line_id);
             if let Some(target_line) = target_line
                 && let Some(view) = self.terminal.view.views.get_mut(session_id)
-                && view.target_line != Some(target_line)
             {
                 view.target_line = Some(target_line);
+                let absolute = geometry
+                    .snapshot
+                    .total_rows
+                    .saturating_sub(geometry.snapshot.display_offset)
+                    .saturating_sub(geometry.snapshot.row_count())
+                    + snapshot_row;
+                if let Some(block) = geometry
+                    .snapshot
+                    .command_blocks
+                    .iter()
+                    .find(|block| block.rows.contains(&absolute))
+                {
+                    view.command_blocks.selected = Some(block.id);
+                }
                 self.notify_terminal_surface_only(Some(session_id), cx);
             }
         }
         let cols = geometry.cols;
-        self.terminal.selection.text.invalidate();
-        if !event.modifiers.shift || self.terminal.selection.source_history.is_none() {
-            self.terminal.selection.source_history = Some(geometry.snapshot.history);
+        self.terminal.selection.text.invalidate_preserving_copy();
+        let block = event.modifiers.alt
+            && self.settings.summary().terminal_wrap_mode
+                != zzclawterm_core::models::settings::TerminalWrapMode::None;
+        if block || !event.modifiers.shift || self.terminal.selection.source_history.is_none() {
+            self.terminal.selection.source_history = Some(
+                selection_session_id
+                    .as_deref()
+                    .and_then(|id| self.terminal.view.views.get(id))
+                    .map(|view| view.history_state())
+                    .unwrap_or(geometry.snapshot.history),
+            );
         }
         self.begin_smart_input_selection();
         let click_anchor = self.terminal.selection.click_anchor.take();
+        if block {
+            self.terminal.selection.selection = Some(TerminalSelection::with_anchor_and_mode(
+                endpoint,
+                TerminalSelectionMode::Block,
+            ));
+            self.terminal.selection.session_id = selection_session_id;
+            self.terminal.selection.dragging = true;
+            self.terminal.selection.block_gesture = Some(TerminalBlockSelectionGesture {
+                origin: event.position,
+                confirmed: false,
+            });
+            self.terminal.selection.drag_pointer_position = Some(event.position);
+            self.notify_terminal_selection_owner_surface(cx);
+            return;
+        }
         if event.modifiers.shift
             && event.click_count <= 1
             && self.terminal.selection.selection.is_none()
@@ -275,7 +360,7 @@ impl ZzClawTermApp {
         {
             selection.all_buffer = false;
             selection.head = endpoint;
-            self.terminal.selection.text.invalidate();
+            self.terminal.selection.text.invalidate_preserving_copy();
             if self.terminal.selection.session_id.is_none() {
                 self.terminal.selection.session_id = selection_session_id;
             }
@@ -294,7 +379,12 @@ impl ZzClawTermApp {
                 None
             };
             let logical_line = geometry.unwrapped.as_ref().and_then(|_| {
-                terminal_logical_selection_at_pointer(event.position, &geometry, None)
+                let selection =
+                    terminal_logical_selection_at_pointer(event.position, &geometry, None)?;
+                selection.reanchored_history(
+                    geometry.snapshot.history,
+                    self.terminal.selection.source_history?,
+                )
             });
             self.terminal.selection.selection = editable.or(logical_line).or_else(|| {
                 Some(TerminalSelection::from_range(
@@ -304,6 +394,7 @@ impl ZzClawTermApp {
             });
             self.terminal.selection.session_id = selection_session_id;
             self.terminal.selection.dragging = false;
+            self.terminal.selection.block_gesture = None;
             self.shell
                 .set_status(format!("selected line {}", cell.row + 1));
             self.notify_terminal_selection_owner_surface(cx);
@@ -319,9 +410,13 @@ impl ZzClawTermApp {
                 Some(&self.settings.summary().interaction_word_separators),
             )
         {
-            self.terminal.selection.selection = Some(selection);
+            self.terminal.selection.selection =
+                self.terminal.selection.source_history.and_then(|history| {
+                    selection.reanchored_history(geometry.snapshot.history, history)
+                });
             self.terminal.selection.session_id = selection_session_id;
             self.terminal.selection.dragging = false;
+            self.terminal.selection.block_gesture = None;
             self.notify_terminal_selection_owner_surface(cx);
             cx.notify();
             return;
@@ -337,6 +432,7 @@ impl ZzClawTermApp {
             ));
             self.terminal.selection.session_id = selection_session_id;
             self.terminal.selection.dragging = false;
+            self.terminal.selection.block_gesture = None;
             self.shell.set_status("selected word".to_string());
             self.notify_terminal_selection_owner_surface(cx);
             cx.notify();
@@ -440,6 +536,9 @@ impl ZzClawTermApp {
             self.stop_terminal_selection_autoscroll();
             return;
         }
+        if !self.terminal.selection.confirm_block_drag(event.position) {
+            return;
+        }
         self.terminal.selection.drag_pointer_position = Some(event.position);
         let selection_session_id = self
             .terminal
@@ -449,6 +548,9 @@ impl ZzClawTermApp {
             .or(self.session.active_id())
             .filter(|session_id| !session_id.is_empty())
             .map(str::to_string);
+        if let Some(id) = selection_session_id.as_deref() {
+            self.reanchor_terminal_selection_for_session(id, cx);
+        }
         let Some(geometry) =
             self.terminal_hit_test_geometry_for_session(selection_session_id.as_deref(), cx)
         else {
@@ -464,20 +566,31 @@ impl ZzClawTermApp {
             );
         }
         if let Some(session_id) = selection_session_id.as_deref()
-            && geometry.display_offset != self.terminal_display_offset_for_session(Some(session_id))
+            && self
+                .terminal
+                .view
+                .views
+                .get(session_id)
+                .map_or(geometry.display_offset, |view| {
+                    view.history_state()
+                        .reanchor_offset(geometry.snapshot.history, geometry.display_offset)
+                })
+                != self.terminal_display_offset_for_session(Some(session_id))
         {
             return;
         }
-        let Some(endpoint) =
-            Self::terminal_selection_endpoint_for_visual_geometry(event.position, &geometry)
-        else {
+        let Some(endpoint) = self.terminal_selection_endpoint_in_current_history(
+            event.position,
+            &geometry,
+            selection_session_id.as_deref(),
+        ) else {
             return;
         };
         if let Some(selection) = self.terminal.selection.selection.as_mut()
             && selection.head != endpoint
         {
             selection.head = endpoint;
-            self.terminal.selection.text.invalidate();
+            self.terminal.selection.text.invalidate_preserving_copy();
             if self.terminal.selection.session_id.is_none() {
                 self.terminal.selection.session_id = selection_session_id;
             }
@@ -493,6 +606,11 @@ impl ZzClawTermApp {
         if event.button != MouseButton::Left {
             return;
         }
+        if !self.terminal.selection.confirm_block_drag(event.position) {
+            self.clear_terminal_selection(cx);
+            return;
+        }
+        self.terminal.selection.block_gesture = None;
         self.stop_terminal_selection_autoscroll();
         self.terminal.selection.scroll_rehit_armed = false;
         if let Some(id) = self.session.active_id_owned() {
@@ -502,6 +620,9 @@ impl ZzClawTermApp {
         if self.finish_terminal_mouse_report(event, cx) {
             self.clear_terminal_selection(cx);
             return;
+        }
+        if let Some(id) = self.terminal.selection.session_id.clone() {
+            self.reanchor_terminal_selection_for_session(&id, cx);
         }
         if !self.terminal.selection.dragging {
             if self
@@ -536,11 +657,19 @@ impl ZzClawTermApp {
             .filter(|session_id| !session_id.is_empty());
         if let Some(geometry) =
             self.terminal_hit_test_geometry_for_session(selection_session_id, cx)
-            && geometry.display_offset
+            && selection_session_id
+                .and_then(|id| self.terminal.view.views.get(id))
+                .map_or(geometry.display_offset, |view| {
+                    view.history_state()
+                        .reanchor_offset(geometry.snapshot.history, geometry.display_offset)
+                })
                 == self.terminal_display_offset_for_session(selection_session_id)
         {
-            let endpoint =
-                Self::terminal_selection_endpoint_for_visual_geometry(event.position, &geometry);
+            let endpoint = self.terminal_selection_endpoint_in_current_history(
+                event.position,
+                &geometry,
+                selection_session_id,
+            );
             if let Some(selection) = self.terminal.selection.selection.as_mut()
                 && let Some(endpoint) = endpoint
             {
@@ -548,6 +677,7 @@ impl ZzClawTermApp {
             }
         }
         self.terminal.selection.dragging = false;
+        self.terminal.selection.block_gesture = None;
         self.terminal.selection.drag_pointer_position = None;
         self.commit_smart_input_selection();
         if self
@@ -557,16 +687,24 @@ impl ZzClawTermApp {
             .as_ref()
             .is_some_and(|selection| selection.is_empty())
         {
+            let block = self
+                .terminal
+                .selection
+                .selection
+                .is_some_and(|selection| selection.mode == TerminalSelectionMode::Block);
             let click_anchor = self
                 .terminal
                 .selection
                 .selection
                 .take()
+                .filter(|_| !block)
                 .map(|selection| selection.anchor);
             let session_id = self.terminal.selection.session_id.clone();
             self.clear_terminal_selected_occurrence(cx);
             // Empty selection after click: try smart input cursor move.
-            self.handle_smart_input_click(event, cx);
+            if !block {
+                self.handle_smart_input_click(event, cx);
+            }
             // Smart cursor movement may clear selection state. Restore only the
             // click anchor afterwards so Shift+click can extend without exposing
             // an empty selection to editing, context-menu or copy operations.
@@ -629,6 +767,15 @@ impl ZzClawTermApp {
     }
 
     pub(super) fn schedule_terminal_selected_occurrence_search(&mut self, cx: &mut Context<Self>) {
+        if self
+            .terminal
+            .selection
+            .selection
+            .is_some_and(|selection| selection.mode == TerminalSelectionMode::Block)
+        {
+            self.clear_terminal_selected_occurrence(cx);
+            return;
+        }
         let session_id = self
             .terminal
             .selection
@@ -731,6 +878,12 @@ impl ZzClawTermApp {
         session_id: &str,
     ) -> bool {
         self.terminal.selection.dragging
+            && self
+                .terminal
+                .selection
+                .block_gesture
+                .as_ref()
+                .is_none_or(|gesture| gesture.confirmed)
             && self.terminal.selection.session_id.as_deref() == Some(session_id)
     }
 
@@ -844,20 +997,33 @@ impl ZzClawTermApp {
         position: gpui::Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.reanchor_terminal_selection_for_session(session_id, cx);
         let Some(geometry) = self.terminal_hit_test_geometry_for_session(Some(session_id), cx)
         else {
             return false;
         };
-        if self.terminal_display_offset_for_session(Some(session_id)) != geometry.display_offset {
+        if self.terminal_display_offset_for_session(Some(session_id))
+            != self
+                .terminal
+                .view
+                .views
+                .get(session_id)
+                .map_or(geometry.display_offset, |view| {
+                    view.history_state()
+                        .reanchor_offset(geometry.snapshot.history, geometry.display_offset)
+                })
+        {
             return false;
         }
-        if let Some(endpoint) =
-            Self::terminal_selection_endpoint_for_visual_geometry(position, &geometry)
-            && let Some(selection) = self.terminal.selection.selection.as_mut()
+        if let Some(endpoint) = self.terminal_selection_endpoint_in_current_history(
+            position,
+            &geometry,
+            Some(session_id),
+        ) && let Some(selection) = self.terminal.selection.selection.as_mut()
             && selection.head != endpoint
         {
             selection.head = endpoint;
-            self.terminal.selection.text.invalidate();
+            self.terminal.selection.text.invalidate_preserving_copy();
             self.queue_terminal_selection_drag_visual_notify(cx);
         }
         true
@@ -949,7 +1115,7 @@ impl ZzClawTermApp {
         );
         if line != selection.head.position.line {
             selection.head.position.line = line;
-            self.terminal.selection.text.invalidate();
+            self.terminal.selection.text.invalidate_preserving_copy();
             self.queue_terminal_selection_drag_visual_notify(cx);
         }
     }
@@ -1017,7 +1183,9 @@ impl ZzClawTermApp {
         let viewport_cell = terminal_cell_for_visual_geometry(position, geometry);
         Some(TerminalSelectionEndpoint::new(
             TerminalBufferCellPos::new(absolute_line, viewport_cell.col),
-            super::metrics::terminal_cell_side_for_visual_geometry(position, geometry),
+            zzclawterm_terminal_gpui::geometry::terminal_cell_side_for_visual_geometry(
+                position, geometry,
+            ),
         ))
     }
 }
@@ -1096,24 +1264,23 @@ fn terminal_selected_text_for_view(
     {
         let (absolute_start, _) = terminal_snapshot_absolute_range(snapshot);
         let (start, end) = selection.cell_range(snapshot.cols)?;
+        // A logical line may span many physical rows. Bound extraction before
+        // touching cells; larger selections are read on the frame worker.
+        if end.line.saturating_sub(start.line).saturating_add(1)
+            > TERMINAL_SELECTION_IMMEDIATE_CELL_LIMIT / snapshot.cols.max(1)
+        {
+            return None;
+        }
         let mut text = String::new();
-        let mut first_line = true;
         for line in start.line..=end.line {
             let row = snapshot.row(line - absolute_start)?;
-            let (left, right) = selection.cols_for_absolute_line(line)?;
-            let slice = selected_row_text(&row.cells, left, right);
-            let slice = if row.wraps_to_next && right >= row.cells.len() {
-                slice.as_str()
-            } else {
-                slice.trim_end()
-            };
-            // Preserve the existing empty-row endpoint copy policy.
-            let empty_endpoint_at_row_start = line == end.line && end.col == 0 && slice.is_empty();
-            if !first_line && !row.wrapped && !empty_endpoint_at_row_start {
-                text.push('\n');
-            }
-            first_line = false;
-            text.push_str(slice);
+            selection.append_row_text(
+                &mut text,
+                &row.cells,
+                line,
+                row.wrapped,
+                row.wraps_to_next,
+            )?;
         }
         return (!text.is_empty()).then_some(text);
     }
@@ -1127,6 +1294,15 @@ fn terminal_selected_text_from_screen(
     selection: TerminalSelection,
     screen: &TerminalScreen,
 ) -> Option<String> {
+    let rows = if selection.all_buffer {
+        screen.scrollback_len().saturating_add(screen.rows())
+    } else {
+        let (start, end) = selection.cell_range(screen.cols())?;
+        end.line.saturating_sub(start.line).saturating_add(1)
+    };
+    if rows > TERMINAL_SELECTION_IMMEDIATE_CELL_LIMIT / screen.cols().max(1) {
+        return None;
+    }
     screen.text_for_selection(selection).ok().flatten()
 }
 
@@ -1248,6 +1424,8 @@ fn terminal_selected_occurrence_query(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use crate::features::ZzClawTermApp;
+    use std::io::Read;
+    use std::net::TcpListener;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1265,7 +1443,7 @@ mod tests {
     use crate::features::test_support::app_with_visible_local_session;
     use crate::models::{TerminalBufferCellPos, TerminalSelection, TerminalViewState};
     use crate::terminal::{TerminalTextCell, terminal_text_cells};
-    use crate::test_support::TestConfigDir;
+    use crate::test_support::{TestAppCleanup, TestConfigDir};
     use zzclawterm_terminal::terminal_text_cell_slice;
 
     use super::{
@@ -1275,6 +1453,65 @@ mod tests {
         terminal_selection_line_after_scroll, terminal_snapshot_covering_selection,
         terminal_text_cell_is_word, terminal_word_bounds_for_visual_geometry,
     };
+
+    #[test]
+    fn mouse_endpoint_from_a_painted_history_frame_follows_eviction() {
+        let dir = TestConfigDir::new("zzclawterm-history-mouse-endpoint");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+        cx.update_entity(&app, |app, _| {
+            let mut screen = TerminalScreen::new(16, 3);
+            screen.set_scrollback_limit(8);
+            screen.advance(b"0\r\n1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9\r\n10\r\n");
+            let snapshot = Arc::new(screen.viewport_snapshot(5));
+            let geometry = TerminalHitTestGeometry {
+                bounds: gpui::bounds(gpui::point(px(0.), px(0.)), gpui::size(px(128.), px(54.))),
+                snapshot: snapshot.clone(),
+                cell_w: 8.,
+                cell_h: 18.,
+                padding_left: 0.,
+                padding_top: 0.,
+                gutter: 0.,
+                rows: 3,
+                cols: 16,
+                display_offset: 5,
+                viewport_anchor_row: 0,
+                snapshot_rows: 3,
+                viewport_rows: 3,
+                visual_y_offset: 0.,
+                unwrapped: None,
+            };
+            let pointer = gpui::point(px(9.), px(9.));
+            let old =
+                ZzClawTermApp::terminal_selection_endpoint_for_visual_geometry(pointer, &geometry)
+                    .unwrap();
+            screen.advance(b"11\r\n12\r\n");
+            app.terminal
+                .view
+                .views
+                .get_mut("s1")
+                .unwrap()
+                .frame_snapshot = Some(Arc::new(screen.viewport_snapshot(0)));
+            let current = app
+                .terminal_selection_endpoint_in_current_history(pointer, &geometry, Some("s1"))
+                .unwrap();
+            assert_eq!(current.position.line, old.position.line - 2);
+            assert_eq!(current.position.col, old.position.col);
+            assert_eq!(current.side, old.side);
+            screen.advance(b"13\r\n14\r\n");
+            app.terminal
+                .view
+                .views
+                .get_mut("s1")
+                .unwrap()
+                .frame_snapshot = Some(Arc::new(screen.viewport_snapshot(0)));
+            assert!(
+                app.terminal_selection_endpoint_in_current_history(pointer, &geometry, Some("s1"))
+                    .is_none()
+            );
+        });
+    }
 
     #[test]
     fn horizontal_hit_testing_selects_and_copies_words_across_soft_wraps() {
@@ -1324,12 +1561,24 @@ mod tests {
         );
     }
 
-    fn click_terminal_cell(
+    pub(super) fn click_terminal_cell(
         app: &mut ZzClawTermApp,
         session_id: &str,
         row: usize,
         col: usize,
         shift: bool,
+        cx: &mut Context<ZzClawTermApp>,
+    ) {
+        click_terminal_cell_with_click_count(app, session_id, row, col, shift, 1, cx);
+    }
+
+    fn click_terminal_cell_with_click_count(
+        app: &mut ZzClawTermApp,
+        session_id: &str,
+        row: usize,
+        col: usize,
+        shift: bool,
+        click_count: usize,
         cx: &mut Context<ZzClawTermApp>,
     ) {
         let geometry = app
@@ -1355,7 +1604,7 @@ mod tests {
                 button: MouseButton::Left,
                 position,
                 modifiers,
-                click_count: 1,
+                click_count,
                 ..MouseDownEvent::default()
             },
             cx,
@@ -1371,7 +1620,7 @@ mod tests {
         );
     }
 
-    fn seed_click_selection_fixture(app: &mut ZzClawTermApp) {
+    pub(super) fn seed_click_selection_fixture(app: &mut ZzClawTermApp) {
         app.terminal.layout.surface_bounds = Some(Bounds {
             origin: Point::default(),
             size: Size {
@@ -1521,6 +1770,7 @@ mod tests {
             anchor: TerminalBufferCellPos::new(0, 0).into(),
             head: TerminalBufferCellPos::new(1, 0).into(),
             all_buffer: false,
+            mode: zzclawterm_terminal::selection::TerminalSelectionMode::Linear,
         };
         assert_eq!(
             terminal_selected_text_for_view(&view, selection).as_deref(),
@@ -1565,6 +1815,7 @@ mod tests {
                         TerminalCellSide::Right
                     ),
                     all_buffer: false,
+                    mode: zzclawterm_terminal::selection::TerminalSelectionMode::Linear,
                 }),
             );
             assert_eq!(app.selected_terminal_text().as_deref(), Some("cond\nthi"));
@@ -1582,6 +1833,7 @@ mod tests {
                         TerminalCellSide::Right
                     ),
                     all_buffer: false,
+                    mode: zzclawterm_terminal::selection::TerminalSelectionMode::Linear,
                 }),
             );
             assert_eq!(app.selected_terminal_text().as_deref(), Some("irst\nse"));
@@ -1694,6 +1946,7 @@ mod tests {
                 anchor,
                 head,
                 all_buffer: false,
+                mode: zzclawterm_terminal::selection::TerminalSelectionMode::Linear,
             });
             app.terminal.selection.session_id = Some("s1".into());
             app.terminal.selection.dragging = true;
@@ -1740,6 +1993,7 @@ mod tests {
                     TerminalCellSide::Right,
                 ),
                 all_buffer: false,
+                mode: zzclawterm_terminal::selection::TerminalSelectionMode::Linear,
             };
             app.terminal.selection.selection = Some(selection);
             app.terminal.selection.session_id = Some("s1".into());
@@ -2088,5 +2342,82 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// Selection and copy must consume the gesture locally. Anything written
+    /// here reaches the remote shell, where an unbound Ctrl+Insert shows up as
+    /// stray `5~`.
+    #[test]
+    fn double_click_and_copy_write_no_session_bytes() {
+        let dir = TestConfigDir::new("zzclawterm-terminal-copy-zero-bytes");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+        let manager = cx.update_entity(&app, |app, _| app.session.manager_handle());
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let info = manager
+            .create_telnet_session(zzclawterm_transport::TelnetSessionConfig {
+                host: "127.0.0.1".into(),
+                port: listener.local_addr().unwrap().port(),
+                raw_tcp: true,
+                ..zzclawterm_transport::TelnetSessionConfig::default()
+            })
+            .unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        cx.update_entity(&app, |app, _| {
+            let metadata = app.session.metadata("s1").unwrap().clone();
+            app.session.register_session_metadata(&info.id, metadata);
+            app.session.select_active_session(&info.id);
+            let mut settings = app.settings.summary().clone();
+            settings.interaction_mouse_events_require_alt = false;
+            app.settings.replace_summary(settings);
+            app.terminal.layout.surface_bounds = Some(Bounds {
+                origin: Point::default(),
+                size: Size {
+                    width: px(800.0),
+                    height: px(600.0),
+                },
+            });
+            app.terminal
+                .seed_session_view(info.id.clone(), "root@host:~# ls".into(), "UTF-8");
+        });
+
+        let read_sentinel = |app: &gpui::Entity<ZzClawTermApp>,
+                             cx: &mut TestAppContext,
+                             peer: &mut std::net::TcpStream,
+                             sentinel: &[u8],
+                             stage: &str| {
+            cx.update_entity(app, |app, _| {
+                app.write_session_protocol_response(&info.id, sentinel)
+                    .unwrap();
+            });
+            let mut received = vec![0; sentinel.len()];
+            peer.read_exact(&mut received).unwrap_or_else(|error| {
+                panic!("{stage}: session received no sentinel bytes: {error}")
+            });
+            assert_eq!(
+                received, sentinel,
+                "{stage}: the gesture wrote {received:?} to the session before the sentinel"
+            );
+        };
+
+        cx.update_entity(&app, |app, cx| {
+            click_terminal_cell_with_click_count(app, &info.id, 0, 13, false, 1, cx);
+            click_terminal_cell_with_click_count(app, &info.id, 0, 13, false, 2, cx);
+            assert_eq!(app.selected_terminal_text().as_deref(), Some("ls"));
+        });
+        cx.run_until_parked();
+        read_sentinel(&app, &mut cx, &mut peer, b"CLICK", "double click");
+
+        // The copy action is the pure-local consumer of Ctrl+Insert.
+        let copied = cx.update_entity(&app, |app, cx| {
+            app.copy_terminal_selection_or_visible(cx);
+            cx.read_from_clipboard().and_then(|item| item.text())
+        });
+        assert_eq!(copied.as_deref(), Some("ls"));
+        cx.run_until_parked();
+        read_sentinel(&app, &mut cx, &mut peer, b"COPY!", "copy");
+        manager.close(&info.id).unwrap();
     }
 }

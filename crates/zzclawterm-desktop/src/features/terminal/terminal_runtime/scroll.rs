@@ -1,4 +1,5 @@
 use rust_i18n::t;
+use zzclawterm_core::command_suggestion_suppression::CommandSuggestionSuppression;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -250,6 +251,17 @@ pub(in crate::features) struct TerminalScrollWheelStateResult {
 }
 
 impl ZzClawTermApp {
+    pub(in crate::features) fn reset_terminal_command_navigation_for_session(
+        &self,
+        session_id: &str,
+    ) {
+        self.terminal
+            .view
+            .frame_pipeline
+            .note_command_input(session_id.to_owned(), None);
+        self.terminal.view.frame_pipeline.arm_event_wakes();
+    }
+
     pub(in crate::features) fn active_terminal_display_offset(&self) -> usize {
         self.terminal_display_offset_for_session(self.session.active_id())
     }
@@ -348,6 +360,7 @@ impl ZzClawTermApp {
         if delta == 0 {
             let residual = self.terminal_scroll_residual_for_session(Some(session_id));
             if local_scroll && (residual != 0.0 || residual != previous_residual) {
+                self.reset_terminal_command_navigation_for_session(session_id);
                 self.note_terminal_fractional_scroll_after_local_surface_update(session_id, cx);
                 self.queue_terminal_selection_scroll_rehit(session_id, cx);
                 return TerminalScrollWheelStateResult {
@@ -357,6 +370,7 @@ impl ZzClawTermApp {
                 };
             }
             if terminal_scroll_should_consume_raw_lines(raw_lines) {
+                self.reset_terminal_command_navigation_for_session(session_id);
                 return TerminalScrollWheelStateResult {
                     visual_state: None,
                     defer_repaint: false,
@@ -410,6 +424,9 @@ impl ZzClawTermApp {
             .terminal_scroll_visual_state_for_session(session_id)
             .map(|state| state.scroll_offset);
         let visual_state = self.scroll_terminal_by_for_session_state_only(Some(session_id), delta);
+        if visual_state.is_some() {
+            self.reset_terminal_command_navigation_for_session(session_id);
+        }
         if let (Some(previous_offset), Some(state)) = (previous_offset, visual_state.as_ref()) {
             self.reconcile_terminal_selection_after_scroll(
                 session_id,
@@ -810,6 +827,7 @@ impl ZzClawTermApp {
         session_id: Option<&str>,
         cx: &mut Context<Self>,
     ) {
+        self.reconcile_command_suggestion_availability(cx);
         let session_id = session_id
             .filter(|id| !id.is_empty())
             .map(str::to_string)
@@ -817,6 +835,7 @@ impl ZzClawTermApp {
         let Some(session_id) = session_id else {
             return;
         };
+        self.reset_terminal_command_navigation_for_session(&session_id);
         let is_scrolled = self.terminal_visual_scroll_active_for_session(Some(&session_id));
         if is_scrolled {
             self.queue_terminal_scroll_position_notify(session_id.as_str(), cx);
@@ -952,6 +971,11 @@ impl ZzClawTermApp {
             .collect();
         let has_dirs = paths.iter().any(|p| p.is_dir());
         match kind {
+            Some(SessionKind::AdbShell | SessionKind::AdbFiles | SessionKind::AdbScreen) => {
+                self.shell
+                    .set_status(rust_i18n::t!("android.uploadUsingBrowser").into_owned());
+                cx.notify();
+            }
             Some(SessionKind::LocalPty) | None => {
                 if path_strings.is_empty() {
                     self.shell
@@ -1047,6 +1071,9 @@ impl ZzClawTermApp {
         finished: bool,
         command_running: bool,
     ) {
+        if finished && let Some(state) = self.terminal.editing.sessions.get_mut(session_id) {
+            state.command_navigation.command_finished();
+        }
         // Only affect the active session suggestion pipeline.
         if self.session.active_id() != Some(session_id) {
             return;
@@ -1054,7 +1081,10 @@ impl ZzClawTermApp {
         if started {
             // Outer command execution suppresses suggestions, not nested-shell editing.
             self.terminal.assist.command_suggestions = None;
-            self.terminal.assist.command_suggestions_suppressed = true;
+            self.terminal
+                .assist
+                .command_suggestion_suppression
+                .command_started();
             self.terminal.assist.command_suggestion_search_gen = self
                 .terminal
                 .assist
@@ -1063,7 +1093,8 @@ impl ZzClawTermApp {
         }
         if finished {
             // Command finished: re-enable suggestions; editor input has its own lifecycle.
-            self.terminal.assist.command_suggestions_suppressed = false;
+            self.terminal.assist.command_suggestion_suppression =
+                CommandSuggestionSuppression::None;
             self.terminal.assist.command_suggestions = None;
             self.terminal.assist.command_suggestion_search_gen = self
                 .terminal
@@ -1243,7 +1274,8 @@ impl ZzClawTermApp {
         let offset = self.terminal_grid_offset_for_scrollbar(drag.session_id.as_deref(), offset);
         let repaint_session_id = self
             .set_terminal_scroll_offset_for_session_state_only(drag.session_id.as_deref(), offset);
-        if repaint_session_id.is_some() {
+        if let Some(id) = &repaint_session_id {
+            self.reset_terminal_command_navigation_for_session(id);
             self.queue_terminal_scrollbar_drag_visual_notify(repaint_session_id.as_deref(), cx);
         }
     }
@@ -1431,6 +1463,15 @@ impl ZzClawTermApp {
         session_id: Option<&str>,
     ) -> (usize, usize) {
         let offset = self.terminal_scroll_offset_for_session(session_id);
+        if let Some(index) = session_id
+            .and_then(|id| self.terminal.view.views.get(id))
+            .and_then(|view| view.frame_snapshot.as_ref())
+            .and_then(|snapshot| snapshot.display_rows.as_ref())
+        {
+            let (offset, max) =
+                index.scroll_metrics(offset, self.terminal_viewport_rows_for_session(session_id));
+            return (max, offset);
+        }
         if let Some(index) = self.terminal_scrollbar_logical_index(session_id) {
             let (offset, max) =
                 index.scroll_metrics(offset, self.terminal_viewport_rows_for_session(session_id));
@@ -1445,6 +1486,14 @@ impl ZzClawTermApp {
         session_id: Option<&str>,
         offset: usize,
     ) -> usize {
+        if let Some(index) = session_id
+            .and_then(|id| self.terminal.view.views.get(id))
+            .and_then(|view| view.frame_snapshot.as_ref())
+            .and_then(|snapshot| snapshot.display_rows.as_ref())
+        {
+            return index
+                .physical_offset(offset, self.terminal_viewport_rows_for_session(session_id));
+        }
         self.terminal_scrollbar_logical_index(session_id)
             .map_or(offset, |index| {
                 index.physical_offset_for_logical_offset(

@@ -66,6 +66,7 @@ fn open_suggestions(
             )
             .expect("typing can start a suggestion search");
         app.terminal.assist.command_suggestions = Some(CommandSuggestionState {
+            refreshing: false,
             session_id: "s1".into(),
             draft: "echo".into(),
             items: vec![CommandSuggestionItem {

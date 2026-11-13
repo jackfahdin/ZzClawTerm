@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use gpui::{AppContext as _, Context, Window};
 use zzclawterm_core::activation::{
-    ActivationAction, ExternalConnectionRequest, ParsedActivationRequest, normalize_external_host,
+    ActivationAction, ActivationParseError, ExternalConnectionRequest, ParsedActivationRequest,
+    normalize_external_host,
 };
 use zzclawterm_core::models::ssh_runtime::SshRuntimeMode;
 use zzclawterm_core::{AiExecutionProfile, ConnectionType, SavedConnection};
@@ -13,7 +14,7 @@ use zzclawterm_transport::LocalSessionConfig;
 use zzclawterm_ui::ZzClawDialogWindowExt as _;
 
 use super::ZzClawTermApp;
-use super::session::SavedConnectionStartOptions;
+use super::session::{SavedConnectionStartOptions, SessionStartFocusTarget};
 use crate::models::SessionLaunchConfig;
 use crate::temporary_ssh_link::{TemporarySshLinkConfig, TemporaryTelnetLinkConfig};
 
@@ -32,6 +33,9 @@ impl ZzClawTermApp {
                 Ok(ActivationAction::Activate) => None,
                 Ok(ActivationAction::Connect(request)) => (!self.activation.enqueue(request))
                     .then(|| rust_i18n::t!("externalOpen.queueFull").to_string()),
+                Err(ActivationParseError::ConflictingWindowOptions) => {
+                    Some(rust_i18n::t!("externalOpen.conflictingWindowOptions").to_string())
+                }
                 Err(_) => Some(rust_i18n::t!("externalOpen.invalidUrl").to_string()),
             };
             if let Some(error) = error {
@@ -109,9 +113,14 @@ impl ZzClawTermApp {
                             .to_string(),
                             rust_i18n::t!("common.confirm").to_string(),
                             true,
-                            move |app, _, cx| {
+                            move |app, window, cx| {
                                 app.activation.dialog = None;
-                                app.start_external_saved(connection.as_ref().clone(), mode, cx);
+                                app.start_external_saved(
+                                    connection.as_ref().clone(),
+                                    mode,
+                                    window,
+                                    cx,
+                                );
                                 true
                             },
                             |app, _| {
@@ -140,8 +149,8 @@ impl ZzClawTermApp {
             _ => None,
         };
         match matches.as_slice() {
-            [connection] => self.prepare_external_saved(connection.clone(), mode, cx),
-            [] => self.start_external_temporary(request, cx),
+            [connection] => self.prepare_external_saved(connection.clone(), mode, window, cx),
+            [] => self.start_external_temporary(request, window, cx),
             _ => {
                 self.activation.dialog = Some(ExternalDialog::Choose {
                     request,
@@ -156,6 +165,7 @@ impl ZzClawTermApp {
         &mut self,
         connection: SavedConnection,
         mode: Option<SshRuntimeMode>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if mode != Some(SshRuntimeMode::Sftp)
@@ -169,7 +179,7 @@ impl ZzClawTermApp {
                 mode,
             });
         } else {
-            self.start_external_saved(connection, mode, cx);
+            self.start_external_saved(connection, mode, window, cx);
         }
     }
 
@@ -177,15 +187,19 @@ impl ZzClawTermApp {
         &mut self,
         connection: SavedConnection,
         mode: Option<SshRuntimeMode>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.activation.waiting_for_start = true;
-        self.continue_saved_connection_start(
+        // Same boundary a click takes: the newly started surface must own the
+        // keyboard, or a cold-launched window shows a terminal that ignores input.
+        self.start_saved_connection_with_options(
             connection,
             SavedConnectionStartOptions {
                 ssh_runtime_mode: mode,
                 ..Default::default()
             },
+            window,
             cx,
         );
     }
@@ -193,6 +207,7 @@ impl ZzClawTermApp {
     fn start_external_temporary(
         &mut self,
         request: ExternalConnectionRequest,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.activation.waiting_for_start = true;
@@ -240,6 +255,11 @@ impl ZzClawTermApp {
                 },
                 cx,
             ),
+        }
+        // Temporary external starts are all terminal surfaces. Steal focus only
+        // when a start actually registered, so a blocked launch keeps it.
+        if self.session.start_has_active_pending() {
+            self.focus_user_started_session_surface(SessionStartFocusTarget::Terminal, window, cx);
         }
     }
 

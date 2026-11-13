@@ -230,15 +230,38 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
-        let bytes = command.into_bytes();
+        let bytes = action_link_command_bytes(command);
         let Some(session_id) = self.session.active_id_owned() else {
             return;
         };
         if self.send_terminal_input_to_session(session_id, bytes.clone(), cx) {
-            self.note_shell_editing_input(&bytes, cx);
+            let candidate = self.prepare_command_navigation_input(&bytes);
+            self.note_shell_editing_input_with_navigation(&bytes, candidate, cx);
             self.shell
                 .set_status("action link command filled; press Enter to execute".to_string());
             cx.notify();
+        }
+    }
+}
+
+/// Action links only fill the editor; the user submits the command explicitly.
+fn action_link_command_bytes(command: String) -> Vec<u8> {
+    let mut bytes = command.into_bytes();
+    while matches!(bytes.last(), Some(b'\r' | b'\n')) {
+        bytes.pop();
+    }
+    bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::action_link_command_bytes;
+
+    #[test]
+    fn action_link_commands_fill_without_submitting() {
+        for command in ["ping 172.22.222.149", "ping 172.22.222.149\r\n"] {
+            let bytes = action_link_command_bytes(command.to_string());
+            assert_eq!(bytes, b"ping 172.22.222.149");
         }
     }
 }

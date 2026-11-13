@@ -16,9 +16,9 @@ use crate::models::{
 };
 use crate::theme::ThemePalette;
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement as _, Render, SharedString, Styled as _, Subscription, WeakEntity,
-    Window, canvas, div, prelude::*, px, rgb,
+    AnyElement, AppContext as _, Context, Entity, FocusHandle, Focusable, FontWeight,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString,
+    Styled as _, Subscription, WeakEntity, Window, canvas, div, prelude::*, px, rgb,
 };
 use rust_i18n::t;
 use std::collections::{HashMap, HashSet};
@@ -152,6 +152,8 @@ pub(in crate::features) struct SettingsPresentation {
     pub(in crate::features) snapshot_password_prompt_active: bool,
     pub(in crate::features) config_path_prompt_active: bool,
     pub(in crate::features) terminal_theme_is_dark: bool,
+    /// Read-only palette projection from the settings owner, matching terminal paint.
+    pub(in crate::features) terminal_ansi: [u32; 16],
 }
 
 impl SettingsPresentation {
@@ -186,6 +188,7 @@ impl SettingsPresentation {
             snapshot_password_prompt_active: false,
             config_path_prompt_active: false,
             terminal_theme_is_dark: true,
+            terminal_ansi: zzclawterm_ui::theme_palette("github-dark").terminal_ansi,
         }
     }
 }
@@ -305,6 +308,14 @@ impl SettingsPresentation {
     pub(in crate::features) fn terminal_theme_is_dark(&self) -> bool {
         self.terminal_theme_is_dark
     }
+
+    pub(in crate::features) fn builtin_keyword_swatch(&self, id: &str) -> String {
+        zzclawterm_core::keyword_highlight_presets::builtin_keyword_rule_swatch_ansi(
+            id,
+            self.terminal_ansi,
+            self.terminal_theme_is_dark,
+        )
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -316,6 +327,7 @@ pub(in crate::features) struct AiSettingsPresentation {
     pub(in crate::features) header_errors:
         Arc<HashMap<(String, String), zzclawterm_core::ai::provider_settings::CustomHeaderError>>,
     pub(in crate::features) agent_management: AgentManagementView,
+    pub(in crate::features) background_tasks: crate::features::mcp::tasks::BackgroundTasksView,
 }
 
 impl AiSettingsPresentation {
@@ -327,6 +339,7 @@ impl AiSettingsPresentation {
             credential_draft_key_ids: Arc::new(HashSet::new()),
             header_errors: Arc::new(HashMap::new()),
             agent_management: AgentManagementView::default(),
+            background_tasks: Default::default(),
         }
     }
 }
@@ -489,6 +502,7 @@ impl FontSelectOptionCache {
 }
 
 pub(in crate::features) struct SettingsPanel {
+    focus: FocusHandle,
     content_scroll_handles: HashMap<String, gpui::ScrollHandle>,
     pub(in crate::features::pages::settings) pane_width: f32,
     pub(in crate::features::pages::settings) content_width: f32,
@@ -587,6 +601,7 @@ impl SettingsPanel {
             pane_width: 0.,
             content_width: 0.,
             app,
+            focus: cx.focus_handle(),
             snapshot: None,
             settings: SettingsPresentation::empty(cx),
             ai: AiSettingsPresentation::empty(cx),
@@ -1108,6 +1123,12 @@ impl SettingsPanel {
     }
 }
 
+impl Focusable for SettingsPanel {
+    fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
 impl Render for SettingsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
@@ -1116,7 +1137,10 @@ impl Render for SettingsPanel {
         }
 
         let Some(snapshot) = self.snapshot.clone() else {
-            return div().size_full().into_any_element();
+            return div()
+                .track_focus(&self.focus)
+                .size_full()
+                .into_any_element();
         };
 
         let panel = cx.weak_entity();
@@ -1142,6 +1166,7 @@ impl Render for SettingsPanel {
         .inset_0();
 
         let root = div()
+            .track_focus(&self.focus)
             .relative()
             .min_w_0()
             .min_h_0()
@@ -1156,91 +1181,8 @@ impl Render for SettingsPanel {
         }
 
         let chrome = snapshot.chrome;
-        let palette = chrome.palette;
-        let settings_title = t!("settings.title");
-        let active_group = t!(snapshot.active_tab.group_i18n_key());
-        let active_label = t!(snapshot.active_tab.i18n_key());
-        let back_label = t!("common.close");
 
         root.bg(chrome.surface)
-            .child(
-                div()
-                    .h(px(36.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .px_3()
-                    .border_b_1()
-                    .border_color(rgb(palette.border))
-                    .bg(chrome.transparent_section_header)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .font_weight(FontWeight(700.))
-                                    .text_color(rgb(palette.text))
-                                    .child(settings_title),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(palette.text_dimmed))
-                                    .child("·"),
-                            )
-                            .when(
-                                snapshot.active_tab.expandable_group_id().is_some(),
-                                |this| {
-                                    this.child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(rgb(palette.text_muted))
-                                            .child(active_group),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(11.))
-                                            .text_color(rgb(palette.text_dimmed))
-                                            .child("/"),
-                                    )
-                                },
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .font_weight(FontWeight(600.))
-                                    .text_color(rgb(palette.text))
-                                    .child(active_label.clone()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from("settings-close"))
-                            .debug_selector(|| "settings-close".into())
-                            .h(px(26.))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .rounded_md()
-                            .text_size(px(11.))
-                            .text_color(rgb(palette.text_muted))
-                            .cursor_pointer()
-                            .hover(move |this| {
-                                this.bg(rgb(palette.surface_elevated))
-                                    .text_color(rgb(palette.text))
-                            })
-                            .child(back_label)
-                            .on_click(cx.listener(|panel, _, window, cx| {
-                                panel.with_app(cx, |app, cx| {
-                                    app.request_settings_tab_close(window, cx)
-                                });
-                            })),
-                    ),
-            )
             .child(self.settings_layout(&snapshot, cx))
             .child(self.settings_action_footer(&snapshot, cx))
             .into_any_element()
@@ -2060,6 +2002,7 @@ forward_app_action!(
     toggle_interaction_copy_success_notification,
     toggle_mouse_events_require_alt,
     toggle_keyword_highlights,
+    toggle_line_role_highlights,
     toggle_minimize_to_tray,
     toggle_multi_line_paste_dialog,
     toggle_osc52_clipboard_write,
@@ -2425,6 +2368,37 @@ mod tests {
     }
 
     #[test]
+    fn enabled_cloud_sync_switch_can_be_clicked_without_a_master_password() {
+        let dir = TestConfigDir::new("zzclawterm-settings-cloud-sync-recovery");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted(&mut cx, dir.path());
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                assert!(!app.settings.summary().has_master_password);
+                app.cloud_sync.toggle_enabled();
+                app.rebase_open_settings_draft(cx);
+                app.focus_settings_tab(SettingsTab::SyncBackup, cx);
+            });
+        });
+        draw(&app, vcx);
+        let control = vcx.debug_bounds("cloud-sync-enabled-control").unwrap();
+        vcx.simulate_click(control.center(), Modifiers::default());
+        draw(&app, vcx);
+        vcx.update(|_, cx| {
+            let app = app.read(cx);
+            assert!(!app.cloud_sync.settings().enabled);
+            assert!(app.settings_draft_dirty());
+            assert!(app.pending_settings_validation_error().is_none());
+        });
+        // Once disabled, the same rendered control must refuse re-enabling it.
+        let control = vcx.debug_bounds("cloud-sync-enabled-control").unwrap();
+        vcx.simulate_click(control.center(), Modifiers::default());
+        draw(&app, vcx);
+        vcx.update(|_, cx| assert!(!app.read(cx).cloud_sync.settings().enabled));
+    }
+
+    #[test]
     fn invalid_draft_footer_buttons_report_validation_and_keep_settings_open() {
         let dir = TestConfigDir::new("zzclawterm-settings-footer-invalid");
         let mut cx = TestAppContext::single();
@@ -2470,6 +2444,138 @@ mod tests {
                     .expect("read stored settings");
                 assert!(!saved.has_master_password);
             });
+        }
+    }
+
+    #[test]
+    fn keyword_highlights_keep_all_rules_visible_and_disable_dependent_controls() {
+        fn activate_key(vcx: &mut VisualTestContext, key: &str) {
+            let keystroke = vcx.update(|_, cx| {
+                gpui::Keystroke::parse_with_os(key, cx.platform_info().os).unwrap()
+            });
+            vcx.simulate_event(gpui::KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            });
+            vcx.simulate_event(gpui::KeyUpEvent { keystroke });
+        }
+
+        struct KeywordHighlightsHost {
+            panel: Entity<SettingsPanel>,
+        }
+
+        impl Render for KeywordHighlightsHost {
+            fn render(
+                &mut self,
+                _window: &mut gpui::Window,
+                cx: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                self.panel.update(cx, |panel, cx| {
+                    panel
+                        .keyword_highlights_settings_section(cx)
+                        .into_any_element()
+                })
+            }
+        }
+
+        for theme in ["github-dark", "github-light"] {
+            let dir = TestConfigDir::new("zzclawterm-settings-keyword-highlights");
+            let mut cx = TestAppContext::single();
+            let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let app = app(&mut cx, dir.path());
+            let panel = cx.update_entity(&app, |app, cx| {
+                app.open_page(NavItem::Settings, cx);
+                app.focus_settings_tab(SettingsTab::TerminalGeneral, cx);
+                app.update_appearance_theme(theme, cx);
+                let mut config = app.settings.keyword_config().clone();
+                config.enabled = true;
+                app.settings.replace_keyword_config(config);
+                app.request_settings_panel_refresh(cx);
+                app.flush_settings_panel_snapshots(cx);
+                app.settings_panel.clone()
+            });
+            let (_, vcx) = cx.add_window_view(|_, _| KeywordHighlightsHost { panel });
+            for width in [360., 720.] {
+                vcx.simulate_resize(gpui::size(px(width), px(1800.)));
+                draw(&app, vcx);
+                let left = vcx
+                    .debug_bounds("settings-keyword-builtin-row-builtin-command")
+                    .unwrap();
+                let right = vcx
+                    .debug_bounds("settings-keyword-builtin-row-builtin-path")
+                    .unwrap();
+                assert!(
+                    left.right() <= right.left(),
+                    "rule columns must not overlap"
+                );
+                assert!(right.right() <= px(width));
+                assert!(
+                    vcx.debug_bounds("settings-keyword-builtin-row-builtin-variable")
+                        .is_some()
+                );
+                assert!(
+                    vcx.debug_bounds("settings-keyword-builtin-row-builtin-perm-special")
+                        .is_some()
+                );
+            }
+
+            let control = "settings-line-role-highlights-control";
+            let output = vcx.debug_bounds(control).unwrap();
+            vcx.simulate_click(output.center(), Modifiers::default());
+            draw(&app, vcx);
+            vcx.update(|_, cx| assert!(!app.read(cx).settings.summary().ui_highlight_line_roles));
+
+            let specialized = vcx
+                .debug_bounds("settings-keyword-builtin-control-builtin-net-address")
+                .unwrap();
+            vcx.simulate_click(specialized.center(), Modifiers::default());
+            draw(&app, vcx);
+            vcx.update(|_, cx| {
+                assert!(
+                    app.read(cx)
+                        .settings
+                        .keyword_config()
+                        .builtin_rules
+                        .is_empty()
+                )
+            });
+
+            let variable = vcx
+                .debug_bounds("settings-keyword-builtin-control-builtin-variable")
+                .unwrap();
+            vcx.simulate_click(variable.center(), Modifiers::default());
+            draw(&app, vcx);
+            vcx.update(|_, cx| {
+                assert!(!app.read(cx).settings.keyword_config().builtin_rules["builtin-variable"])
+            });
+
+            // Keep focus on the dependent switch while the master is disabled,
+            // so keyboard activation exercises the disabled control itself.
+            let output = vcx.debug_bounds(control).unwrap();
+            vcx.simulate_click(output.center(), Modifiers::default());
+            draw(&app, vcx);
+            vcx.update(|_, cx| app.update(cx, |app, cx| app.toggle_keyword_highlights(cx)));
+            draw(&app, vcx);
+            activate_key(vcx, "space");
+            activate_key(vcx, "enter");
+            vcx.simulate_click(output.center(), Modifiers::default());
+            vcx.simulate_click(variable.center(), Modifiers::default());
+            draw(&app, vcx);
+            vcx.update(|_, cx| {
+                let app = app.read(cx);
+                assert!(app.settings.summary().ui_highlight_line_roles);
+                assert!(!app.settings.keyword_config().enabled);
+                assert!(!app.settings.keyword_config().builtin_rules["builtin-variable"]);
+            });
+
+            vcx.update(|_, cx| app.update(cx, |app, cx| app.toggle_keyword_highlights(cx)));
+            draw(&app, vcx);
+            vcx.simulate_click(output.center(), Modifiers::default());
+            draw(&app, vcx);
+            activate_key(vcx, "space");
+            draw(&app, vcx);
+            vcx.update(|_, cx| assert!(app.read(cx).settings.summary().ui_highlight_line_roles));
         }
     }
 
@@ -2793,6 +2899,60 @@ mod tests {
             before,
             "unrelated app notifications must not repaint the cached settings panel"
         );
+    }
+
+    #[test]
+    fn keyword_swatches_follow_independent_terminal_themes_in_the_cached_panel() {
+        let dir = TestConfigDir::new("zzclawterm-settings-keyword-palette");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let (app, vcx) = hosted(&mut cx, dir.path());
+        let panel = vcx.update(|_, cx| main_panel(&app, cx));
+        vcx.update(|_, cx| {
+            app.update(cx, |app, cx| {
+                app.settings.set_appearance_theme("github-dark".into());
+                let mut keywords = app.settings.keyword_config().clone();
+                keywords.enabled = true;
+                app.settings.replace_keyword_config(keywords);
+                app.focus_settings_tab(SettingsTab::TerminalGeneral, cx);
+            });
+        });
+
+        for theme in [Some("dracula"), Some("github-light"), None] {
+            vcx.update(|_, cx| {
+                app.update(cx, |app, cx| {
+                    app.settings.set_terminal_theme(theme.map(str::to_string));
+                    app.invalidate_paint_theme_caches();
+                    app.request_settings_panel_refresh(cx);
+                });
+            });
+            draw(&app, vcx);
+            vcx.update(|_, cx| {
+                let app = app.read(cx);
+                let panel = panel.read(cx);
+                let snapshot = panel.snapshot().expect("published settings snapshot");
+                assert_eq!(
+                    snapshot.chrome.palette.terminal_ansi,
+                    zzclawterm_ui::theme_palette("github-dark").terminal_ansi
+                );
+                assert_eq!(
+                    snapshot.settings.terminal_ansi,
+                    app.terminal_theme_palette().terminal_ansi
+                );
+                assert_eq!(
+                    snapshot.settings.terminal_theme_is_dark(),
+                    app.terminal_theme_is_dark()
+                );
+                for rule in app.resolved_keyword_highlight_rules().iter() {
+                    assert_eq!(
+                        snapshot.settings.builtin_keyword_swatch(&rule.id),
+                        rule.color,
+                        "{} under terminal theme {theme:?}",
+                        rule.id
+                    );
+                }
+            });
+        }
     }
 
     #[test]

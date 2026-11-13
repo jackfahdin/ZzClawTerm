@@ -313,6 +313,7 @@ fn prepare_zzclawterm_json_import(
         passwords,
         ssh_keys,
         connections,
+        notices: Vec::new(),
     })
 }
 

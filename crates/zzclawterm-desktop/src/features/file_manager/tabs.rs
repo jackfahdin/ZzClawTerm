@@ -82,7 +82,18 @@ impl ZzClawTermApp {
             display_path: path,
             raw_path_token: self.transfer.browser_view().raw_path_token.clone(),
         });
-        let endpoint = if self
+        let path = if self.android_file_initial_directory(session_id).is_some() {
+            path.filter(|path| zzclawterm_files::adb::raw_path(path).is_ok())
+                .or_else(|| {
+                    self.android_file_initial_directory(session_id)
+                        .map(RemoteFilePath::new)
+                })
+        } else {
+            path
+        };
+        let endpoint = if let Some(config) = self.android_config_for_session(session_id) {
+            PaneEndpoint::Adb(config.device_key)
+        } else if self
             .session
             .file_browser_backend_support_for_session(session_id)
             == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Local)
@@ -176,68 +187,6 @@ impl ZzClawTermApp {
         self.restore_sidebars_from_file_manager(cx);
         self.release_unreferenced_hidden_sessions(cx);
         self.persist_file_manager_settings(cx);
-    }
-
-    pub(in crate::features) fn open_file_manager_for_session(
-        &mut self,
-        session_id: &str,
-        pane: Option<PaneId>,
-        cx: &mut Context<Self>,
-    ) {
-        if self
-            .session
-            .file_browser_backend_support_for_session(session_id)
-            .is_none()
-        {
-            return;
-        }
-        let pane = pane.unwrap_or(PaneId::Right);
-        let endpoint = if self
-            .session
-            .file_browser_backend_support_for_session(session_id)
-            == Some(zzclawterm_files::file_browser::FileBrowserBackendKind::Local)
-        {
-            PaneEndpoint::Local
-        } else {
-            PaneEndpoint::Session(session_id.into())
-        };
-        let browser = self.transfer.browser_view();
-        let path = if self.session.active_id() == Some(session_id) && !browser.path.is_empty() {
-            Some(RemoteFilePath {
-                display_path: browser.path.clone(),
-                raw_path_token: browser.raw_path_token.clone(),
-            })
-        } else {
-            None
-        };
-        if let Some(id) = self.file_manager.active_id().map(str::to_string)
-            && let Some(workspace) = self.file_manager.workspace(&id)
-        {
-            workspace.update(cx, |workspace, _| {
-                let state = workspace.pane_mut(pane);
-                state.set_endpoint(endpoint);
-                if let Some(path) = path {
-                    state.path = path;
-                }
-                state.clear_selection();
-                workspace.set_active(pane);
-            });
-            self.activate_workspace_tab(&WorkspaceTabId::FileManager(id.clone()).layout_key(), cx);
-            self.refresh_file_manager_pane(id, pane, cx);
-        } else {
-            let mut seed = self.default_file_manager_seed();
-            match pane {
-                PaneId::Left => {
-                    seed.left = endpoint;
-                    seed.left_path = path;
-                }
-                PaneId::Right => {
-                    seed.right = endpoint;
-                    seed.right_path = path;
-                }
-            }
-            self.open_file_manager_tab(Some(seed), cx);
-        }
     }
 
     fn collapse_sidebars_for_file_manager(&mut self, cx: &mut Context<Self>) {
@@ -351,7 +300,7 @@ impl ZzClawTermApp {
         FileManagerPaneRestore {
             source: match &pane.endpoint {
                 PaneEndpoint::Local => FileManagerSourceRestore::Local,
-                PaneEndpoint::OfflineConnection(id) => {
+                PaneEndpoint::Adb(id) | PaneEndpoint::OfflineConnection(id) => {
                     FileManagerSourceRestore::Connection { id: id.clone() }
                 }
                 PaneEndpoint::Session(session_id) => {
@@ -394,7 +343,7 @@ impl ZzClawTermApp {
         let mut remember = |endpoint: &PaneEndpoint, path: &RemoteFilePath| {
             let source = match endpoint {
                 PaneEndpoint::Local => FileManagerSourceRestore::Local,
-                PaneEndpoint::OfflineConnection(id) => {
+                PaneEndpoint::Adb(id) | PaneEndpoint::OfflineConnection(id) => {
                     FileManagerSourceRestore::Connection { id: id.clone() }
                 }
                 PaneEndpoint::Session(session) => {
@@ -443,7 +392,7 @@ impl ZzClawTermApp {
         };
         let source = match &endpoint {
             PaneEndpoint::Local => Some(FileManagerSourceRestore::Local),
-            PaneEndpoint::OfflineConnection(id) => {
+            PaneEndpoint::Adb(id) | PaneEndpoint::OfflineConnection(id) => {
                 Some(FileManagerSourceRestore::Connection { id: id.clone() })
             }
             PaneEndpoint::Session(session) => self
@@ -516,7 +465,7 @@ impl ZzClawTermApp {
     ) {
         match endpoint {
             PaneEndpoint::Session(session) => self.reconnect_session(session, window, cx),
-            PaneEndpoint::OfflineConnection(connection) => {
+            PaneEndpoint::Adb(connection) | PaneEndpoint::OfflineConnection(connection) => {
                 if let Some(saved) = self.connection_state.connection_by_id(&connection).cloned() {
                     self.start_saved_connection(saved, window, cx);
                 } else {
@@ -558,6 +507,7 @@ impl ZzClawTermApp {
     pub(in crate::features) fn endpoint_label(&self, endpoint: &PaneEndpoint) -> String {
         match endpoint {
             PaneEndpoint::Local => t!("fileManager.local").to_string(),
+            PaneEndpoint::Adb(key) => self.android.device_name(key),
             PaneEndpoint::OfflineConnection(id) => self
                 .connection_state
                 .connection_by_id(id)

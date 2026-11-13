@@ -7,31 +7,26 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-httpdate.workspace = true
-http.workspace = true
-opendal.workspace = true
 tempfile.workspace = true
 anyhow.workspace = true
 base64.workspace = true
-bytemuck = "=1.25.2"
 dirs.workspace = true
-encoding_rs.workspace = true
 futures.workspace = true
-genai.workspace = true
-reqwest.workspace = true
-rustls.workspace = true
 gpui.workspace = true
-hayro.workspace = true
 hex.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 keyring.workspace = true
-md5.workspace = true
-minisign-verify = "=0.2.5"
-flate2 = "1"
-tar = "0.4"
+zzclawterm-ai-client.workspace = true
+zzclawterm-agent-client.workspace = true
+zzclawterm-cloud-storage.workspace = true
 zzclawterm-core.workspace = true
+zzclawterm-android.workspace = true
 zzclawterm-mcp-protocol.workspace = true
+zzclawterm-mcp-host.workspace = true
 zzclawterm-otp.workspace = true
+zzclawterm-preview.workspace = true
+zzclawterm-translation-client.workspace = true
+zzclawterm-plugin-host.workspace = true
 zzclawterm-remote-desktop.workspace = true
 zzclawterm-store.workspace = true
 zzclawterm-sync.workspace = true
@@ -42,12 +37,10 @@ zzclawterm-recording.workspace = true
 zzclawterm-remote-ops.workspace = true
 zzclawterm-files.workspace = true
 zzclawterm-ui.workspace = true
-zzclawterm-plugin-host.workspace = true
+zzclawterm-updater.workspace = true
 regex.workspace = true
 rust-i18n.workspace = true
 rand.workspace = true
-quick-xml.workspace = true
-rqrr = "0.9"
 serde.workspace = true
 serde_json.workspace = true
 semver.workspace = true
@@ -60,15 +53,16 @@ raw-window-handle = "0.6"
 tray-icon = { version = "=0.24.2", default-features = false, features = ["gtk"] }
 uuid.workspace = true
 url.workspace = true
-zed_reqwest.workspace = true
 zip.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+russh.workspace = true
+zzclawterm-recording = { workspace = true, features = ["test-support"] }
+zzclawterm-cloud-storage = { workspace = true, features = ["test-support"] }
 tracing-subscriber.workspace = true
-rcgen = "0.14"
-rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"] }
-gpui = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support", "profiler"] }
+gpui_platform = { workspace = true, features = ["test-support"] }
 zzclawterm-core = { workspace = true, features = ["test-support"] }
 redb.workspace = true
 
@@ -81,11 +75,10 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_DataExchange",
-    "Win32_System_Diagnostics_ToolHelp",
-    "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
     "Win32_System_Ole",
     "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Controls",

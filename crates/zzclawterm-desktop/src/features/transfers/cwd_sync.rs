@@ -73,6 +73,45 @@ impl ZzClawTermApp {
             .unwrap_or_default()
     }
 
+    pub(in crate::features) fn transfer_browser_cwd_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<String> {
+        let backend = self.session.file_browser_backend_for_session(session_id)?;
+        let style = self.local_shell_path_style_for_cwd(session_id);
+        let wsl_distro = self
+            .session
+            .manager()
+            .local_wsl_distro(session_id)
+            .or_else(|| {
+                self.session.metadata(session_id).and_then(|metadata| {
+                    match &metadata.launch_config {
+                        SessionLaunchConfig::Local(config) => wsl_distro_from_launcher(
+                            config.shell_path.as_deref()?,
+                            &config.shell_args,
+                        ),
+                        _ => None,
+                    }
+                })
+            });
+        let cwd = self.session.cwd(session_id)?;
+        let cwd = if backend == FileBrowserBackendKind::Local && style == LocalShellPathStyle::Wsl {
+            cwd
+        } else {
+            cwd.trim()
+        };
+        let cwd =
+            translate_local_browser_cwd(backend, style, wsl_distro.as_deref(), cwd.to_string())?;
+        (!cwd.is_empty()
+            && match backend {
+                FileBrowserBackendKind::Remote | FileBrowserBackendKind::Adb => {
+                    cwd.starts_with('/')
+                }
+                FileBrowserBackendKind::Local => std::path::Path::new(&cwd).is_absolute(),
+            })
+        .then_some(cwd)
+    }
+
     pub(in crate::features) fn apply_session_cwd(
         &mut self,
         session_id: &str,
@@ -126,9 +165,11 @@ impl ZzClawTermApp {
             if !self.sync_transfer_browser_to_cwd(TransferCwdSyncReason::Automatic, cx) {
                 self.load_transfer_browser_for_active_session_if_needed(cx);
             }
+            self.request_missing_expanded_tree_listings(cx);
         } else {
             if let Some(session_id) = self.session.active_id_owned() {
                 self.transfer.cancel_browser_auto_cwd_sync(&session_id);
+                self.transfer.cancel_tree_session_requests(&session_id);
             }
             self.transfer.clear_pending_cwd_sync();
             self.transfer.finish_browser_path_edit();
@@ -165,43 +206,9 @@ impl ZzClawTermApp {
             matches!(&metadata.launch_config, SessionLaunchConfig::Ssh(config)
                 if config.sftp.cwd_follow_mode == SftpCwdFollowMode::Off)
         });
-        let style = self.local_shell_path_style_for_cwd(&session_id);
-        let wsl_distro = self
-            .session
-            .manager()
-            .local_wsl_distro(&session_id)
-            .or_else(|| {
-                self.session.metadata(&session_id).and_then(|metadata| {
-                    match &metadata.launch_config {
-                        SessionLaunchConfig::Local(config) => wsl_distro_from_launcher(
-                            config.shell_path.as_deref()?,
-                            &config.shell_args,
-                        ),
-                        _ => None,
-                    }
-                })
-            });
         let cwd = self
-            .session
-            .cwd(&session_id)
-            .map(|cwd| {
-                if backend == FileBrowserBackendKind::Local && style == LocalShellPathStyle::Wsl {
-                    cwd
-                } else {
-                    cwd.trim()
-                }
-            })
-            .and_then(|cwd| {
-                translate_local_browser_cwd(backend, style, wsl_distro.as_deref(), cwd.to_string())
-            })
-            .filter(|cwd| {
-                !follow_disabled
-                    && !cwd.is_empty()
-                    && match backend {
-                        FileBrowserBackendKind::Remote => cwd.starts_with('/'),
-                        FileBrowserBackendKind::Local => std::path::Path::new(cwd).is_absolute(),
-                    }
-            });
+            .transfer_browser_cwd_for_session(&session_id)
+            .filter(|_| !follow_disabled);
         let Some(cwd) = cwd else {
             if reason == TransferCwdSyncReason::Explicit {
                 self.transfer.set_browser_status(if follow_disabled {
@@ -235,6 +242,8 @@ impl ZzClawTermApp {
             if reason == TransferCwdSyncReason::Explicit {
                 self.transfer.make_browser_cwd_sync_explicit(&session_id);
                 self.transfer.clear_pending_cwd_sync();
+                self.reveal_transfer_tree_current_path(cx);
+                self.defer_transfer_panel_snapshot_flush(cx);
             }
             return true;
         }
@@ -244,6 +253,13 @@ impl ZzClawTermApp {
         self.transfer.begin_browser_directory_load(cwd.clone());
         self.transfer.record_browser_history(cwd);
         self.start_transfer_directory_navigation_job(None, rollback, Some(reason), cx);
+        // Reveal cached ancestors immediately, without waiting for remote metadata.
+        if self
+            .transfer
+            .browser_navigation_job_running_for_session(&session_id)
+        {
+            self.reveal_transfer_tree_current_path(cx);
+        }
         self.defer_transfer_panel_snapshot_flush(cx);
         true
     }

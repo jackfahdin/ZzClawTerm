@@ -5,15 +5,18 @@ pub mod matching;
 pub mod parser;
 pub mod privacy;
 pub mod types;
+pub mod whole_history;
 
 use crate::completion::catalog::Catalog;
 use crate::completion::history::TokenHistoryIndex;
 use crate::completion::matching::TextMatcher;
 use crate::completion::parser::parse_context;
 use crate::completion::types::{
-    CandidateKind, CandidateSource, CompletionCandidate, CompletionScope, ShellDialect,
+    CandidateKind, CandidateSource, CompletionCandidate, CompletionFillPolicy, CompletionScope,
+    ShellDialect,
 };
 use crate::terminal::editing::supports_scalar_editing;
+use crate::terminal::input_tracker::MAX_TRACKED_INPUT_BYTES;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -40,6 +43,7 @@ impl CompletionEngine {
             history,
             quick,
             limit,
+            fill_policy,
         } = request;
         let Some(mut context) = parse_context(input, cursor, dialect, scope) else {
             return Vec::new();
@@ -153,7 +157,6 @@ impl CompletionEngine {
                 .then(a.sources.cmp(&b.sources))
                 .then(a.text.cmp(b.text))
         });
-        ranked.truncate(limit);
         ranked
             .into_iter()
             .map(|item| {
@@ -182,13 +185,28 @@ impl CompletionEngine {
                     use_count: item.count,
                     last_used_at_ms: item.time,
                     score: item.score,
-                    indices: self.matcher.indices(item.text),
+                    indices: Vec::new(),
                     fillable: false,
                     context_priority: item.priority,
                 };
                 candidate.fillable = candidate.target_line(input).is_some_and(|target| {
-                    target.starts_with(input) && supports_scalar_editing(&target)
+                    !target.is_empty()
+                        && target.len() <= MAX_TRACKED_INPUT_BYTES
+                        && supports_scalar_editing(&target)
                 });
+                candidate
+            })
+            .filter(|candidate| {
+                fill_policy.is_none_or(|policy| {
+                    candidate.fillable
+                        && candidate
+                            .target_line(input)
+                            .is_some_and(|target| policy.allows(input, &target))
+                })
+            })
+            .take(limit)
+            .map(|mut candidate| {
+                candidate.indices = self.matcher.indices(&candidate.display);
                 candidate
             })
             .collect()
@@ -203,6 +221,8 @@ pub struct TokenCompletionRequest<'a> {
     pub history: &'a TokenHistoryIndex,
     pub quick: &'a TokenHistoryIndex,
     pub limit: usize,
+    /// None preserves unrestricted catalog search.
+    pub fill_policy: Option<CompletionFillPolicy>,
 }
 struct RankedCandidate<'a> {
     text: &'a str,
@@ -219,8 +239,9 @@ struct RankedCandidate<'a> {
 #[cfg(test)]
 mod tests {
     use crate::completion::history::TokenHistoryIndex;
+    use crate::completion::matching::TextMatcher;
     use crate::completion::types::{
-        CandidateSource, CompletionScope, ScopedHistoryRecord, ShellDialect,
+        CandidateSource, CompletionFillPolicy, CompletionScope, ScopedHistoryRecord, ShellDialect,
     };
     use crate::completion::{CompletionEngine, TokenCompletionRequest};
     use std::collections::BTreeMap;
@@ -233,6 +254,84 @@ mod tests {
             use_count: 3,
             last_used_at_ms: 1,
             extensions: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn token_fill_policy_checks_the_whole_target_before_limiting_candidates() {
+        let scope = CompletionScope::new(&["token-fill-policy"]);
+        let mut history = TokenHistoryIndex::default();
+        // Both arguments match `zz`, but the frequent fuzzy match requires replacement.
+        let mut fuzzy = record(scope.clone(), "fixture zaz");
+        fuzzy.use_count = 1000;
+        history.upsert(fuzzy);
+        history.upsert(record(scope.clone(), "fixture zz-tail"));
+        let mut engine = CompletionEngine {
+            catalog: None,
+            matcher: TextMatcher::default(),
+        };
+        for (policy, expected) in [
+            (CompletionFillPolicy::AppendOnly, "zz-tail"),
+            (CompletionFillPolicy::ReplaceAllowed, "zz-tail"),
+        ] {
+            let results = engine.complete(TokenCompletionRequest {
+                input: "fixture zz",
+                cursor: 10,
+                dialect: ShellDialect::Bash,
+                scope: scope.clone(),
+                history: &history,
+                quick: &TokenHistoryIndex::default(),
+                limit: 1,
+                fill_policy: Some(policy),
+            });
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].insert_text, expected);
+        }
+        let results = engine.complete(TokenCompletionRequest {
+            input: "fixture zz",
+            cursor: 10,
+            dialect: ShellDialect::Bash,
+            scope,
+            history: &history,
+            quick: &TokenHistoryIndex::default(),
+            limit: 12,
+            fill_policy: Some(CompletionFillPolicy::ReplaceAllowed),
+        });
+        assert!(results.iter().any(|item| item.insert_text == "zaz"));
+    }
+
+    #[test]
+    fn oversized_token_targets_do_not_displace_a_fillable_fuzzy_candidate() {
+        let scope = CompletionScope::new(&["token-limit-policy"]);
+        let mut history = TokenHistoryIndex::default();
+        for n in 0..20 {
+            history.upsert(record(scope.clone(), &format!("fixture zz-long-{n}")));
+        }
+        history.upsert(record(scope.clone(), "fixture zaz"));
+        // A long assignment leaves room for a short replacement but not longer prefix matches.
+        let input = format!("A={} fixture zz", "x".repeat(4078));
+        let mut engine = CompletionEngine {
+            catalog: None,
+            matcher: TextMatcher::default(),
+        };
+        for policy in [None, Some(CompletionFillPolicy::ReplaceAllowed)] {
+            let results = engine.complete(TokenCompletionRequest {
+                input: &input,
+                cursor: input.len(),
+                dialect: ShellDialect::Bash,
+                scope: scope.clone(),
+                history: &history,
+                quick: &TokenHistoryIndex::default(),
+                limit: 1,
+                fill_policy: policy,
+            });
+            assert_eq!(results.len(), 1);
+            if policy.is_some() {
+                assert!(results[0].fillable);
+                assert_eq!(results[0].insert_text, "zaz");
+            } else {
+                assert!(!results[0].fillable);
+            }
         }
     }
     #[test]
@@ -257,6 +356,7 @@ mod tests {
             ("docker run ng", "nginx"),
         ] {
             let result = engine.complete(TokenCompletionRequest {
+                fill_policy: None,
                 input: line,
                 cursor: line.len(),
                 dialect: ShellDialect::Bash,
@@ -273,6 +373,7 @@ mod tests {
             assert!(item.target_line(line).unwrap().starts_with(line));
         }
         let result = engine.complete(TokenCompletionRequest {
+            fill_policy: None,
             input: "docker r",
             cursor: 8,
             dialect: ShellDialect::Bash,
@@ -293,6 +394,7 @@ mod tests {
         assert!(
             engine
                 .complete(TokenCompletionRequest {
+                    fill_policy: None,
                     input: "internal-t",
                     cursor: 10,
                     dialect: ShellDialect::Bash,
@@ -307,6 +409,7 @@ mod tests {
         assert!(
             engine
                 .complete(TokenCompletionRequest {
+                    fill_policy: None,
                     input: "internal-t",
                     cursor: 10,
                     dialect: ShellDialect::Bash,
@@ -319,6 +422,26 @@ mod tests {
         );
     }
     #[test]
+    fn fuzzy_tokens_are_fillable_text_for_a_confirmed_shell_replacement() {
+        let mut engine = CompletionEngine::embedded();
+        let candidates = engine.complete(TokenCompletionRequest {
+            fill_policy: None,
+            input: "dkr",
+            cursor: 3,
+            dialect: ShellDialect::Bash,
+            scope: CompletionScope::legacy(),
+            history: &TokenHistoryIndex::default(),
+            quick: &TokenHistoryIndex::default(),
+            limit: 12,
+        });
+        let candidate = candidates
+            .iter()
+            .find(|c| c.insert_text == "docker")
+            .unwrap();
+        assert!(candidate.fillable);
+        assert_eq!(candidate.target_line("dkr").as_deref(), Some("docker"));
+    }
+    #[test]
     fn native_windows_names_keep_typed_case() {
         let mut engine = CompletionEngine::embedded();
         let scope = CompletionScope::new(&["windows"]);
@@ -327,6 +450,7 @@ mod tests {
         r.dialect = ShellDialect::PowerShell;
         history.upsert(r);
         let items = engine.complete(TokenCompletionRequest {
+            fill_policy: None,
             input: "get-pr",
             cursor: 6,
             dialect: ShellDialect::PowerShell,
@@ -395,6 +519,7 @@ mod tests {
             fixture.dialect = dialect;
             history.upsert(fixture);
             let candidates = engine.complete(TokenCompletionRequest {
+                fill_policy: None,
                 input,
                 cursor: input.len(),
                 dialect,
@@ -422,6 +547,7 @@ mod tests {
         quick.upsert(record(scope.clone(), "internal-tool deploy"));
         let input = "internal-tool de";
         let candidates = engine.complete(TokenCompletionRequest {
+            fill_policy: None,
             input,
             cursor: input.len(),
             dialect: ShellDialect::Bash,
@@ -456,6 +582,7 @@ mod tests {
             fixture.dialect = dialect;
             history.upsert(fixture);
             let candidates = engine.complete(TokenCompletionRequest {
+                fill_policy: None,
                 input,
                 cursor: input.len(),
                 dialect,
@@ -483,6 +610,7 @@ mod tests {
         quick.upsert(record(scope.clone(), "internal-tool run"));
         let input = "internal-t";
         let candidates = engine.complete(TokenCompletionRequest {
+            fill_policy: None,
             input,
             cursor: input.len(),
             dialect: ShellDialect::Bash,

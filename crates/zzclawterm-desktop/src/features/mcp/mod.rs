@@ -1,5 +1,7 @@
+mod approval_dialog;
 mod discovery;
 pub(in crate::features) mod server;
+pub(in crate::features) mod tasks;
 
 use self::server::{McpHostEvent, McpHostRuntime, rpc_failure};
 use super::ZzClawTermApp;
@@ -30,6 +32,8 @@ pub(in crate::features) struct McpHostFeatureState {
     ephemeral_generations:
         std::sync::Arc<std::sync::Mutex<HashMap<String, TerminalExecutionPolicy>>>,
     pub(in crate::features) capabilities: CapabilityRuntimeState,
+    approval_dialog: approval_dialog::McpApprovalPresentation,
+    pub(in crate::features) background_tasks: tasks::BackgroundTaskPresentation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,7 +105,7 @@ impl McpHostFeatureState {
                 settings.permission_mode.clone(),
                 scope,
                 sender.clone(),
-                Some(discovery::DiscoveryStore::new(&directory)),
+                Some(discovery::discovery_store(&directory)),
             )
         });
         match runtime {
@@ -117,6 +121,8 @@ impl McpHostFeatureState {
                     generation,
                     ephemeral_generations: Default::default(),
                     capabilities: CapabilityRuntimeState::default(),
+                    approval_dialog: Default::default(),
+                    background_tasks: Default::default(),
                 }
             }
             Err(error) => {
@@ -141,6 +147,8 @@ impl McpHostFeatureState {
             generation: None,
             ephemeral_generations: Default::default(),
             capabilities: CapabilityRuntimeState::default(),
+            approval_dialog: Default::default(),
+            background_tasks: Default::default(),
         }
     }
 
@@ -189,6 +197,10 @@ impl McpHostFeatureState {
         self.requests.take()
     }
 
+    pub(in crate::features) fn is_external_generation(&self, generation: &str) -> bool {
+        self.runtime.is_some() && self.generation.as_deref() == Some(generation)
+    }
+
     pub(in crate::features) fn generation_matches(&self, generation: &str) -> bool {
         (self.generation.as_deref() == Some(generation) && self.runtime.is_some())
             || self
@@ -219,6 +231,9 @@ impl McpHostFeatureState {
     }
 
     fn reconfigure(&mut self, settings: &ExternalMcpSettings) -> Result<(), String> {
+        self.capabilities
+            .terminal_executions
+            .request_background_shutdown();
         self.helper_status = mcp_helper_status();
         self.runtime.take();
         if let Some(generation) = self.generation.take() {
@@ -238,7 +253,7 @@ impl McpHostFeatureState {
             settings.permission_mode.clone(),
             scope,
             self.request_sender.clone(),
-            Some(discovery::DiscoveryStore::new(&directory)),
+            Some(discovery::discovery_store(&directory)),
         )
         .map_err(|error| error.to_string())?;
         self.generation = Some(runtime.endpoint().generation.clone());
@@ -256,7 +271,7 @@ impl ZzClawTermApp {
                 if this
                     .update(cx, |this, cx| match event {
                         McpHostEvent::Execute(request) => {
-                            this.dispatch_capability_request(*request, cx)
+                            this.dispatch_capability_request((*request).into(), cx)
                         }
                         McpHostEvent::Cancelled { request_id } => {
                             this.handle_pending_mcp_cancel(&request_id, cx)
@@ -347,6 +362,7 @@ impl ZzClawTermApp {
     }
 
     fn handle_mcp_disconnect(&mut self, connection_id: &str, cx: &mut Context<Self>) {
+        self.mcp.capabilities.expire_mcp_owner(connection_id);
         self.mcp
             .capabilities
             .terminal_executions
@@ -376,22 +392,23 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn complete_mcp_session_open_success(
         &mut self,
-        connection_id: &str,
+        operation_id: &str,
         session_id: String,
     ) {
+        let sessions = self.mcp_live_sessions();
         self.mcp
             .capabilities
-            .complete_session_open_success(connection_id, session_id);
+            .complete_session_open_success(operation_id, session_id, &sessions);
     }
 
     pub(in crate::features) fn complete_mcp_session_open_failure(
         &mut self,
-        connection_id: &str,
+        operation_id: &str,
         error: &str,
     ) {
         self.mcp
             .capabilities
-            .complete_session_open_failure(connection_id, error);
+            .complete_session_open_failure(operation_id, error);
     }
 
     pub(in crate::features) fn create_ephemeral_mcp_credential(
@@ -411,6 +428,7 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn reconfigure_mcp_host(&mut self) -> Result<(), String> {
+        self.session.ssh_connection_pool().invalidate_background();
         self.mcp
             .reconfigure(&self.ai.settings_config().external_mcp)
     }
@@ -427,8 +445,9 @@ mod tests {
     };
     use zzclawterm_mcp_protocol::{RpcError, tool};
 
-    use super::server::{McpHostRequest, rpc_failure};
+    use super::server::rpc_failure;
     use super::{McpApprovalDecision, McpApprovalOutcome, McpApprovalRequest, McpHostFeatureState};
+    use crate::features::capability_runtime::CapabilityRequest as McpHostRequest;
     use crate::features::capability_runtime::PendingCapabilityApproval as PendingMcpApproval;
     use crate::features::capability_runtime::{
         connection_group_path, connection_type_name, mcp_grant_key,
@@ -476,6 +495,66 @@ mod tests {
         drop(codex);
         assert!(!state.generation_matches(&codex_generation));
         assert_eq!(state.terminal_policy(&claude_generation), Some(background));
+    }
+
+    #[test]
+    fn agent_adapter_errors_revoke_their_ephemeral_generation() {
+        use crate::features::ai::{claude_code_runtime, codex_runtime};
+        use crate::features::capability_runtime::terminal_execution::TerminalExecutionPolicy;
+        let state = McpHostFeatureState::disabled_for_test();
+        let request: zzclawterm_core::AiChatRequest = serde_json::from_value(serde_json::json!({
+            "action":"generate_command", "mode":"agent", "userInput":"fixture", "sessionId":"chat"
+        }))
+        .unwrap();
+        for codex in [true, false] {
+            let credential = state
+                .create_ephemeral(
+                    vec!["terminal".into()],
+                    Some("terminal".into()),
+                    AiPermissionMode::Observer,
+                    TerminalExecutionPolicy {
+                        background: false,
+                        max_lines: 5,
+                    },
+                )
+                .unwrap();
+            let generation = credential
+                .environment()
+                .remove("ZZCLAWTERM_MCP_GENERATION")
+                .unwrap();
+            assert!(state.generation_matches(&generation));
+            let mut settings = zzclawterm_core::AiSettings::default();
+            let missing =
+                std::env::temp_dir().join(format!("missing-agent-{}", zzclawterm_core::uuid()));
+            settings.codex.enabled = true;
+            settings.codex.executable_path = Some(missing.to_string_lossy().into_owned());
+            settings.claude_code.enabled = true;
+            settings.claude_code.executable_path = Some(missing.to_string_lossy().into_owned());
+            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            if codex {
+                assert!(
+                    codex_runtime::run_codex_app_server(
+                        &settings, &request, None, None, &cancel, 1, "chat", credential
+                    )
+                    .is_err()
+                );
+            } else {
+                assert!(
+                    claude_code_runtime::run_claude_code(
+                        &settings,
+                        &request,
+                        None,
+                        &cancel,
+                        1,
+                        "chat",
+                        credential,
+                        |_| Ok(())
+                    )
+                    .is_err()
+                );
+            }
+            assert!(!state.generation_matches(&generation));
+        }
     }
 
     #[test]
@@ -541,6 +620,8 @@ mod tests {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         (
             McpHostRequest {
+                extended_results: true,
+                resolved_session_id: None,
                 caller: crate::features::capability_runtime::CapabilityCaller::Mcp,
                 connection_id: connection_id.to_string(),
                 request_id: request_id.to_string(),

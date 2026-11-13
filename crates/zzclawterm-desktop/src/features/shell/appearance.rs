@@ -8,7 +8,8 @@ use gpui::{
     SharedString, font, px,
 };
 use zzclawterm_core::{
-    AppSettingsSummary, ResolvedKeywordHighlightRule, merge_keyword_highlight_rules_for_paint,
+    AppSettingsSummary, ResolvedKeywordHighlightRule,
+    merge_keyword_highlight_rules_for_paint_with_ansi,
 };
 
 use crate::features::terminal::{ResolvedAppearanceFont, measure_terminal_font};
@@ -46,6 +47,10 @@ impl ZzClawTermApp {
             settings.diagnostics_retention_days,
         );
         self.settings.replace_summary(settings);
+        // Settings reload and draft cancellation must update existing surfaces,
+        // which cache this flag independently of their compiled rule list.
+        self.terminal
+            .apply_line_role_highlighting(self.settings.summary().ui_highlight_line_roles, cx);
         if users_changed {
             self.remote_stats_users_setting_changed(cx);
         }
@@ -384,10 +389,11 @@ impl ZzClawTermApp {
         if !self.settings.keyword_config().enabled {
             return Arc::new(Vec::new());
         }
-        Arc::new(merge_keyword_highlight_rules_for_paint(
+        Arc::new(merge_keyword_highlight_rules_for_paint_with_ansi(
             &self.settings.keyword_config().rules,
             &self.settings.keyword_config().builtin_rules,
             self.terminal_theme_is_dark(),
+            self.terminal_theme_palette().terminal_ansi,
         ))
     }
 
@@ -403,10 +409,11 @@ impl ZzClawTermApp {
         let rules = if !self.settings.keyword_config().enabled {
             Arc::new(Vec::new())
         } else {
-            Arc::new(merge_keyword_highlight_rules_for_paint(
+            Arc::new(merge_keyword_highlight_rules_for_paint_with_ansi(
                 &self.settings.keyword_config().rules,
                 &self.settings.keyword_config().builtin_rules,
                 self.terminal_theme_is_dark(),
+                self.terminal_theme_palette().terminal_ansi,
             ))
         };
         self.terminal.cache_keyword_highlight_rules(rules);
@@ -862,21 +869,17 @@ impl ZzClawTermApp {
 }
 
 fn load_wallpaper_image(path: &str) -> Result<(Arc<RenderImage>, u32, u32), ()> {
-    let reader = image::ImageReader::open(path)
-        .map_err(|_| ())?
-        .with_guessed_format()
+    let reader = image::ImageReader::open(path).map_err(|_| ())?;
+    let format = reader.format();
+    let raster = zzclawterm_preview::wallpaper::decode_wallpaper(reader.into_inner(), format)
         .map_err(|_| ())?;
-    let mut rgba = reader.decode().map_err(|_| ())?.into_rgba8();
-    let (width, height) = rgba.dimensions();
-    if width == 0 || height == 0 {
-        return Err(());
-    }
-    // GPUI's render atlas expects BGRA pixels.
-    for pixel in rgba.as_chunks_mut::<4>().0 {
-        pixel.swap(0, 2);
-    }
-    let image = Arc::new(RenderImage::new(vec![image::Frame::new(rgba)]));
-    Ok((image, width, height))
+    let image = crate::image_presentation::render_image_from_bgra(
+        raster.width,
+        raster.height,
+        &raster.pixels,
+    )
+    .map_err(|_| ())?;
+    Ok((image, raster.width, raster.height))
 }
 
 pub(in crate::features) fn appearance_font_stack(raw: &str, fallback: &str) -> Vec<String> {

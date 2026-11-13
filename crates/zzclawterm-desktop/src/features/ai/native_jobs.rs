@@ -5,9 +5,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zzclawterm_core::ai::completion::AiProviderErrorKind;
 use zzclawterm_core::ai::harness::AgentToolRegistry;
-use zzclawterm_core::ai::{
-    AiChatCompletion, AiChatRequest, AiChatStreamDelta, AiMessage, AiMode, AiModelError,
-};
+use zzclawterm_core::ai::{AiChatCompletion, AiChatRequest, AiChatStreamDelta, AiMessage, AiMode};
 
 use crate::app_shell::DesktopControllerGlobal;
 use crate::blocking_jobs::BlockingJobScheduler;
@@ -208,7 +206,13 @@ async fn completion_with_repair(
     // Protocol fallback and response correction share one extra model POST.
     // Only model responses are retried; no tool has been dispatched here.
     for attempt in 1..=2 {
-        let completion = match stream_attempt(session, request, history, tx, cancel).await {
+        let result = stream_attempt(session, request, history, tx, cancel).await;
+        if let Err(error) = &result
+            && error.kind != AiProviderErrorKind::Cancelled
+        {
+            warn_native_request_failure(error, request, attempt);
+        }
+        let completion = match result {
             Err(error)
                 if attempt == 1
                     && error.kind == AiProviderErrorKind::UnsupportedCapability
@@ -220,7 +224,7 @@ async fn completion_with_repair(
                         .options
                         .agent_context
                         .as_ref()
-                        .is_none_or(|context| context.calls.is_empty()) =>
+                        .is_none_or(|context| context.turns.is_empty()) =>
             {
                 request.options.agent_json_protocol = true;
                 send_event(tx, NativeJobEvent::ProtocolFallback, cancel).await?;
@@ -233,10 +237,12 @@ async fn completion_with_repair(
         }
         if request.mode == AiMode::Agent
             && request.options.agent_context.is_some()
-            && let Err(error) = AgentToolRegistry::parse(&completion.tool_calls, &completion.text)
+            && let Err(error) = AgentToolRegistry::decision(&completion)
         {
             warn_agent_protocol_failure(&completion, attempt, &error);
-            if attempt == 1 && error == AiModelError::InvalidAgentJsonFallback {
+            if attempt == 1
+                && error == zzclawterm_core::ai::harness::AgentResponseError::InvalidJsonAction
+            {
                 request.options.agent_protocol_repair = true;
                 send_event(tx, NativeJobEvent::ProtocolRepair, cancel).await?;
                 continue;
@@ -248,14 +254,56 @@ async fn completion_with_repair(
     unreachable!("the second attempt always returns a result")
 }
 
+fn warn_native_request_failure(
+    error: &zzclawterm_core::ai::completion::AiProviderError,
+    request: &AiChatRequest,
+    attempt: usize,
+) {
+    // Deliberate allowlist: do not log the SDK error, request, model name,
+    // provider URL, raw frames, arguments, or any conversation content.
+    let turns = request
+        .options
+        .agent_context
+        .as_ref()
+        .map(|context| &context.turns);
+    tracing::warn!(
+        kind = ?error.kind,
+        classification = ?error.diagnostic_code,
+        stage = ?error.failure_stage,
+        protocol = ?error.protocol,
+        responses = error.responses,
+        status = ?error.status,
+        parameter = ?error.parameter,
+        request_id = error.request_id.as_deref(),
+        attempt,
+        json_protocol = request.options.agent_json_protocol,
+        completed_turns = turns.map_or(0, Vec::len),
+        completed_calls = turns.map_or(0, |turns| turns.iter().map(|turn| turn.results.len()).sum::<usize>()),
+        generated_content = error.generated_content,
+        stream = ?error.stream,
+        "AI native request failed"
+    );
+}
+
 fn warn_agent_protocol_failure(
     completion: &AiChatCompletion,
     attempt: usize,
-    error: &AiModelError,
+    error: &zzclawterm_core::ai::harness::AgentResponseError,
 ) {
     let classification = match error {
-        AiModelError::InvalidAgentJsonFallback => "missing_tool_call_invalid_json",
-        _ => "invalid_agent_tool_call",
+        zzclawterm_core::ai::harness::AgentResponseError::InvalidJsonAction => {
+            "malformed_json_action"
+        }
+        zzclawterm_core::ai::harness::AgentResponseError::InvalidStructure => {
+            "invalid_call_structure"
+        }
+        zzclawterm_core::ai::harness::AgentResponseError::InvalidArguments => {
+            "invalid_tool_arguments"
+        }
+        zzclawterm_core::ai::harness::AgentResponseError::Empty => "empty_answer",
+        zzclawterm_core::ai::harness::AgentResponseError::ReasoningOnly => "reasoning_only",
+        zzclawterm_core::ai::harness::AgentResponseError::Refused => "refused",
+        zzclawterm_core::ai::harness::AgentResponseError::Truncated => "truncated",
     };
     tracing::warn!(
         classification,
@@ -263,6 +311,7 @@ fn warn_agent_protocol_failure(
         protocol = ?completion.metadata.assistant_turn.protocol,
         responses = completion.metadata.assistant_turn.responses,
         tool_count = completion.tool_calls.len(),
+        finish_reason = completion.metadata.finish_reason.as_deref().filter(|value| matches!(*value, "stop" | "end_turn" | "tool_calls" | "tool_use" | "length" | "max_tokens" | "refusal")).unwrap_or("other"),
         text_empty = completion.text.is_empty(),
         text_chars = completion.text.chars().count(),
         "AI Agent response failed protocol validation"

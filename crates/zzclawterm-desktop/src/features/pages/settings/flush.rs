@@ -96,6 +96,7 @@ impl ZzClawTermApp {
                 snapshot_password_prompt_active: self.settings.snapshot_password_prompt_active(),
                 config_path_prompt_active: self.settings.config_path_prompt_active(),
                 terminal_theme_is_dark: self.terminal_theme_is_dark(),
+                terminal_ansi: self.terminal_theme_palette().terminal_ansi,
             },
             ai: AiSettingsPresentation {
                 providers: self.ai.provider_view().clone(),
@@ -113,6 +114,7 @@ impl ZzClawTermApp {
                         .collect(),
                 ),
                 agent_management: self.ai.agent_management_view().clone(),
+                background_tasks: self.background_tasks_view(),
             },
             cloud_sync: CloudSyncPresentation {
                 v4_preview: self.cloud_sync.v4_summary(),

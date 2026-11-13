@@ -2,9 +2,13 @@ name: Docs
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches: [master]
+  schedule:
+    - cron: '0 19 * * 6'
+  merge_group:
+    types: [checks_requested]
   push:
+    branches: [master]
+  pull_request:
     branches: [master]
 
 # No paths filter, for the same reason as rust.yml: a filtered-out workflow never
@@ -14,11 +18,38 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 jobs:
+  orchestrate:
+    name: Select CI jobs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      run_docs: ${{ steps.select.outputs.run_docs }}
+    steps:
+      - name: Checkout tested revision and comparison history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test selection rules and workflow gates
+        run: python -m unittest scripts.tests.test_select_rust_jobs -v
+
+      - name: Select jobs for this event
+        id: select
+        run: python scripts/ci/select_rust_jobs.py
+
   docs:
+    needs: [orchestrate]
+    if: needs.orchestrate.outputs.run_docs == 'true'
     # This job name is quoted in docs-site/docs/development/setup.md and its English
     # mirror. Keep the two in step if it ever changes.
     name: Documentation site
@@ -26,12 +57,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
       - name: Install Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
@@ -42,13 +73,16 @@ jobs:
       # reached end of life in April 2026. pnpm is pinned exactly rather than to
       # the 11 range so a future 11.x cannot raise the Node floor again without
       # this file changing.
-      - name: Install pnpm and Node.js
-        uses: pnpm/setup@v3
+      - name: Install Node.js
+        uses: actions/setup-node@v4
         with:
-          working-directory: docs-site
+          node-version: '22'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
           version: 11.15.1
-          runtime: node@22
-          install: false
+          run_install: false
 
       - name: Install documentation dependencies
         run: pnpm --dir docs-site install --frozen-lockfile
@@ -59,10 +93,18 @@ jobs:
   gate:
     name: Docs gate
     runs-on: ubuntu-24.04
-    needs: [docs]
+    needs: [orchestrate, docs]
     if: always()
     timeout-minutes: 5
     steps:
+      - name: Summarize dependency results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          {
+            printf '| Job | Result |\n| --- | --- |\n'
+            jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' <<< "$NEEDS_JSON"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Check dependency results
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1

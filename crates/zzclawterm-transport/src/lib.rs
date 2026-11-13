@@ -35,6 +35,7 @@ pub use transport_io::TmuxPaneTransport;
 use transport_io::TransportWriterCommand;
 #[cfg(test)]
 use transport_io::spawn_reader_thread;
+mod proxy_command;
 mod ssh_connection;
 #[cfg(test)]
 use ssh_connection::expand_proxy_command;
@@ -57,10 +58,12 @@ use session::default_local_shell_path;
 mod ssh_worker;
 #[cfg(test)]
 use ssh_worker::drain_deferred_ssh_open_commands;
+pub mod adb_shell;
 pub mod connection_attempt;
 #[cfg(windows)]
 pub mod local_conpty;
 pub mod network_route;
+pub mod protocol_transfer;
 pub mod ssh_channel;
 pub mod ssh_services;
 #[cfg(test)]
@@ -68,6 +71,7 @@ use russh::{cipher, kex, mac};
 
 mod directory_command;
 mod environment;
+mod http_proxy;
 pub mod local_shell;
 mod local_shell_integration;
 mod reconnect_cwd;
@@ -87,6 +91,8 @@ mod telnet_codec;
 mod telnet_input;
 mod telnet_prompts;
 pub mod tmux;
+#[cfg(all(test, windows))]
+mod windows_command_input_tests;
 mod writer_mailbox;
 #[cfg(test)]
 use ssh_algorithms::defaults_from_preferred;
@@ -110,7 +116,7 @@ pub use x11_server::{
     managed_x11_cookie_for_display, managed_x11_status, resolve_x_server_path,
     shutdown_managed_x11_server, stop_managed_x11_server,
 };
-mod trzsz;
+pub mod trzsz;
 pub mod xymodem;
 pub mod zmodem;
 
@@ -131,8 +137,9 @@ pub use session_config::{
     SshAlgorithmPreferences, SshCredentialPrompt, SshCredentialPromptKind,
     SshCredentialPromptReason, SshCredentialProvider, SshHostKey, SshHostKeyDecision,
     SshHostKeyVerifier, SshKeyAuthConfig, SshKeyboardInteractivePrompt,
-    SshKeyboardInteractiveRequest, SshOtpProvider, SshProxyConfig, SshSessionConfig,
-    SshSessionProfile, TelnetAutoLoginConfig, TelnetEnterMode, TelnetSessionConfig,
+    SshKeyboardInteractiveRequest, SshOtpProvider, SshProxyConfig, SshResourceProbesDisabled,
+    SshSessionConfig, SshSessionProfile, TelnetAutoLoginConfig, TelnetEnterMode,
+    TelnetSessionConfig,
 };
 use session_event_queue::SessionEventQueue;
 #[cfg(test)]

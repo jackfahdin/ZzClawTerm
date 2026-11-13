@@ -76,7 +76,15 @@ def dependency_errors() -> list[str]:
     errors: list[str] = []
     dependency = re.compile(r"(?m)^\s*(gpui|gpui_platform|gpui-kit)\s*=")
     low_level = (
+        "zzclawterm-ai-client",
+        "zzclawterm-agent-client",
+        "zzclawterm-mcp-host",
+        "zzclawterm-cloud-storage",
+        "zzclawterm-updater",
+        "zzclawterm-preview",
+        "zzclawterm-translation-client",
         "zzclawterm-core",
+        "zzclawterm-android",
         "zzclawterm-transport",
         "zzclawterm-files",
         "zzclawterm-recording",
@@ -100,6 +108,14 @@ def dependency_errors() -> list[str]:
     workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
     workspace_dependencies = workspace["workspace"]["dependencies"]
     for crate, forbidden in (
+        ("zzclawterm-android", set()),
+        ("zzclawterm-ai-client", set()),
+        ("zzclawterm-agent-client", set()),
+        ("zzclawterm-mcp-host", set()),
+        ("zzclawterm-cloud-storage", set()),
+        ("zzclawterm-updater", set()),
+        ("zzclawterm-preview", set()),
+        ("zzclawterm-translation-client", set()),
         ("zzclawterm-core", {"zzclawterm-sync", "zzclawterm-store", "zzclawterm-desktop", "zzclawterm-files", "zzclawterm-recording", "zzclawterm-remote-ops", "zzclawterm-transport"}),
         ("zzclawterm-transport", {"zzclawterm-files", "zzclawterm-recording", "zzclawterm-remote-ops", "zzclawterm-desktop", "zzclawterm-store", "zzclawterm-ui"}),
         ("zzclawterm-files", {"zzclawterm-recording", "zzclawterm-remote-ops", "zzclawterm-desktop", "zzclawterm-store", "zzclawterm-ui"}),
@@ -124,8 +140,34 @@ def dependency_errors() -> list[str]:
                 and package.startswith("zzclawterm-")
                 and package != "zzclawterm-core"
             )
-            if wrong_sync_direction or package in forbidden or package == "gpui" or package.startswith("gpui-"):
+            wrong_adapter_direction = (
+                crate in {"zzclawterm-android", "zzclawterm-agent-client", "zzclawterm-ai-client", "zzclawterm-cloud-storage", "zzclawterm-updater", "zzclawterm-preview", "zzclawterm-translation-client"}
+                and package.startswith("zzclawterm-")
+                and package != "zzclawterm-core"
+            )
+            wrong_mcp_direction = (
+                crate == "zzclawterm-mcp-host"
+                and package.startswith("zzclawterm-")
+                and package not in {"zzclawterm-core", "zzclawterm-mcp-protocol"}
+            )
+            if wrong_mcp_direction or wrong_sync_direction or wrong_adapter_direction or package in forbidden or package == "gpui" or package.startswith("gpui-"):
                 errors.append(f"crate_boundary: {crate} must not depend on {package}")
+    terminal_presentation = tomllib.loads(
+        (ROOT / "crates/zzclawterm-terminal-gpui/Cargo.toml").read_text(encoding="utf-8")
+    )
+    for package in dependency_packages(terminal_presentation, workspace_dependencies):
+        if package.startswith("zzclawterm-") and package not in {
+            "zzclawterm-core", "zzclawterm-terminal", "zzclawterm-ui"
+        }:
+            errors.append(f"crate_boundary: zzclawterm-terminal-gpui must not depend on {package}")
+    for manifest in (ROOT / "crates").glob("*/Cargo.toml"):
+        crate = manifest.parent.name
+        if crate.endswith("-helper"):
+            continue
+        document = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        for package in dependency_packages(document, workspace_dependencies):
+            if package in {"ffmpeg-next", "ffmpeg-sys-next", "openh264", "openh264-sys2"}:
+                errors.append(f"decoder_isolation: {crate} must not link {package}")
     return errors
 
 

@@ -38,7 +38,8 @@ fn session_start_focus_target(config: &ConnectionType) -> SessionStartFocusTarge
         ConnectionType::Rdp { .. } | ConnectionType::Vnc { .. } => {
             SessionStartFocusTarget::RemoteDesktop
         }
-        ConnectionType::Ssh { .. }
+        ConnectionType::Adb { .. }
+        | ConnectionType::Ssh { .. }
         | ConnectionType::LocalTerminal { .. }
         | ConnectionType::Telnet { .. }
         | ConnectionType::Serial { .. } => SessionStartFocusTarget::Terminal,
@@ -75,6 +76,22 @@ impl SshSessionConfigBuildContext {
         connection: &SavedConnection,
     ) -> Result<SshSessionConfig, String> {
         build_ssh_session_config_with_context(connection, &mut Vec::new(), self)
+    }
+
+    pub(in crate::features) fn prepare_telnet_network(
+        &self,
+        connection: &SavedConnection,
+        config: &mut TelnetSessionConfig,
+    ) -> Result<(), String> {
+        self.attempt.check()?;
+        config.proxy_jump = load_proxy_jump_config_with_context(self, connection, &mut Vec::new())?;
+        // Match RDP/VNC: only the jump's own proxy participates when a jump is selected.
+        config.proxy = if config.proxy_jump.is_none() {
+            load_proxy_config_with_context(self, connection)?
+        } else {
+            None
+        };
+        self.attempt.check()
     }
 }
 
@@ -181,7 +198,7 @@ impl ZzClawTermApp {
         }
     }
 
-    pub(in crate::features::session) fn focus_user_started_session_surface(
+    pub(in crate::features) fn focus_user_started_session_surface(
         &self,
         target: SessionStartFocusTarget,
         window: &mut Window,
@@ -230,9 +247,15 @@ impl ZzClawTermApp {
             && self.remote_start_blocked_by_configuration_replacement(cx)
         {
             self.complete_mcp_session_open_failure(
-                &connection.id,
+                options.mcp_open_operation_id.as_deref().unwrap_or(""),
                 &t!("settings.configurationReplacementInProgress"),
             );
+            return;
+        }
+
+        if matches!(connection.config, ConnectionType::Adb { .. }) {
+            let kind = options.android_view;
+            self.start_android_connection(connection, options, kind, cx);
             return;
         }
 
@@ -250,10 +273,26 @@ impl ZzClawTermApp {
         options: SavedConnectionStartOptions,
         cx: &mut Context<Self>,
     ) {
-        if !self.session.start.retry_is_pending(&options) {
+        if !self.session.start.request_can_start(&options) {
             return;
         }
-        let options = self.prepare_session_start_options(options);
+        if options
+            .reconnect_session_id
+            .as_ref()
+            .is_some_and(|id| self.session.start_reconnect_is_pending(id))
+            && options.request_id.is_none()
+        {
+            return;
+        }
+        let mut options = self.prepare_session_start_options(options);
+        options.request_id = Some(
+            self.session
+                .start
+                .begin_saved_preparation(&connection, &options),
+        );
+        self.shell.show_workspace();
+        self.ensure_pending_session_status_clock(cx);
+        cx.notify();
         if let ConnectionType::Rdp { backend, .. } = &connection.config {
             let has_relay = connection.network.as_ref().is_some_and(|network| {
                 network.proxy_id.is_some() || network.proxy_jump_id.is_some()
@@ -262,8 +301,11 @@ impl ZzClawTermApp {
                 parse_rdp_backend(backend).and_then(|backend| backend.validate_route(has_relay))
             {
                 let message = error.to_string();
-                self.fail_retry_preparation(&options, message.clone(), cx);
-                self.complete_mcp_session_open_failure(&connection.id, &message);
+                self.fail_start_preparation(&options, message.clone(), cx);
+                self.complete_mcp_session_open_failure(
+                    options.mcp_open_operation_id.as_deref().unwrap_or(""),
+                    &message,
+                );
                 self.shell.set_status(message.clone());
                 self.notify_operation(
                     "rdp-backend",
@@ -274,42 +316,6 @@ impl ZzClawTermApp {
                 return;
             }
         }
-        let placement = options.tab_placement.or_else(|| {
-            options.reconnect_session_id.as_ref().map(|id| {
-                self.session
-                    .start
-                    .allocate_tab_placement(self.session.session_index(id).unwrap_or(0))
-            })
-        });
-        let Some(placement) = placement else {
-            self.complete_mcp_session_open_failure(
-                &connection.id,
-                "could not reserve a tab position",
-            );
-            self.shell.set_status(format!(
-                "{} could not reserve a tab position",
-                connection.name
-            ));
-            self.shell.show_workspace();
-            cx.notify();
-            return;
-        };
-        if options.retry_request_id.is_none()
-            && !self
-                .session
-                .start_reserve_saved_connection(&connection.id, placement)
-        {
-            self.complete_mcp_session_open_failure(
-                &connection.id,
-                "connection is already starting",
-            );
-            self.shell
-                .set_status(format!("{} is already connecting", connection.name));
-            self.shell.show_workspace();
-            cx.notify();
-            return;
-        }
-
         if matches!(connection.config, ConnectionType::Telnet { .. })
             && connection.auth.as_ref().is_some_and(|auth| {
                 auth.mode == "password"
@@ -323,9 +329,11 @@ impl ZzClawTermApp {
             let message = account_auth_error_message(
                 zzclawterm_core::models::credentials::AccountAuthError::MissingAccount,
             );
-            self.complete_mcp_session_open_failure(&connection.id, &message);
-            self.session.start_release_saved_connection(&connection.id);
-            self.fail_retry_preparation(&options, message.clone(), cx);
+            self.complete_mcp_session_open_failure(
+                options.mcp_open_operation_id.as_deref().unwrap_or(""),
+                &message,
+            );
+            self.fail_start_preparation(&options, message.clone(), cx);
             self.shell.set_status(message);
             cx.notify();
             return;
@@ -333,7 +341,6 @@ impl ZzClawTermApp {
         if let Some(password_id) = saved_connection_password_id(&connection) {
             let telnet_auth = matches!(connection.config, ConnectionType::Telnet { .. })
                 .then(|| connection.auth.clone().unwrap_or_default());
-            let connection_id = connection.id.clone();
             let connection_name = connection.name.clone();
             self.shell
                 .set_status(format!("loading saved credentials for {connection_name}"));
@@ -347,7 +354,7 @@ impl ZzClawTermApp {
                     }
                 }),
                 move |this, event, cx| {
-                    if !this.session.start.retry_is_pending(&options) { return; }
+                    if !this.session.start.request_can_start(&options) { return; }
                     let mut connection = connection;
                     let password = match event.outcome {
                         Ok(Some(entry)) => {
@@ -360,13 +367,12 @@ impl ZzClawTermApp {
                                             auth.password = password;
                                             auth.has_password = false;
                                         }
-                                        this.start_saved_connection_ready(connection, options, cx);
+                                        this.start_saved_connection_ready(connection, options, None, cx);
                                     }
                                     Err(error) => {
                                         let error = account_auth_error_message(error);
-                                        this.fail_retry_preparation(&options, error.clone(), cx);
-                                        this.complete_mcp_session_open_failure(&connection_id, &error);
-                                        this.session.start_release_saved_connection(&connection_id);
+                                        this.fail_start_preparation(&options, error.clone(), cx);
+                                        this.complete_mcp_session_open_failure(options.mcp_open_operation_id.as_deref().unwrap_or(""), &error);
                                         this.shell.set_status(
                                             t!(
                                                 "savedConnections.startFailed",
@@ -383,13 +389,11 @@ impl ZzClawTermApp {
                             entry.password.filter(|password| !password.trim().is_empty())
                         },
                         Ok(None) => {
-                            this.fail_retry_preparation(&options, "saved password was not found".to_string(), cx);
+                            this.fail_start_preparation(&options, "saved password was not found".to_string(), cx);
                             this.complete_mcp_session_open_failure(
-                                &connection_id,
+                                options.mcp_open_operation_id.as_deref().unwrap_or(""),
                                 "saved password was not found",
                             );
-                            this.session
-                                .start_release_saved_connection(&connection_id);
                             this.shell.set_status(format!(
                                 "failed to start {connection_name}: saved password was not found"
                             ));
@@ -397,13 +401,11 @@ impl ZzClawTermApp {
                             return;
                         }
                         Err(error) => {
-                            this.fail_retry_preparation(&options, format!("could not load saved password: {error}"), cx);
+                            this.fail_start_preparation(&options, format!("could not load saved password: {error}"), cx);
                             this.complete_mcp_session_open_failure(
-                                &connection_id,
+                                options.mcp_open_operation_id.as_deref().unwrap_or(""),
                                 &format!("could not load saved password: {error}"),
                             );
-                            this.session
-                                .start_release_saved_connection(&connection_id);
                             this.shell.set_status(format!(
                                 "failed to start {connection_name}: could not load saved password: {error}"
                             ));
@@ -412,13 +414,11 @@ impl ZzClawTermApp {
                         }
                     };
                     let Some(password) = password else {
-                        this.fail_retry_preparation(&options, "saved password is empty or locked".to_string(), cx);
+                        this.fail_start_preparation(&options, "saved password is empty or locked".to_string(), cx);
                         this.complete_mcp_session_open_failure(
-                            &connection_id,
+                            options.mcp_open_operation_id.as_deref().unwrap_or(""),
                             "saved password is empty or locked",
                         );
-                        this.session
-                            .start_release_saved_connection(&connection_id);
                         this.shell.set_status(format!(
                             "failed to start {connection_name}: saved password is empty or locked"
                         ));
@@ -429,7 +429,7 @@ impl ZzClawTermApp {
                         auth.password = Some(password);
                         auth.has_password = false;
                     }
-                    this.start_saved_connection_ready(connection, options, cx);
+                    this.start_saved_connection_ready(connection, options, None, cx);
                 },
                 cx,
             );
@@ -437,16 +437,17 @@ impl ZzClawTermApp {
             return;
         }
 
-        self.start_saved_connection_ready(connection, options, cx);
+        self.start_saved_connection_ready(connection, options, None, cx);
     }
 
     fn start_saved_connection_ready(
         &mut self,
         connection: SavedConnection,
         options: SavedConnectionStartOptions,
+        route: Option<Arc<zzclawterm_transport::network_route::NetworkRoute>>,
         cx: &mut Context<Self>,
     ) {
-        if !self.session.start.retry_is_pending(&options) {
+        if !self.session.start.request_can_start(&options) {
             return;
         }
         let options = self.prepare_session_start_options(options);
@@ -457,60 +458,49 @@ impl ZzClawTermApp {
             .network
             .as_ref()
             .is_some_and(|network| network.proxy_id.is_some() || network.proxy_jump_id.is_some())
-            && !self
-                .remote_desktop
-                .prepared_routes
-                .contains_key(&connection.id)
+            && route.is_none()
         {
-            let pending_connection = connection.clone();
+            let attempt = self
+                .session
+                .start
+                .attempt(options.request_id.as_deref().expect("saved request"));
             self.prepare_remote_route(
                 connection.clone(),
-                move |app, result, cx| match result {
-                    Ok(route) => {
-                        if !app.session.start.retry_is_pending(&options) {
-                            return;
-                        }
-                        app.remote_desktop
-                            .prepared_routes
-                            .insert(pending_connection.id.clone(), route);
-                        app.start_saved_connection_ready(
-                            pending_connection.clone(),
-                            options.clone(),
-                            cx,
-                        );
+                attempt,
+                move |app, result, cx| {
+                    if !app.session.start.request_can_start(&options) {
+                        return;
                     }
-                    Err(error) => {
-                        if !app.session.start.retry_is_pending(&options) {
-                            return;
-                        }
-                        app.fail_retry_preparation(&options, error.clone(), cx);
-                        app.session
-                            .start_release_saved_connection(&pending_connection.id);
-                        app.shell.set_status(error.clone());
-                        app.notify_operation(
-                            "remote-route",
-                            zzclawterm_ui::notification::ZzClawNotificationKind::Error,
-                            error,
+                    match result {
+                        Ok(route) => app.start_saved_connection_ready(
+                            connection.clone(),
+                            options.clone(),
+                            Some(route),
                             cx,
-                        );
+                        ),
+                        Err(error) => {
+                            app.fail_start_preparation(&options, error.clone(), cx);
+                            app.shell.set_status(error.clone());
+                            app.notify_operation(
+                                "remote-route",
+                                zzclawterm_ui::notification::ZzClawNotificationKind::Error,
+                                error,
+                                cx,
+                            );
+                        }
                     }
                 },
                 cx,
             );
             return;
         }
-        if matches!(
-            connection.config,
-            ConnectionType::Rdp { .. } | ConnectionType::Vnc { .. }
-        ) && let Some(request_id) = &options.retry_request_id
-        {
-            let _ = self.session.start.take_event_request(request_id);
-        }
-        let connection_id = connection.id.clone();
         let workspace_split = options.workspace_split.clone();
         let tab_placement = options.tab_placement;
         let fallback_insert_index = options.insert_index.filter(|_| tab_placement.is_none());
         match connection.config.clone() {
+            ConnectionType::Adb { .. } => {
+                unreachable!("Android start is routed before credential resolution")
+            }
             ConnectionType::LocalTerminal {
                 shell_path,
                 shell_args,
@@ -525,7 +515,11 @@ impl ZzClawTermApp {
                     Ok(args) => args,
                     Err(_) => {
                         let message = rust_i18n::t!("dialog.shellArgsUnclosedQuote").to_string();
-                        self.fail_retry_preparation(&options, message.clone(), cx);
+                        self.fail_start_preparation(&options, message.clone(), cx);
+                        self.complete_mcp_session_open_failure(
+                            options.mcp_open_operation_id.as_deref().unwrap_or(""),
+                            &message,
+                        );
                         self.shell.set_status(message.clone());
                         self.notify_operation(
                             "shell-arguments",
@@ -587,6 +581,8 @@ impl ZzClawTermApp {
                     port,
                     username,
                     password,
+                    proxy: None,
+                    proxy_jump: None,
                     backspace_mode,
                     raw_tcp: raw_tcp_cli,
                     enter_mode: parse_telnet_enter_mode(&enter_mode),
@@ -601,10 +597,9 @@ impl ZzClawTermApp {
                     cols: 80,
                     rows: 24,
                 };
-                self.begin_background_session_start(
-                    connection.name,
-                    SessionLaunchConfig::Telnet(config),
-                    Some(connection.id),
+                self.begin_background_saved_telnet_start(
+                    connection,
+                    config,
                     ai_execution_profile,
                     options,
                     cx,
@@ -653,21 +648,41 @@ impl ZzClawTermApp {
                     cx,
                 );
             }
-            ConnectionType::Rdp { .. } => {
-                let config = match self.saved_remote_desktop_launch_config(&connection) {
-                    Ok(SessionLaunchConfig::Rdp(config)) => config,
-                    Ok(_) => unreachable!("RDP connection"),
+            ConnectionType::Rdp { .. } | ConnectionType::Vnc { .. } => {
+                let relay = route.as_ref().map(|route| route.endpoint.clone());
+                let config = match self.saved_remote_desktop_launch_config(&connection, relay) {
+                    Ok(config) => config,
                     Err(error) => {
-                        self.fail_retry_preparation(&options, error.clone(), cx);
-                        self.complete_mcp_session_open_failure(&connection.id, &error);
-                        self.session.start_release_saved_connection(&connection.id);
+                        self.fail_start_preparation(&options, error.clone(), cx);
                         self.shell.set_status(error);
                         cx.notify();
                         return;
                     }
                 };
-                let session_id = self.schedule_rdp_runtime(config.clone(), cx);
-                if let Some(route) = self.remote_desktop.prepared_routes.remove(&connection.id) {
+                let request_id = options.request_id.as_deref().expect("saved request");
+                let crate::features::session::SessionStartEventRequest::Pending {
+                    pending: Some(pending),
+                    was_active,
+                } = self.session.start.take_event_request(request_id)
+                else {
+                    return;
+                };
+                let session_id = match &config {
+                    SessionLaunchConfig::Rdp(config) => self.schedule_rdp_runtime(
+                        config.clone(),
+                        request_id.to_string(),
+                        pending.attempt.clone(),
+                        cx,
+                    ),
+                    SessionLaunchConfig::Vnc(config) => self.schedule_vnc_runtime(
+                        config.clone(),
+                        request_id.to_string(),
+                        pending.attempt.clone(),
+                        cx,
+                    ),
+                    _ => unreachable!("remote desktop config"),
+                };
+                if let Some(route) = route {
                     self.remote_desktop.routes.insert(session_id.clone(), route);
                 }
                 self.register_session_for_start(
@@ -677,130 +692,34 @@ impl ZzClawTermApp {
                         ssh_multiplex_key: None,
                         source_connection_id: Some(connection.id.clone()),
                         ai_execution_profile: AiExecutionProfile::Disabled,
-                        launch_config: SessionLaunchConfig::Rdp(config),
+                        launch_config: config,
                         disconnected: false,
                     },
                     tab_placement,
                     fallback_insert_index,
                 );
-                if let Some(custom_name) = options.custom_name {
-                    self.session
-                        .set_custom_name(session_id.clone(), custom_name);
+                if let Some(name) = pending.custom_name {
+                    self.session.set_custom_name(session_id.clone(), name);
                 }
-                if let Some(color) = options.tab_color {
-                    self.session.set_tab_color(&session_id, Some(color));
+                self.session.set_tab_color(&session_id, pending.tab_color);
+                self.session.set_tab_locked(&session_id, pending.locked);
+                self.persist_connection_used(connection.id, cx);
+                if self.session_start_should_activate(was_active) {
+                    self.activate_session_id(&session_id, cx);
                 }
-                if options.locked {
-                    self.session.set_tab_locked(&session_id, true);
-                }
-                if tab_placement.is_none()
-                    && fallback_insert_index.is_none()
-                    && let Some(after_session_id) = options.after_session_id
-                {
-                    self.session
-                        .move_session_after(&session_id, &after_session_id);
-                }
-                self.persist_connection_used(connection.id.clone(), cx);
-                self.activate_session_id(&session_id, cx);
-                self.apply_workspace_split_for_duplicate(cx, workspace_split.clone(), &session_id);
+                self.apply_workspace_split_for_duplicate(cx, workspace_split, &session_id);
                 self.shell
-                    .set_status(format!("connecting RDP {}", connection.name));
-                self.shell.show_workspace();
-                cx.notify();
-            }
-            ConnectionType::Vnc { .. } => {
-                let config = match self.saved_remote_desktop_launch_config(&connection) {
-                    Ok(SessionLaunchConfig::Vnc(config)) => config,
-                    _ => unreachable!("VNC connection"),
-                };
-                match self.create_vnc_runtime(config.clone()) {
-                    Ok(session_id) => {
-                        if let Some(route) =
-                            self.remote_desktop.prepared_routes.remove(&connection.id)
-                        {
-                            self.remote_desktop.routes.insert(session_id.clone(), route);
-                        }
-                        self.register_session_for_start(
-                            &session_id,
-                            crate::models::SessionRuntimeMetadata {
-                                ssh_config: None,
-                                ssh_multiplex_key: None,
-                                source_connection_id: Some(connection.id.clone()),
-                                ai_execution_profile: AiExecutionProfile::Disabled,
-                                launch_config: SessionLaunchConfig::Vnc(config),
-                                disconnected: false,
-                            },
-                            tab_placement,
-                            fallback_insert_index,
-                        );
-                        if let Some(custom_name) = options.custom_name {
-                            self.session
-                                .set_custom_name(session_id.clone(), custom_name);
-                        }
-                        if let Some(color) = options.tab_color {
-                            self.session.set_tab_color(&session_id, Some(color));
-                        }
-                        if options.locked {
-                            self.session.set_tab_locked(&session_id, true);
-                        }
-                        if tab_placement.is_none()
-                            && fallback_insert_index.is_none()
-                            && let Some(after_session_id) = options.after_session_id
-                        {
-                            self.session
-                                .move_session_after(&session_id, &after_session_id);
-                        }
-                        self.persist_connection_used(connection.id.clone(), cx);
-                        self.activate_session_id(&session_id, cx);
-                        self.apply_workspace_split_for_duplicate(
-                            cx,
-                            workspace_split.clone(),
-                            &session_id,
-                        );
-                        self.shell
-                            .set_status(format!("connecting VNC {}", connection.name));
-                    }
-                    Err(error) => {
-                        let message = format!("VNC connection failed: {error}");
-                        let session_id = self.create_failed_vnc_runtime(error);
-                        self.register_session_for_start(
-                            &session_id,
-                            crate::models::SessionRuntimeMetadata {
-                                ssh_config: None,
-                                ssh_multiplex_key: None,
-                                source_connection_id: Some(connection.id.clone()),
-                                ai_execution_profile: AiExecutionProfile::Disabled,
-                                launch_config: SessionLaunchConfig::Vnc(config),
-                                disconnected: false,
-                            },
-                            tab_placement,
-                            fallback_insert_index,
-                        );
-                        if let Some(custom_name) = options.custom_name {
-                            self.session
-                                .set_custom_name(session_id.clone(), custom_name);
-                        }
-                        if let Some(color) = options.tab_color {
-                            self.session.set_tab_color(&session_id, Some(color));
-                        }
-                        if options.locked {
-                            self.session.set_tab_locked(&session_id, true);
-                        }
-                        self.activate_session_id(&session_id, cx);
-                        self.shell.set_status(message);
-                    }
-                }
-                self.shell.show_workspace();
+                    .set_status(format!("connecting {}", connection.name));
+                self.settle_session_start_tab_placements_if_idle();
                 cx.notify();
             }
         }
-        self.remote_desktop.prepared_routes.remove(&connection_id);
-        self.session.start_release_saved_connection(&connection_id);
     }
 
     pub(in crate::features) fn saved_remote_desktop_launch_config(
         &self,
         connection: &SavedConnection,
+        relay: Option<zzclawterm_core::connection_route::RelayEndpoint>,
     ) -> Result<SessionLaunchConfig, String> {
         match connection.config.clone() {
             ConnectionType::Rdp {
@@ -816,11 +735,7 @@ impl ZzClawTermApp {
             } => {
                 let backend = parse_rdp_backend(&backend).map_err(|error| error.to_string())?;
                 let mut config = RdpSessionConfig {
-                    relay: self
-                        .remote_desktop
-                        .prepared_routes
-                        .get(&connection.id)
-                        .map(|route| route.endpoint.clone()),
+                    relay,
                     backend,
                     windows_authentication: security.windows_authentication.clone(),
                     name: connection.name.clone(),
@@ -857,11 +772,7 @@ impl ZzClawTermApp {
             } => {
                 let config = VncSessionConfig {
                     username: username.clone(),
-                    relay: self
-                        .remote_desktop
-                        .prepared_routes
-                        .get(&connection.id)
-                        .map(|route| route.endpoint.clone()),
+                    relay,
                     name: connection.name.clone(),
                     host,
                     port,
@@ -891,6 +802,7 @@ impl ZzClawTermApp {
     pub(in crate::features) fn prepare_remote_route(
         &mut self,
         connection: SavedConnection,
+        attempt: zzclawterm_transport::connection_attempt::ConnectionAttempt,
         callback: impl Fn(
             &mut Self,
             Result<Arc<zzclawterm_transport::network_route::NetworkRoute>, String>,
@@ -898,10 +810,22 @@ impl ZzClawTermApp {
         ) + 'static,
         cx: &mut Context<Self>,
     ) {
-        let context = self.ssh_session_config_build_context();
+        let mut context = self.ssh_session_config_build_context();
+        context.attempt = attempt;
+        context.host_key_prompts = Arc::new(
+            context
+                .host_key_prompts
+                .for_attempt(context.attempt.clone()),
+        );
+        context.credential_prompts = Arc::new(
+            context
+                .credential_prompts
+                .for_attempt(context.attempt.clone()),
+        );
         let task = self
             .blocking_jobs
             .submit_task("remote-desktop-route", move |_| {
+                context.attempt.check()?;
                 let (host, port) = match &connection.config {
                     ConnectionType::Rdp { host, port, .. }
                     | ConnectionType::Vnc { host, port, .. } => (host.clone(), *port),
@@ -915,7 +839,7 @@ impl ZzClawTermApp {
                 } else {
                     None
                 };
-                zzclawterm_transport::network_route::NetworkRoute::start(
+                let route = zzclawterm_transport::network_route::NetworkRoute::start(
                     zzclawterm_transport::network_route::NetworkRouteConfig {
                         host,
                         port,
@@ -923,7 +847,9 @@ impl ZzClawTermApp {
                         proxy,
                     },
                 )
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string())?;
+                context.attempt.check()?;
+                Ok(route)
             });
         cx.spawn(async move |this, cx| {
             let result = crate::features::runtime_jobs::await_blocking_job(task)
@@ -942,10 +868,17 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) {
         if self.remote_start_blocked_by_configuration_replacement(cx) {
+            self.complete_mcp_session_open_failure(
+                options.mcp_open_operation_id.as_deref().unwrap_or(""),
+                "configuration replacement",
+            );
+            self.fail_start_preparation(&options, "configuration replacement".into(), cx);
             return;
         }
 
         let SavedConnectionStartOptions {
+            android_view: _,
+            mcp_open_operation_id,
             ssh_runtime_mode,
             custom_name,
             tab_color,
@@ -957,7 +890,7 @@ impl ZzClawTermApp {
             reconnect_session_id,
             workspace_split,
             tab_placement,
-            retry_request_id: _,
+            request_id,
         } = options;
         let connection_name = connection.name.clone();
         let source_connection_id = Some(connection.id.clone());
@@ -970,6 +903,8 @@ impl ZzClawTermApp {
         let multiplex_key = format!("ssh-session:{}", uuid());
         let request_id = self.register_pending_session_start(
             PendingSessionStartRegistration {
+                request_id,
+                mcp_open_operation_id,
                 requested_ssh_runtime_mode: ssh_runtime_mode,
                 connection_name: connection_name.clone(),
                 launch_config: None,
@@ -1087,7 +1022,7 @@ impl ZzClawTermApp {
         let request_id = connection_id.clone();
         self.submit_store_request(
             0,
-            zzclawterm_store::store_mutation(StoreDomain::Connections, move |store| {
+            store_request(StoreDomain::Connections, move |store| {
                 store.mark_connection_used(&request_id)?;
                 store.get_connection(&request_id)
             }),
@@ -1262,6 +1197,7 @@ pub(in crate::features) fn build_ssh_session_config_with_context(
         proxy,
         allow_none_auth,
         backspace_mode,
+        ssh_compatibility_mode: connection.ssh_compatibility_mode,
         profile: match connection.ssh_profile {
             SshProfile::Standard => SshSessionProfile::Standard,
             SshProfile::NetworkDevice => SshSessionProfile::NetworkDevice,
@@ -1613,6 +1549,9 @@ fn load_proxy_jump_config_with_context(
 mod mstsc_tests;
 
 #[cfg(test)]
+mod request_tests;
+
+#[cfg(test)]
 mod tests {
     use std::path::Path;
     use std::sync::Arc;
@@ -1684,6 +1623,90 @@ mod tests {
             agent_prompts: Arc::new(AgentPromptBroker::default()),
             otp_provider: Arc::new(NativeOtpProvider::new(store)),
         }
+    }
+
+    #[test]
+    fn telnet_network_preparation_loads_shared_routes_and_reports_invalid_references() {
+        use zzclawterm_transport::TelnetSessionConfig;
+        let dir = unique_temp_dir("telnet-route-preparation");
+        let context = test_ssh_build_context(dir.path());
+        context
+            .store
+            .request_fn(StoreDomain::Tunnels, |store| {
+                store.replace_proxies(&[zzclawterm_core::ProxyConfig {
+                    id: "proxy".into(),
+                    name: "Proxy".into(),
+                    host: "127.0.0.1".into(),
+                    port: 1080,
+                    ..Default::default()
+                }])
+            })
+            .unwrap();
+        for json in [
+            serde_json::json!({"id":"jump", "name":"Jump", "type":"ssh", "host":"jump.internal", "username":"user", "auth":{"mode":"none"}, "network":{"proxy_id":"proxy", "host_key_alias":"jump-alias"}}),
+            serde_json::json!({"id":"not-ssh", "name":"Telnet", "type":"telnet", "host":"device.internal"}),
+            serde_json::json!({"id":"cycle-a", "name":"A", "type":"ssh", "host":"a.internal", "username":"user", "auth":{"mode":"none"}, "network":{"proxy_jump_id":"cycle-b"}}),
+            serde_json::json!({"id":"cycle-b", "name":"B", "type":"ssh", "host":"b.internal", "username":"user", "auth":{"mode":"none"}, "network":{"proxy_jump_id":"cycle-a"}}),
+        ] {
+            let connection: SavedConnection = serde_json::from_value(json).unwrap();
+            context
+                .store
+                .request_fn(StoreDomain::Connections, move |store| {
+                    store.save_connection(&connection)
+                })
+                .unwrap();
+        }
+        for (network, error) in [
+            (
+                serde_json::json!({"proxy_id":"missing"}),
+                Some("was not found"),
+            ),
+            (
+                serde_json::json!({"proxy_jump_id":"missing"}),
+                Some("was not found"),
+            ),
+            (
+                serde_json::json!({"proxy_jump_id":"not-ssh"}),
+                Some("Only SSH"),
+            ),
+            (
+                serde_json::json!({"proxy_jump_id":"cycle-a"}),
+                Some("cycle"),
+            ),
+            (serde_json::json!({"proxy_id":"proxy"}), None),
+            (
+                serde_json::json!({"proxy_id":"missing", "proxy_jump_id":"jump"}),
+                None,
+            ),
+        ] {
+            let connection: SavedConnection = serde_json::from_value(serde_json::json!({
+                "id":"telnet", "name":"Telnet", "type":"telnet", "host":"device.internal", "network":network
+            })).unwrap();
+            let mut config = TelnetSessionConfig::default();
+            let result = context.prepare_telnet_network(&connection, &mut config);
+            if let Some(error) = error {
+                assert!(result.unwrap_err().contains(error));
+            } else {
+                result.unwrap();
+                if let Some(jump) = config.proxy_jump {
+                    assert!(config.proxy.is_none());
+                    assert_eq!(jump.host_key_alias.as_deref(), Some("jump-alias"));
+                    assert!(jump.proxy.is_some());
+                    assert!(jump.host_key_verifier.is_some());
+                    assert!(jump.credential_provider.is_some());
+                } else {
+                    assert!(config.proxy.is_some());
+                }
+            }
+        }
+        context.attempt.cancel();
+        let connection: SavedConnection = serde_json::from_value(serde_json::json!({"id":"cancelled", "name":"Cancelled", "type":"telnet", "host":"device.internal"})).unwrap();
+        assert!(
+            context
+                .prepare_telnet_network(&connection, &mut TelnetSessionConfig::default())
+                .unwrap_err()
+                .contains("cancelled")
+        );
     }
 
     #[test]
@@ -1858,6 +1881,70 @@ mod tests {
     }
 
     #[test]
+    fn ssh_session_config_uses_only_selected_credentials_after_reload_and_for_jump_hosts() {
+        let dir = unique_temp_dir("ssh-inactive-credentials");
+        let context = test_ssh_build_context(dir.path());
+        context
+            .store
+            .request_fn(StoreDomain::Security, |store| {
+                store.save_ssh_key(
+                    serde_json::from_value(serde_json::json!({
+                        "id":"fixture-key", "name":"Fixture key", "key":"fixture-key-data"
+                    }))
+                    .unwrap(),
+                )
+            })
+            .unwrap();
+        for mode in ["password", "key", "agent", "none"] {
+            for locked in [false, true] {
+                if mode == "password" && locked {
+                    continue;
+                }
+                let saved: SavedConnection = serde_json::from_value(serde_json::json!({
+                    "id":"jump", "name":"Jump", "type":"ssh", "host":"jump.example.test", "username":"user",
+                    "auth":{"mode":mode, "password_source":"connection", "password":if locked { "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" } else { "fixture-password" }, "has_password":locked, "key_id":"fixture-key"}
+                })).unwrap();
+                let to_save = saved.clone();
+                context
+                    .store
+                    .request_fn(StoreDomain::Connections, move |store| {
+                        store.save_connection(&to_save)
+                    })
+                    .unwrap();
+                // The builder must read the newly selected mode instead of stale reconnect state.
+                let mut stale = saved;
+                stale.auth.as_mut().unwrap().mode = "password".into();
+                let config =
+                    build_ssh_session_config_with_context(&stale, &mut Vec::new(), &context)
+                        .unwrap();
+                assert_eq!(
+                    config.password.as_deref(),
+                    (mode == "password").then_some("fixture-password")
+                );
+                assert_eq!(config.key_auth.is_some(), mode == "key");
+                assert_eq!(config.agent_auth, mode == "agent");
+                assert_eq!(config.allow_none_auth, mode == "none");
+
+                let parent: SavedConnection = serde_json::from_value(serde_json::json!({
+                    "id":"parent", "name":"Parent", "type":"ssh", "host":"parent.example.test", "username":"user",
+                    "auth":{"mode":"none"}, "network":{"proxy_jump_id":"jump"}
+                })).unwrap();
+                let parent =
+                    build_ssh_session_config_with_context(&parent, &mut Vec::new(), &context)
+                        .unwrap();
+                let jump = parent.proxy_jump.unwrap();
+                assert_eq!(
+                    jump.password.as_deref(),
+                    (mode == "password").then_some("fixture-password")
+                );
+                assert_eq!(jump.key_auth.is_some(), mode == "key");
+                assert_eq!(jump.agent_auth, mode == "agent");
+                assert_eq!(jump.allow_none_auth, mode == "none");
+            }
+        }
+    }
+
+    #[test]
     fn ssh_session_config_uses_context_keep_alive_interval() {
         let dir = unique_temp_dir("ssh-keepalive");
         let mut context = test_ssh_build_context(dir.path());
@@ -1891,6 +1978,7 @@ mod tests {
             }),
             recording: None,
             ssh_algorithms: None,
+            ssh_compatibility_mode: false,
             ssh_profile: Default::default(),
             terminal_type: None,
             sftp: Default::default(),
@@ -1945,6 +2033,7 @@ mod tests {
                 mode: SshAlgorithmMode::Secure,
                 ..Default::default()
             }),
+            ssh_compatibility_mode: false,
             ssh_profile: SshProfile::NetworkDevice,
             terminal_type: None,
             sftp: SftpSettings {
@@ -1991,5 +2080,23 @@ mod tests {
         let explicit =
             build_ssh_session_config_with_context(&connection, &mut Vec::new(), &context).unwrap();
         assert_eq!(explicit.term, "ansi");
+        for profile in [SshProfile::Standard, SshProfile::NetworkDevice] {
+            connection.ssh_profile = profile;
+            for enabled in [false, true] {
+                connection.ssh_compatibility_mode = enabled;
+                let config =
+                    build_ssh_session_config_with_context(&connection, &mut Vec::new(), &context)
+                        .unwrap();
+                assert_eq!(config.ssh_compatibility_mode, enabled);
+                assert_eq!(
+                    config.remote_stats_enabled(),
+                    !enabled && profile == SshProfile::Standard
+                );
+                assert_eq!(
+                    config.remote_file_browser_enabled(),
+                    profile == SshProfile::Standard
+                );
+            }
+        }
     }
 }

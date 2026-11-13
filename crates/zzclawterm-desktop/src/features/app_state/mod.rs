@@ -98,7 +98,10 @@ pub struct ZzClawTermApp {
     /// The five polling panels. They own their refresh schedules; `remote_ops` stays
     /// the authoritative owner of the data those schedules fetch.
     pub(in crate::features) remote_panels: RemotePanels,
+    /// Ports and Services: self-contained entities that own their data.
+    pub(in crate::features) host_tool_panels: crate::features::remote::HostToolPanels,
     pub(in crate::features) remote_desktop: RemoteDesktopFeatureState,
+    pub(in crate::features) android: crate::features::android::AndroidFeatureState,
     pub(in crate::features) security: SecurityFeatureState,
     pub(in crate::features) settings: SettingsFeatureState,
     pub(in crate::features) ai: AiFeatureState,

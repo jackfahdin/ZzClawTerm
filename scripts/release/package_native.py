@@ -3,23 +3,25 @@
 
 from __future__ import annotations
 
-import gzip
 import os
+import hashlib
+import json
 import plistlib
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import tarfile
 import textwrap
+import time
 import tomllib
 import zipfile
-
-import prepare_conpty
-import windows_portable
 from dataclasses import dataclass
 from pathlib import Path
+
+import prepare_conpty
+import linux_icons
+import windows_portable
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -32,41 +34,18 @@ APP_NAME = "ZzClawTerm"
 APP_BIN = "zzclawterm"
 # Helper processes the application spawns at runtime. `resolve_helper_path()`
 # in zzclawterm-remote-desktop only looks beside the running executable, so each
-# of these must be packaged next to the application binary in every format.
-# The executables are branded zzclawterm-* while their Cargo packages keep the
-# zzclawterm-* names.
-HELPER_BINS = ("zzclawterm-rdp-helper", "zzclawterm-vnc-helper", "zzclawterm-mcp")
-# VcXsrv (GPLv3 X server) is bundled with Windows packages as a whole directory
-# tree beside the application so SSH X11 forwarding can spawn it as a separate
-# process. It is not a helper binary: it is not built by Cargo and it carries
-# fonts/, locale/ and other data directories vcxsrv.exe needs at runtime.
-VCXSRV_ENV_VAR = "ZZCLAWTERM_VCXSRV_DIST"
-VCXSRV_DIRNAME = "vcxsrv"
-VCXSRV_EXE = "vcxsrv.exe"
-# Releases that promise an X server set this: without it a missing distribution
-# only warns, which would silently publish a package whose X11 forwarding cannot
-# start. CI sets it for the Windows x64 leg.
-VCXSRV_REQUIRED_ENV_VAR = "ZZCLAWTERM_REQUIRE_VCXSRV"
-VCXSRV_NOTICE = textwrap.dedent(
-    """
-    VcXsrv Windows X Server
-    =======================
-
-    This directory contains VcXsrv, an X server for Windows licensed under the
-    GNU General Public License version 3 (GPLv3). ZzClawTerm launches
-    vcxsrv.exe as a separate, standalone process to display remote X11
-    applications for SSH sessions with X11 forwarding; the ZzClawTerm
-    executable does not link against or derive from VcXsrv.
-
-    VcXsrv source code and license:
-      https://sourceforge.net/projects/vcxsrv/
-    """
-).lstrip()
-MACOS_IDENTIFIER = "com.jackfahdin.zzclawterm"
-LINUX_PACKAGE = "zzclawterm"
-URL_SCHEME = "zzclawterm"
-PORTABLE_MARKER = windows_portable.LAYOUT["marker"]
+# supported helper must be packaged next to the application binary.
+HELPER_BINS = (
+    "zzclawterm-android-helper",
+    "zzclawterm-rdp-helper",
+    "zzclawterm-vnc-helper",
+    "zzclawterm-mcp",
+)
 CONPTY_LICENSE = Path(__file__).with_name("conpty-license.txt")
+
+
+def helper_bins(target: str) -> tuple[str, ...]:
+    return HELPER_BINS
 
 
 def conpty_files(target: str) -> tuple[Path, ...]:
@@ -95,6 +74,32 @@ def copy_conpty(destination: Path, target: str) -> list[Path]:
     return copied
 
 
+PORTABLE_MARKER = windows_portable.LAYOUT["marker"]
+VCXSRV_ENV_VAR = "ZZCLAWTERM_VCXSRV_DIST"
+VCXSRV_DIRNAME = "vcxsrv"
+VCXSRV_EXE = "vcxsrv.exe"
+# Releases that promise an X server set this: without it a missing distribution
+# only warns, which would silently publish a package whose X11 forwarding cannot
+# start. CI sets it for the Windows x64 leg.
+VCXSRV_REQUIRED_ENV_VAR = "ZZCLAWTERM_REQUIRE_VCXSRV"
+VCXSRV_NOTICE = textwrap.dedent(
+    """
+    VcXsrv Windows X Server
+    =======================
+
+    This directory contains VcXsrv, an X server for Windows licensed under the
+    GNU General Public License version 3 (GPLv3). ZzClawTerm launches
+    vcxsrv.exe as a separate, standalone process to display remote X11
+    applications for SSH sessions with X11 forwarding; the ZzClawTerm
+    executable does not link against or derive from VcXsrv.
+
+    VcXsrv source code and license:
+      https://sourceforge.net/projects/vcxsrv/
+    """
+).lstrip()
+
+
+
 @dataclass(frozen=True)
 class PackageIdentity:
     display_name: str
@@ -104,11 +109,7 @@ class PackageIdentity:
 
     @property
     def url_schemes(self) -> tuple[str, ...]:
-        return (
-            (self.desktop_id, "ssh", "telnet")
-            if self.desktop_id == URL_SCHEME
-            else (self.desktop_id,)
-        )
+        return (self.desktop_id, "ssh", "telnet") if self.desktop_id == "zzclawterm" else (self.desktop_id,)
 
     @property
     def macos_bundle_name(self) -> str:
@@ -127,23 +128,29 @@ class PackageIdentity:
         return f"{self.desktop_id}.desktop"
 
 
-STABLE_IDENTITY = PackageIdentity(
-    "ZzClawTerm", MACOS_IDENTIFIER, "ZzClawTerm", URL_SCHEME
-)
+STABLE_IDENTITY = PackageIdentity("ZzClawTerm", "com.kang.zzclawterm", "ZzClawTerm", "zzclawterm")
 PREVIEW_IDENTITY = PackageIdentity(
-    "ZzClawTerm Preview",
-    f"{MACOS_IDENTIFIER}.preview",
-    "ZzClawTermPreview",
-    f"{URL_SCHEME}-preview",
+    "ZzClawTerm Preview", "com.kang.zzclawterm.preview", "ZzClawTermPreview", "zzclawterm-preview"
 )
-# Archives must not record anything about the packaging host. Downloading a CI
-# artifact resets file mtimes, so a leaked timestamp makes a rerun of a failed
-# job produce different bytes for unchanged sources: the sha256 published in
-# latest.json no longer matches and the artifacts already uploaded for this
-# version cannot be reused.
-ARCHIVE_DATE_TIME = (1980, 1, 1, 0, 0, 0)  # ZIP cannot encode an earlier time
-ARCHIVE_MTIME = 0
-ARCHIVE_COMPRESS_LEVEL = 9
+
+# SemVer 2.0: prerelease numeric identifiers cannot have leading zeroes.
+SEMVER = re.compile(
+    r"(?P<major>0|[1-9][0-9]*)\.(?P<minor>0|[1-9][0-9]*)\.(?P<patch>0|[1-9][0-9]*)"
+    r"(?:-(?P<pre>(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
+
+
+def parse_version(raw: str) -> re.Match[str]:
+    match = SEMVER.fullmatch(normalize_version(raw))
+    if match is None:
+        raise ValueError(f"invalid release version: {raw}")
+    return match
+
+
+def release_identity(version: str) -> PackageIdentity:
+    return PREVIEW_IDENTITY if parse_version(version).group("pre") else STABLE_IDENTITY
 
 
 @dataclass(frozen=True)
@@ -185,6 +192,19 @@ def run(
     subprocess.run(args, cwd=cwd, env=env, check=True)
 
 
+def run_with_retry(args: list[str], *, attempts: int = 3, delay_seconds: float = 2.0) -> None:
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
+    for attempt in range(1, attempts + 1):
+        try:
+            run(args)
+            return
+        except subprocess.CalledProcessError:
+            if attempt == attempts:
+                raise
+            time.sleep(delay_seconds)
+
+
 def require_tool(name: str) -> str:
     path = shutil.which(name)
     if not path:
@@ -199,26 +219,6 @@ def workspace_version() -> str:
 
 def normalize_version(raw: str) -> str:
     return raw.strip().removeprefix("v").removeprefix("V")
-
-
-# SemVer 2.0: prerelease numeric identifiers cannot have leading zeroes.
-SEMVER = re.compile(
-    r"(?P<major>0|[1-9][0-9]*)\.(?P<minor>0|[1-9][0-9]*)\.(?P<patch>0|[1-9][0-9]*)"
-    r"(?:-(?P<pre>(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
-    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?"
-    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
-)
-
-
-def parse_version(raw: str) -> re.Match[str]:
-    match = SEMVER.fullmatch(normalize_version(raw))
-    if match is None:
-        raise ValueError(f"invalid release version: {raw}")
-    return match
-
-
-def release_identity(version: str) -> PackageIdentity:
-    return PREVIEW_IDENTITY if parse_version(version).group("pre") else STABLE_IDENTITY
 
 
 def validate_version(raw: str, expected: str | None = None) -> str:
@@ -270,24 +270,26 @@ def release_binary_path(target: str, name: str = APP_BIN) -> Path:
 
 
 def helper_binary_paths(target: str) -> list[Path]:
-    return [release_binary_path(target, name) for name in HELPER_BINS]
+    return [release_binary_path(target, name) for name in helper_bins(target)]
 
 
 def build_binary(package: str, name: str, target: str) -> Path:
-    run(
-        [
-            "cargo",
-            "build",
-            "-p",
-            package,
-            "--bin",
-            name,
-            "--release",
-            "--target",
-            target,
-            "--locked",
-        ]
-    )
+    command = [
+        "cargo", "build", "-p", package, "--bin", name,
+        "--release", "--target", target, "--locked",
+    ]
+    environment = None
+    if target.endswith("-windows-msvc"):
+        # Keep Rust and every C/C++ dependency on the same static CRT. The ATL
+        # shim must not make portable packages require a VC++ redistributable.
+        environment = os.environ.copy()
+        flags = environment.get("CARGO_ENCODED_RUSTFLAGS")
+        if flags is None:
+            flags = "\x1f".join(environment.get("RUSTFLAGS", "").split())
+        environment["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(
+            filter(None, [flags, "-C", "target-feature=+crt-static"])
+        )
+    run(command, env=environment)
     binary = release_binary_path(target, name)
     if not binary.is_file():
         raise FileNotFoundError(f"release executable not found: {binary}")
@@ -295,10 +297,14 @@ def build_binary(package: str, name: str, target: str) -> Path:
 
 
 def build_application(target: str) -> Path:
+    import prepare_android
+    _, prefix = prepare_android.prepare(target)
+    if prefix is None:
+        raise RuntimeError("Android decoder dependencies were not prepared")
+    os.environ["FFMPEG_DIR"] = str(prefix)
     binary = build_binary("zzclawterm-app", APP_BIN, target)
-    for name in HELPER_BINS:
-        package = name.replace("zzclawterm-", "zzclawterm-", 1)
-        build_binary(package, name, target)
+    for name in helper_bins(target):
+        build_binary(name, name, target)
     return binary
 
 
@@ -315,7 +321,19 @@ def copy_helpers(destination: Path, target: str) -> list[Path]:
         if "windows" not in target:
             make_executable(binary)
         copied.append(binary)
+    copy_android_resources(destination, target)
     return copied
+
+
+def copy_android_resources(destination: Path, target: str) -> list[Path]:
+    """Stage the same pinned resources used by development and CI."""
+    import prepare_android
+    adb = prepare_android.STAGING / "adb" / target
+    ffmpeg = prepare_android.STAGING / "ffmpeg" / target
+    if not adb.is_dir() or not ffmpeg.is_dir():
+        raise FileNotFoundError("Run prepare_android.py before packaging")
+    prepare_android.stage_runtime(adb, ffmpeg, destination)
+    return prepare_android.write_resource_manifest(destination, target)
 
 
 def resolve_vcxsrv_source() -> Path | None:
@@ -375,7 +393,11 @@ def stage_vcxsrv(destination: Path) -> Path | None:
 
 def copy_release_documents(destination: Path, version: str) -> None:
     destination.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(LICENSE_PATH, destination / "LICENSE")
+    completion_licenses = ROOT_DIR / "crates/zzclawterm-core/assets/completion"
+    android_licenses = ROOT_DIR / "crates" / "zzclawterm-android" / "assets"
+    documents = [LICENSE_PATH, completion_licenses / "NOTICE.txt", completion_licenses / "LICENSE.carapace", completion_licenses / "LICENSE.nucleo",
+                 android_licenses / "NOTICE.md", android_licenses / "LICENSE.scrcpy"]
+    (destination / "LICENSE").write_text("\n\n".join(path.read_text(encoding="utf-8") for path in documents), encoding="utf-8")
     (destination / "VERSION").write_text(f"{version}\n", encoding="utf-8")
 
 
@@ -388,121 +410,12 @@ def reset_output() -> None:
     WORK_DIR.mkdir(parents=True)
 
 
-def archive_entries(source: Path, *, include_root: bool) -> list[tuple[Path, str]]:
-    """Pair every part of source with its archive name, in a fixed order.
-
-    Entries are ordered by archive name because Path comparison follows the
-    host filesystem's case sensitivity and would otherwise hand a different
-    order (and so different bytes) to a Windows and a macOS run.
-    """
-    paths = [source] if include_root else []
-    paths.extend(source.rglob("*"))
-    entries = [(path, path.relative_to(source.parent).as_posix()) for path in paths]
-    entries.sort(key=lambda entry: entry[1])
-    return entries
-
-
-def archive_file_mode(mode: int) -> int:
-    """Reduce a host mode to 0o755 or 0o644.
-
-    Keeping only the executable bit preserves the mode an unpacked helper needs
-    to launch while dropping the packaging machine's umask from the archive.
-    """
-    return 0o755 if mode & 0o111 else 0o644
-
-
-def zip_member_info(arcname: str, mode: int) -> zipfile.ZipInfo:
-    """Build the ZipInfo for one entry from its name and source mode."""
-    info = zipfile.ZipInfo(arcname, date_time=ARCHIVE_DATE_TIME)
-    # ZipInfo derives create_system from the host platform, which would make
-    # the same tree produce different bytes on Windows and on macOS.
-    info.create_system = 3  # Unix, so external_attr is read as a file mode
-    if stat.S_ISDIR(mode):
-        info.compress_type = zipfile.ZIP_STORED
-        info.external_attr = (0o40755 << 16) | 0x10  # MS-DOS directory flag
-    else:
-        info.compress_type = zipfile.ZIP_DEFLATED
-        info.external_attr = (0o100000 | archive_file_mode(mode)) << 16
-        # zipfile renamed the per-entry deflate level attribute in 3.13.
-        attribute = next(
-            name for name in ("compress_level", "_compresslevel") if hasattr(info, name)
-        )
-        setattr(info, attribute, ARCHIVE_COMPRESS_LEVEL)
-    return info
-
-
 def archive_zip(source: Path, destination: Path) -> None:
-    """Archive source so the same tree always yields the same bytes.
-
-    A rerun of a failed job has to reproduce the published artifact exactly,
-    otherwise latest.json's sha256 changes for unchanged sources and the files
-    already uploaded for this version are wasted.
-    """
     with zipfile.ZipFile(
-        destination,
-        "w",
-        compression=zipfile.ZIP_DEFLATED,
-        compresslevel=ARCHIVE_COMPRESS_LEVEL,
+        destination, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
     ) as archive:
-        for path, arcname in archive_entries(source, include_root=False):
-            mode = path.stat().st_mode
-            is_directory = stat.S_ISDIR(mode)
-            # ZIP marks an entry as a directory by its trailing slash.
-            info = zip_member_info(f"{arcname}/" if is_directory else arcname, mode)
-            if is_directory:
-                archive.open(info, "w").close()
-                continue
-            with path.open("rb") as data, archive.open(info, "w") as target:
-                shutil.copyfileobj(data, target)
-
-
-def tar_info_without_host_state(info: tarfile.TarInfo) -> tarfile.TarInfo:
-    """Strip packaging-host metadata from a tar entry.
-
-    Ownership is normalized to root and permissions to an executable/plain
-    pair, while the entry type and any link target are left untouched so an
-    .app bundle's symlinks stay symlinks.
-    """
-    info.uid = 0
-    info.gid = 0
-    info.uname = ""
-    info.gname = ""
-    info.mtime = ARCHIVE_MTIME
-    if info.issym():
-        info.mode = 0o777  # Symlink modes are neither defined nor extracted
-    elif info.isdir():
-        info.mode = 0o755
-    else:
-        info.mode = archive_file_mode(info.mode)
-    return info
-
-
-def archive_tar_gz(source: Path, destination: Path) -> None:
-    """Archive source as a gzip tar whose bytes depend only on the tree.
-
-    Same reason as archive_zip: the updater archives must be reusable across
-    runs of one source revision, so nothing from the packaging host may leak
-    into an entry header or the gzip header.
-    """
-    # A raw tarfile write would stamp the gzip header with the current time.
-    with destination.open("wb") as handle:
-        with gzip.GzipFile(
-            filename="",
-            mode="wb",
-            fileobj=handle,
-            mtime=ARCHIVE_MTIME,
-            compresslevel=ARCHIVE_COMPRESS_LEVEL,
-        ) as compressed:
-            with tarfile.open(fileobj=compressed, mode="w") as archive:
-                # add() would walk os.listdir(), whose order is undefined, so
-                # every path is added explicitly in the sorted order instead.
-                for path, arcname in archive_entries(source, include_root=True):
-                    archive.add(
-                        path,
-                        arcname=arcname,
-                        recursive=False,
-                        filter=tar_info_without_host_state,
-                    )
+        for path in sorted(source.rglob("*")):
+            archive.write(path, path.relative_to(source.parent))
 
 
 def windows_numeric_version(version: str) -> str:
@@ -589,7 +502,7 @@ def create_macos_packages(
     binary: Path, info: TargetInfo, version: str, artifact_version: str
 ) -> None:
     identity = release_identity(version)
-    bundle = WORK_DIR / "ZzClawTerm.app"
+    bundle = WORK_DIR / identity.macos_bundle_name
     macos_dir = bundle / "Contents" / "MacOS"
     resources_dir = bundle / "Contents" / "Resources"
     macos_dir.mkdir(parents=True)
@@ -604,12 +517,12 @@ def create_macos_packages(
 
     plist = {
         "CFBundleDevelopmentRegion": "en",
-        "CFBundleDisplayName": APP_NAME,
+        "CFBundleDisplayName": identity.display_name,
         "CFBundleExecutable": "ZzClawTerm",
         "CFBundleIconFile": "icon.icns",
-        "CFBundleIdentifier": MACOS_IDENTIFIER,
+        "CFBundleIdentifier": identity.macos_identifier,
         "CFBundleInfoDictionaryVersion": "6.0",
-        "CFBundleName": APP_NAME,
+        "CFBundleName": identity.display_name,
         "CFBundlePackageType": "APPL",
         "CFBundleShortVersionString": version,
         "CFBundleURLTypes": [
@@ -622,7 +535,7 @@ def create_macos_packages(
         "CFBundleVersion": version,
         "LSMinimumSystemVersion": "12.0",
         "NSHighResolutionCapable": True,
-        "NSHumanReadableCopyright": "Copyright Jackfahdin",
+        "NSHumanReadableCopyright": "Copyright Kang",
     }
     with (bundle / "Contents" / "Info.plist").open("wb") as handle:
         plistlib.dump(plist, handle, sort_keys=True)
@@ -631,24 +544,30 @@ def create_macos_packages(
     # Sign inside out. A bundle-only signature seals extra Mach-O files in
     # Contents/MacOS as resources instead of signing them as code, which makes
     # the helper fail to launch under Gatekeeper.
-    for helper in helper_binaries:
+    android_code = [*macos_dir.glob("android-libs/*.dylib"), macos_dir / "adb" / "adb"]
+    for helper in [*android_code, *helper_binaries]:
         run([codesign, "--force", "--sign", "-", "--timestamp=none", str(helper)])
+    manifest_path = macos_dir / "android-resources.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"] = {name: hashlib.sha256((macos_dir / name).read_bytes()).hexdigest() for name in manifest["files"]}
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     run([codesign, "--force", "--deep", "--sign", "-", "--timestamp=none", str(bundle)])
 
     tar_output = DIST_DIR / f"{APP_NAME}_{artifact_version}_{info.label}.app.tar.gz"
-    archive_tar_gz(bundle, tar_output)
+    with tarfile.open(tar_output, "w:gz", compresslevel=9) as archive:
+        archive.add(bundle, arcname=identity.macos_bundle_name)
 
     dmg_root = WORK_DIR / "dmg"
     dmg_root.mkdir()
-    shutil.copytree(bundle, dmg_root / "ZzClawTerm.app", symlinks=True)
+    shutil.copytree(bundle, dmg_root / identity.macos_bundle_name, symlinks=True)
     (dmg_root / "Applications").symlink_to("/Applications")
     dmg_output = DIST_DIR / f"{APP_NAME}_{artifact_version}_{info.label}.dmg"
-    run(
+    run_with_retry(
         [
             require_tool("hdiutil"),
             "create",
             "-volname",
-            APP_NAME,
+            identity.display_name,
             "-srcfolder",
             str(dmg_root),
             "-ov",
@@ -681,11 +600,13 @@ def linux_appimage_arch(target: str) -> str:
 
 
 def linux_rpm_version(version: str) -> tuple[str, str]:
-    if "-" not in version:
-        return version, "1"
-    upstream, prerelease = version.split("-", 1)
+    parsed = parse_version(version)
+    upstream = ".".join(parsed.group(key) for key in ("major", "minor", "patch"))
+    prerelease = parsed.group("pre")
+    if prerelease is None:
+        return upstream, "1"
     normalized = re.sub(r"[^0-9A-Za-z]+", ".", prerelease).strip(".")
-    return upstream, f"0.{normalized or 'preview'}"
+    return upstream, f"0.{normalized}"
 
 
 def write_desktop_file(
@@ -700,7 +621,7 @@ def write_desktop_file(
             Comment=Native GPUI terminal and SSH client
             Exec={executable} %U
             Icon={identity.desktop_id}
-            StartupWMClass={identity.desktop_id}
+            StartupWMClass={identity.display_name}
             Terminal=false
             Categories=Development;TerminalEmulator;Network;
             MimeType={"".join(f"x-scheme-handler/{scheme};" for scheme in identity.url_schemes)}
@@ -709,19 +630,11 @@ def write_desktop_file(
         ).lstrip(),
         encoding="utf-8",
     )
+    path.chmod(0o644)
 
 
 def copy_linux_icons(root: Path, identity: PackageIdentity = STABLE_IDENTITY) -> None:
-    icons = {
-        "32x32": "32x32.png",
-        "64x64": "64x64.png",
-        "128x128": "128x128.png",
-        "256x256": "256x256.png",
-    }
-    for size, source in icons.items():
-        destination = root / "usr" / "share" / "icons" / "hicolor" / size / "apps"
-        destination.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ICON_DIR / source, destination / f"{identity.desktop_id}.png")
+    linux_icons.copy_icons(root, ICON_DIR, identity.desktop_id)
 
 
 def parse_dpkg_dependencies(output: str) -> str:
@@ -759,15 +672,14 @@ def create_linux_appimage(
     shutil.copy2(binary, app_binary)
     make_executable(app_binary)
     copy_helpers(usr_bin, info.target)
-    copy_release_documents(appdir / "usr" / "share" / "doc" / LINUX_PACKAGE, version)
+    copy_release_documents(appdir / "usr" / "share" / "doc" / identity.desktop_id, version)
 
     applications = appdir / "usr" / "share" / "applications"
     applications.mkdir(parents=True)
     write_desktop_file(applications / identity.linux_desktop_file, APP_BIN, identity)
-    shutil.copy2(
-        applications / identity.linux_desktop_file, appdir / identity.linux_desktop_file
-    )
+    shutil.copy2(applications / identity.linux_desktop_file, appdir / identity.linux_desktop_file)
     shutil.copy2(ICON_DIR / "128x128.png", appdir / f"{identity.desktop_id}.png")
+    (appdir / f"{identity.desktop_id}.png").chmod(0o644)
     copy_linux_icons(appdir, identity)
 
     apprun = appdir / "AppRun"
@@ -777,6 +689,7 @@ def create_linux_appimage(
         encoding="utf-8",
     )
     make_executable(apprun)
+    linux_icons.normalize_permissions(appdir)
 
     output = DIST_DIR / f"{APP_NAME}_{artifact_version}_{info.label}.AppImage"
     env = os.environ.copy()
@@ -790,36 +703,33 @@ def create_linux_deb(
 ) -> None:
     identity = release_identity(version)
     root = WORK_DIR / "deb"
-    app_root = root / "opt" / LINUX_PACKAGE
+    app_root = root / "opt" / identity.desktop_id
     app_root.mkdir(parents=True)
     app_binary = app_root / APP_BIN
     shutil.copy2(binary, app_binary)
     make_executable(app_binary)
     helper_binaries = copy_helpers(app_root, info.target)
     copy_release_documents(app_root, version)
-    copy_release_documents(root / "usr" / "share" / "doc" / LINUX_PACKAGE, version)
+    copy_release_documents(root / "usr" / "share" / "doc" / identity.desktop_id, version)
 
     applications = root / "usr" / "share" / "applications"
     applications.mkdir(parents=True)
-    write_desktop_file(
-        applications / identity.linux_desktop_file,
-        f"/opt/{identity.desktop_id}/zzclawterm",
-        identity,
-    )
+    write_desktop_file(applications / identity.linux_desktop_file, f"/opt/{identity.desktop_id}/zzclawterm", identity)
     copy_linux_icons(root, identity)
 
     control_dir = root / "DEBIAN"
     control_dir.mkdir()
+    linux_icons.write_postinst(control_dir / "postinst", identity.desktop_id)
     dependencies = linux_deb_dependencies([app_binary, *helper_binaries])
     (control_dir / "control").write_text(
         textwrap.dedent(
             f"""
-            Package: zzclawterm
+            Package: {identity.desktop_id}
             Version: {version.replace('-', '~')}
             Section: utils
             Priority: optional
             Architecture: {linux_deb_arch(info.target)}
-            Maintainer: Jackfahdin <guomaojie@petalmail.com>
+            Maintainer: Kang <noreply@zzclawterm.app>
             Depends: {dependencies}
             Recommends: libvulkan1 | mesa-vulkan-drivers
             Description: ZzClawTerm native GPUI terminal and SSH client
@@ -829,6 +739,7 @@ def create_linux_deb(
         encoding="utf-8",
     )
     output = DIST_DIR / f"{APP_NAME}_{artifact_version}_{info.label}.deb"
+    linux_icons.normalize_permissions(root)
     run([require_tool("dpkg-deb"), "--build", "--root-owner-group", str(root), str(output)])
 
 
@@ -842,33 +753,30 @@ def create_linux_rpm(
     for directory in ("BUILD", "BUILDROOT", "RPMS", "SOURCES", "SPECS", "SRPMS"):
         (top_dir / directory).mkdir(parents=True)
 
-    app_root = payload / "opt" / LINUX_PACKAGE
+    app_root = payload / "opt" / identity.desktop_id
     app_root.mkdir(parents=True)
     app_binary = app_root / APP_BIN
     shutil.copy2(binary, app_binary)
     make_executable(app_binary)
     copy_helpers(app_root, info.target)
     copy_release_documents(app_root, version)
-    copy_release_documents(payload / "usr" / "share" / "doc" / LINUX_PACKAGE, version)
+    copy_release_documents(payload / "usr" / "share" / "doc" / identity.desktop_id, version)
     applications = payload / "usr" / "share" / "applications"
     applications.mkdir(parents=True)
-    write_desktop_file(
-        applications / identity.linux_desktop_file,
-        f"/opt/{identity.desktop_id}/zzclawterm",
-        identity,
-    )
+    write_desktop_file(applications / identity.linux_desktop_file, f"/opt/{identity.desktop_id}/zzclawterm", identity)
     copy_linux_icons(payload, identity)
+    linux_icons.normalize_permissions(payload)
 
     rpm_version, rpm_release = linux_rpm_version(version)
     payload_path = str(payload.resolve()).replace("%", "%%")
     spec = textwrap.dedent(
         f"""
-        Name: zzclawterm
+        Name: {identity.desktop_id}
         Version: {rpm_version}
         Release: {rpm_release}
         Summary: ZzClawTerm native GPUI terminal and SSH client
         License: Apache-2.0
-        URL: https://github.com/jackfahdin/ZzClawTerm
+        URL: https://zzclawterm.app
         BuildArch: {linux_rpm_arch(info.target)}
 
         %description
@@ -880,10 +788,10 @@ def create_linux_rpm(
         cp -a "{payload_path}/." %{{buildroot}}/
 
         %files
-        /opt/zzclawterm
-        /usr/share/applications/zzclawterm.desktop
-        /usr/share/icons/hicolor/*/apps/zzclawterm.png
-        /usr/share/doc/zzclawterm
+        /opt/{identity.desktop_id}
+        /usr/share/applications/{identity.linux_desktop_file}
+        /usr/share/icons/hicolor/*/apps/{identity.desktop_id}.png
+        /usr/share/doc/{identity.desktop_id}
         """
     ).lstrip()
     spec_path = top_dir / "SPECS" / "zzclawterm.spec"
@@ -897,6 +805,16 @@ def create_linux_rpm(
             "_build_id_links none",
             "--define",
             "debug_package %{nil}",
+            # Resource hashes cover the exact staged binaries. RPM's default
+            # strip hooks otherwise rewrite ADB and FFmpeg after hashing.
+            "--define",
+            "__strip /bin/true",
+            "--define",
+            "__brp_strip %{nil}",
+            "--define",
+            "__brp_strip_static_archive %{nil}",
+            "--define",
+            "__brp_strip_comment_note %{nil}",
             "-bb",
             str(spec_path),
         ]

@@ -110,6 +110,12 @@ fn terminal_retained_snapshot_matches_view(
     let scrollback_len = view.scrollback_len_for_ui();
     view.history_state()
         .preserves_coordinates_from(snapshot.history)
+        // Folding changes presentation without changing VT history or row text.
+        // Once the worker publishes the new layout, a retained surface frame
+        // must not take precedence over its replacement scroll snapshot.
+        && view.frame_snapshot.as_ref().is_none_or(|live| {
+            snapshot.display_rows == live.display_rows
+        })
         && terminal_snapshot_matches_grid_geometry(snapshot, view.screen.cols(), view.screen.rows())
         && snapshot.scrollback_len == scrollback_len
         && terminal_snapshot_covers_display_offset(
@@ -121,6 +127,29 @@ fn terminal_retained_snapshot_matches_view(
 }
 
 fn terminal_paint_window_snapshot_for_view(
+    view: Option<&TerminalViewState>,
+    display_offset: usize,
+    viewport_rows: usize,
+    retained_surface_snapshot: Option<std::sync::Arc<TerminalSnapshot>>,
+) -> Option<std::sync::Arc<TerminalSnapshot>> {
+    let mut snapshot = terminal_paint_window_snapshot_for_view_inner(
+        view,
+        display_offset,
+        viewport_rows,
+        retained_surface_snapshot,
+    )?;
+    if let Some(live) = view.and_then(|view| view.frame_snapshot.as_ref())
+        && (snapshot.command_navigation_revision != live.command_navigation_revision
+            || snapshot.command_navigation_target != live.command_navigation_target)
+    {
+        let snapshot = std::sync::Arc::make_mut(&mut snapshot);
+        snapshot.command_navigation_target = live.command_navigation_target;
+        snapshot.command_navigation_revision = live.command_navigation_revision;
+    }
+    Some(snapshot)
+}
+
+fn terminal_paint_window_snapshot_for_view_inner(
     view: Option<&TerminalViewState>,
     display_offset: usize,
     viewport_rows: usize,
@@ -246,8 +275,13 @@ fn terminal_snapshot_with_newer_edge_row(
     rows.push(newer.rows().last().unwrap().clone());
     std::sync::Arc::new(TerminalSnapshot::from_rows(
         zzclawterm_terminal::TerminalSnapshotMeta {
+            command_blocks: base.command_blocks.clone(),
+            display_rows: base.display_rows.clone(),
             history: base.history,
             shell_input_anchor: base.shell_input_anchor,
+            command_navigation_target: None,
+            command_navigation_revision: 0,
+            shell_command_prompt: None,
             cols: base.cols,
             viewport_rows: base.viewport_rows,
             cursor: base.cursor,
@@ -308,8 +342,13 @@ fn terminal_snapshot_with_retained_scroll_window(
         .collect();
     std::sync::Arc::new(TerminalSnapshot::from_rows(
         zzclawterm_terminal::TerminalSnapshotMeta {
+            command_blocks: base.command_blocks.clone(),
+            display_rows: base.display_rows.clone(),
             history: base.history,
             shell_input_anchor: base.shell_input_anchor,
+            command_navigation_target: None,
+            command_navigation_revision: 0,
+            shell_command_prompt: None,
             cols: base.cols,
             viewport_rows: base.viewport_rows,
             cursor: base.cursor,
@@ -450,10 +489,16 @@ fn terminal_scroll_text_first_decorations(
     )
 }
 
-fn terminal_keyword_highlight_updates_allowed(is_active: bool, input_latency_active: bool) -> bool {
-    // Output batches wait for input idle and retain their previous spans.
-    // Live input colors arrive already computed with each worker frame.
-    is_active && !input_latency_active
+/// Rules to hand the surface for this frame.
+///
+/// While the user is typing, the rules must stay in place: dropping them erased
+/// every colour for a frame and painted it back once input went idle, which read
+/// as "everything flashes on each keystroke". Only the recompute is skipped —
+/// see the `schedule_keyword_highlights` guard.
+fn terminal_frame_keyword_rules(
+    configured: &std::sync::Arc<Vec<zzclawterm_core::ResolvedKeywordHighlightRule>>,
+) -> std::sync::Arc<Vec<zzclawterm_core::ResolvedKeywordHighlightRule>> {
+    configured.clone()
 }
 
 fn terminal_live_action_link_enrichment_allowed(
@@ -675,7 +720,8 @@ impl ZzClawTermApp {
         let surface = cx.new(|_| {
             let mut surface = TerminalSurface::new(session_id_owned);
             surface.set_layout_cache(layout_cache);
-            surface.set_app(app);
+            let line_roles = self.settings.summary().ui_highlight_line_roles;
+            surface.set_app(app, line_roles);
             surface
         });
         self.terminal
@@ -830,19 +876,8 @@ impl ZzClawTermApp {
                 &frame_action_links,
             );
         let configured_keyword_rules = self.resolved_keyword_highlight_rules();
-        let input_rules_key = self
-            .terminal
-            .keyword_highlight_rules_key(&configured_keyword_rules);
-        let input_highlights = is_active
-            .then(|| view.frame_input_highlights.clone())
-            .flatten();
         let clear_keyword_highlights = configured_keyword_rules.is_empty();
-        let keyword_rules =
-            if terminal_keyword_highlight_updates_allowed(is_active, input_latency_active) {
-                configured_keyword_rules.clone()
-            } else {
-                std::sync::Arc::new(Vec::new())
-            };
+        let keyword_rules = terminal_frame_keyword_rules(&configured_keyword_rules);
         let keyword_output_pressure = self.runtime_output_pressure_active();
         if needs_scroll_enrichment {
             let _ = self.request_terminal_frame_snapshot_for_scroll_enrichment(
@@ -885,6 +920,7 @@ impl ZzClawTermApp {
                 is_active,
             });
             changed |= surface.set_protocol_state(protocol_state);
+
             let had_pending_local_scroll_sync = surface.has_pending_local_scroll_sync();
             let frame_applied = surface.apply_frame_snapshot(
                 TerminalSurfaceFrameSnapshot::new(
@@ -917,10 +953,9 @@ impl ZzClawTermApp {
                     true,
                 )
             };
-            changed |= surface.set_input_keyword_highlights(input_highlights, input_rules_key);
             changed |= surface.reveal_input_cursor(horizontal_input_at);
             let selection_changed = surface.set_selection_visual(terminal_selection);
-            if frame_applied || paint_details_changed {
+            if changed || frame_applied || paint_details_changed {
                 surface.schedule_keyword_highlights(
                     clear_keyword_highlights,
                     keyword_output_pressure,
@@ -1053,6 +1088,7 @@ impl ZzClawTermApp {
         let skipped = view.map(|v| v.skipped_output_chars).unwrap_or(0);
         let protocol_state = view.map(|v| v.protocol_state).unwrap_or_default();
         let target_line = view.and_then(|v| v.target_line);
+        let command_blocks = view.map(|v| v.command_blocks.clone()).unwrap_or_default();
         let zebra_stripes_enabled = self.settings.summary().terminal_zebra_stripes_enabled;
         let zebra_stripes_by_row = self.settings.summary().terminal_zebra_stripes_by_row;
         let layout_cache = view
@@ -1127,19 +1163,8 @@ impl ZzClawTermApp {
             || input_latency_active;
         let render_degraded = render_degraded_view || render_pressure;
         let configured_keyword_rules = self.resolved_keyword_highlight_rules();
-        let input_rules_key = self
-            .terminal
-            .keyword_highlight_rules_key(&configured_keyword_rules);
-        let input_highlights = view
-            .filter(|_| is_active)
-            .and_then(|view| view.frame_input_highlights.clone());
         let clear_keyword_highlights = configured_keyword_rules.is_empty();
-        let keyword_rules =
-            if !terminal_keyword_highlight_updates_allowed(is_active, input_latency_active) {
-                std::sync::Arc::new(Vec::new())
-            } else {
-                configured_keyword_rules.clone()
-            };
+        let keyword_rules = terminal_frame_keyword_rules(&configured_keyword_rules);
         let retained_lookup_started_at = Instant::now();
         let retained_surface_snapshot = if display_offset > 0 {
             surface
@@ -1282,6 +1307,7 @@ impl ZzClawTermApp {
                     is_active,
                 });
                 changed |= surface.set_protocol_state(protocol_state);
+                changed |= surface.set_command_blocks(command_blocks);
                 changed |= surface.set_zebra_stripes(
                     zebra_stripes_enabled,
                     zebra_stripes_by_row,
@@ -1289,6 +1315,7 @@ impl ZzClawTermApp {
                 );
                 changed |= surface.update_scroll_chrome_without_snapshot(&scroll_state);
                 if changed {
+                    surface.schedule_keyword_highlights(false, false, cx);
                     cx.notify();
                 }
             });
@@ -1571,6 +1598,7 @@ impl ZzClawTermApp {
                 is_active,
             });
             changed |= surface.set_protocol_state(protocol_state);
+            changed |= surface.set_command_blocks(command_blocks);
             changed |=
                 surface.set_zebra_stripes(zebra_stripes_enabled, zebra_stripes_by_row, target_line);
             let had_pending_local_scroll_sync = surface.has_pending_local_scroll_sync();
@@ -1612,10 +1640,9 @@ impl ZzClawTermApp {
                     true,
                 )
             };
-            changed |= surface.set_input_keyword_highlights(input_highlights, input_rules_key);
             changed |= surface.reveal_input_cursor(horizontal_input_at);
             let selection_changed = surface.set_selection_visual(terminal_selection);
-            if frame_applied || paint_details_changed {
+            if changed || frame_applied || paint_details_changed {
                 surface.schedule_keyword_highlights(
                     clear_keyword_highlights,
                     render_output_pressure,
@@ -1714,6 +1741,7 @@ impl ZzClawTermApp {
         if self.sync_terminal_live_scroll_surface(&surface, &desired_scroll_state, cx) {
             return;
         }
+        surface.update(cx, |surface, _cx| surface.advance_history(history));
         let (can_reuse_snapshot, scroll_state_current) = {
             let surface = surface.read(cx);
             (
@@ -1862,6 +1890,7 @@ impl ZzClawTermApp {
         if self.sync_terminal_live_scroll_surface(&surface, &desired_scroll_state, cx) {
             return;
         }
+        surface.update(cx, |surface, _cx| surface.advance_history(history));
         let (can_reuse_snapshot, scroll_state_current) = {
             let surface = surface.read(cx);
             (
