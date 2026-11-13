@@ -10,6 +10,25 @@ export type ChangelogRelease = {
 
 const changelogReleasesEn: ChangelogRelease[] = [
   {
+    version: '[0.2.2] - 2026-11-14',
+    sections: [
+      {
+        title: 'Added',
+        items: [
+          '**sync:** Sync upstream main through 2ae09cc2 (283 commits), adding native Android/ADB connections, device shells, file management, scrcpy screen control, and modular AI, MCP, cloud-storage, and updater services.',
+        ],
+      },
+      {
+        title: 'Fixed',
+        items: [
+          '**app:** Restore bundled ConPTY entry-point configuration, block terminal input in file-manager workspaces, and refresh row-based zebra stripes immediately.',
+          '**build:** Update GPUI fork pins and restore ConPTY, provenance, quick-command, and portable-update coverage, including updater conditionals on non-Windows hosts.',
+          '**ui:** Correct synchronized interface regressions and changelog ownership, with more scheduling tolerance for transport cancellation tests.',
+        ],
+      },
+    ],
+  },
+  {
     version: '[Unreleased]',
     sections: [
       {
@@ -2729,6 +2748,25 @@ const changelogReleasesEn: ChangelogRelease[] = [
 ];
 
 const changelogReleasesZhCN: ChangelogRelease[] = [
+  {
+    version: '[0.2.2] - 2026-11-14',
+    sections: [
+      {
+        title: '新增',
+        items: [
+          '**sync:** 同步上游 main 至 2ae09cc2（283 个提交的净差异），新增原生 Android/ADB 连接、设备 Shell、文件管理与 scrcpy 屏幕操作，并拆分 AI、MCP、云存储和更新器等模块。',
+        ],
+      },
+      {
+        title: '修复',
+        items: [
+          '**app:** 恢复随包 ConPTY 的应用入口配置，阻止文件管理器工作区误接收终端输入，并在切换按显示行交替条纹后立即刷新。',
+          '**build:** 更新并同步 GPUI 相关 fork；补齐 ConPTY、发布来源、快捷命令与便携更新测试，修复 updater 在非 Windows 环境的条件编译。',
+          '**ui:** 修复同步后的界面回归用例和更新日志版本归属，并提高传输取消测试在 CI 中的调度稳定性。',
+        ],
+      },
+    ],
+  },
   {
     version: '[未发布]',
     sections: [

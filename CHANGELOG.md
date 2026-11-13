@@ -27,6 +27,18 @@
 - **security:** Deliver password-unlock results to the window that initiated the request.
 - **ssh:** Keep zsh shell-integration injection out of persistent command history.
 
+## [0.2.2] - 2026-11-14
+
+### 新增
+
+- **sync:** 同步上游 main 至 2ae09cc2（283 个提交的净差异），新增原生 Android/ADB 连接、设备 Shell、文件管理与 scrcpy 屏幕操作，并拆分 AI、MCP、云存储和更新器等模块。
+
+### 修复
+
+- **app:** 恢复随包 ConPTY 的应用入口配置，修复文件管理器工作区误接收终端输入，并让按显示行交替条纹在切换后立即刷新。
+- **build:** 更新并同步 GPUI 相关 fork；补齐 ConPTY、发布来源、快捷命令与便携更新测试，修复 updater 在非 Windows 环境的条件编译。
+- **ui:** 修复界面回归用例和更新日志版本归属，并提高 CI 中传输取消测试的调度稳定性。
+
 ## [0.2.1] - 2026-11-06
 
 ### 新增

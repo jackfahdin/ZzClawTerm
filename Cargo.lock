@@ -14740,7 +14740,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-agent-client"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde_json",
  "tracing",
@@ -14750,7 +14750,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-ai-client"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "futures",
  "genai",
@@ -14766,7 +14766,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-android"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "hex",
  "serde",
@@ -14781,7 +14781,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-android-helper"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "ffmpeg-next",
  "tempfile",
@@ -14791,7 +14791,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-app"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -14818,7 +14818,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-cloud-storage"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "futures",
  "hex",
@@ -14843,7 +14843,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm",
@@ -14890,7 +14890,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-desktop"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -14952,7 +14952,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-files"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -14982,7 +14982,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-mcp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "dirs",
  "rmcp",
@@ -14999,7 +14999,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-mcp-host"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "futures",
@@ -15019,7 +15019,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-mcp-protocol"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "schemars 1.2.2",
  "serde",
@@ -15039,7 +15039,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-plugin-host"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "futures",
  "serde_json",
@@ -15054,7 +15054,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-preview"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytemuck",
  "hayro",
@@ -15067,7 +15067,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-rdp-helper"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -15092,7 +15092,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-recording"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "futures",
  "regex",
@@ -15108,7 +15108,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-remote-desktop"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -15122,7 +15122,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-remote-ops"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "libc",
@@ -15142,7 +15142,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-store"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -15166,7 +15166,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-sync"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "automerge",
  "hex",
@@ -15182,7 +15182,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-terminal"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "alacritty_terminal",
  "encoding_rs",
@@ -15197,7 +15197,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-terminal-gpui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aho-corasick",
  "futures",
@@ -15215,7 +15215,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-translation-client"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde_json",
  "url",
@@ -15225,7 +15225,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-transport"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-http-proxy",
@@ -15262,7 +15262,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-ui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "gpui",
  "gpui-base",
@@ -15275,7 +15275,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-updater"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -15290,7 +15290,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-vnc-helper"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "sha2 0.11.0",
  "tokio",
@@ -15303,7 +15303,7 @@ dependencies = [
 
 [[package]]
 name = "zzclawterm-windows-rdp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "cc",
