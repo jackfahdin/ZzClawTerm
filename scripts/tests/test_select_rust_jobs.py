@@ -78,7 +78,7 @@ class PathSelectionTests(unittest.TestCase):
             "examples/plugins/guests/.cargo/config.toml", "rust-toolchain",
             "rust-toolchain.toml", "rustfmt.toml", ".rustfmt.toml",
             "clippy.toml", ".clippy.toml", ".github/workflows/rust.yml",
-            ".github/workflows/native-package.yml",
+            ".github/workflows/build-native.yml",
             ".github/actions/setup-rust/action.yml", "scripts/ci/select_rust_jobs.py",
             "scripts/ci/install-linux-deps.sh", "scripts/ci/architecture_allowlist.json",
         )

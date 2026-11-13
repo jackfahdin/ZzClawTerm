@@ -264,6 +264,18 @@ jobs:
           python scripts/release/verify_native_package.py
           --target "${TARGET}" --version "${VERSION}" --dist dist
 
+      - name: Test portable updater against packaged ZIP
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          $arch = if ($env:TARGET -eq 'aarch64-pc-windows-msvc') { 'arm64' } else { 'x64' }
+          $env:ZZCLAWTERM_TEST_PORTABLE_ARCH = if ($arch -eq 'arm64') { 'aarch64' } else { 'x86_64' }
+          $env:ZZCLAWTERM_TEST_PORTABLE_ARCHIVE = (Resolve-Path "dist/ZzClawTerm_$($env:VERSION)_windows_${arch}_portable.zip").Path
+          cargo test -p zzclawterm-updater --lib --locked portable_release_archive_round_trip -- --ignored
+
       - name: Upload package artifact
         uses: actions/upload-artifact@v7
         with:

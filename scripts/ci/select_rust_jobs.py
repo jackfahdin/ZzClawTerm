@@ -79,7 +79,7 @@ def select_paths(paths: Iterable[str]) -> Selection:
         if (
             name in GLOBAL_CONFIG_NAMES
             or "/.cargo/" in f"/{path}"
-            or path in {".github/workflows/rust.yml", ".github/workflows/native-package.yml"}
+            or path in {".github/workflows/rust.yml", ".github/workflows/build-native.yml"}
             or path.startswith((".github/actions/", "scripts/ci/"))
         ):
             selection.enable(OUTPUTS, f"Shared build/CI configuration: {description}")

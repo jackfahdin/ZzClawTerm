@@ -1,4 +1,4 @@
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 use std::ffi::OsString;
 #[cfg(any(windows, target_os = "macos", test))]
 use std::path::Path;
@@ -506,7 +506,7 @@ fn run_windows_installed_helper(
     Err(install_error)
 }
 
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 fn installed_setup_arguments(target_dir: &Path) -> [OsString; 5] {
     [
         "/VERYSILENT".into(),

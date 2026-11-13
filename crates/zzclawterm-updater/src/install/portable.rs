@@ -447,6 +447,21 @@ mod tests {
                     .contains("symbolic link")
                 );
             }
+            let root = TestTempDir::new("zzclawterm-portable-wrong-arch");
+            let other = if architecture == UpdateArchitecture::X86_64 {
+                UpdateArchitecture::Aarch64
+            } else {
+                UpdateArchitecture::X86_64
+            };
+            write_zip(&root.join("archive.zip"), &entries(other), None);
+            assert!(
+                extract_windows_portable(
+                    &root.join("archive.zip"),
+                    &root.join("staged"),
+                    architecture
+                )
+                .is_err()
+            );
         }
     }
 
