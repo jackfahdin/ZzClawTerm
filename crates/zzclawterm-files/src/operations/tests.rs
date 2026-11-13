@@ -6,7 +6,6 @@ use crate::file_browser::FileBrowserService;
 use crate::sftp::{RemoteFilePath, SftpTransferControl};
 use crate::sftp_transfer_types::{SftpDuplicatePolicy, SftpPathTransferOptions};
 use std::fs;
-use std::fs;
 use zzclawterm_core::test_support::TestTempDir;
 
 fn run(

@@ -407,7 +407,6 @@ mod tests {
     use genai::{ModelIden, adapter::AdapterKind};
     use serde_json::json;
     use zzclawterm_core::ai::AiProviderApiProtocol;
-    use zzclawterm_core::ai::AiProviderApiProtocol;
     use zzclawterm_core::ai::completion::{AiStreamEventKind, AiStreamFrameFailureReason};
 
     fn observe(observer: &FrameObserver, data: &str) {
