@@ -10,13 +10,11 @@ export type ChangelogRelease = {
 
 const changelogReleasesEn: ChangelogRelease[] = [
   {
-    version: '[0.2.1] - 2026-11-06',
+    version: '[Unreleased]',
     sections: [
       {
         title: 'Added',
         items: [
-          '**sync:** Sync upstream ZzClawTerm (219 commits): Cloud Sync V4 with OpenDAL, configuration replacement protection, tmux support, completion improvements, connection search, session diagnostics notifications, and more.',
-          '**settings:** Add a toggle for copy success notifications.',
           '**assets:** Add multi-select batch editing for saved connections and full MobaXterm session import.',
         ],
       },
@@ -36,6 +34,25 @@ const changelogReleasesEn: ChangelogRelease[] = [
           '**highlighting:** Persist command-output highlighting when applying settings, show all built-in rules, and restore the v2.0.2 preset colors while preserving custom colors.',
           '**security:** Deliver password-unlock results to the window that initiated the request.',
           '**ssh:** Keep zsh shell-integration injection out of persistent command history.',
+        ],
+      },
+    ],
+  },
+  {
+    version: '[0.2.1] - 2026-11-06',
+    sections: [
+      {
+        title: 'Added',
+        items: [
+          '**sync:** Sync upstream NyaTerm (219 commits): Cloud Sync V4 with OpenDAL, configuration replacement protection, tmux support, completion improvements, connection search, session diagnostics notifications, and more.',
+          '**settings:** Add a toggle for copy success notifications.',
+        ],
+      },
+      {
+        title: 'Fixed',
+        items: [
+          '**desktop:** Fix duplicate command history entries caused by dual-channel recording.',
+          '**build:** Fix ConPTY packaging and portable update verification; move all build-time forks to Jackfahdin GitHub repositories to fix missing pinned revisions in CI.',
         ],
       },
     ],
@@ -2742,6 +2759,25 @@ const changelogReleasesZhCN: ChangelogRelease[] = [
     ],
   },
   {
+    version: '[0.2.1] - 2026-11-06',
+    sections: [
+      {
+        title: 'Added',
+        items: [
+          '**sync:** Sync upstream NyaTerm (219 commits): Cloud Sync V4 with OpenDAL, configuration replacement protection, tmux support, completion improvements, connection search, session diagnostics notifications, and more.',
+          '**settings:** Add a toggle for copy success notifications.',
+        ],
+      },
+      {
+        title: 'Fixed',
+        items: [
+          '**desktop:** Fix duplicate command history entries caused by dual-channel recording.',
+          '**build:** Fix ConPTY packaging and portable update verification; move all build-time forks to Jackfahdin GitHub repositories to fix missing pinned revisions in CI.',
+        ],
+      },
+    ],
+  },
+  {
     version: '[2.0.3] - 2026-11-08',
     sections: [
       {
@@ -4577,7 +4613,7 @@ const changelogReleasesZhCN: ChangelogRelease[] = [
       {
         title: 'Added',
         items: [
-          '**sync:** Sync upstream ZzClawTerm (29 commits): connection editor save flow, WSL command construction and working directory handling, bulk admission and queuing for transfer jobs, clipboard input handling, terminal selection text management, AI system-prompt context, cloud sync snapshot heads, SFTP directory downloads, terminal execution recording, ping sequence counters and numeric-pattern semantic highlighting, minimum contrast ratio, Windows application version resources, macOS app icon and title-bar double-click resize, and more.',
+          '**sync:** Sync upstream NyaTerm (29 commits): connection editor save flow, WSL command construction and working directory handling, bulk admission and queuing for transfer jobs, clipboard input handling, terminal selection text management, AI system-prompt context, cloud sync snapshot heads, SFTP directory downloads, terminal execution recording, ping sequence counters and numeric-pattern semantic highlighting, minimum contrast ratio, Windows application version resources, macOS app icon and title-bar double-click resize, and more.',
           '**settings:** X11 gains clipboard / PRIMARY selection, native OpenGL, and DPI launch options; Windows IPv4 listen addresses are queried in the background, and copyable current / next-launch arguments are shown.',
         ],
       },
@@ -4598,7 +4634,7 @@ const changelogReleasesZhCN: ChangelogRelease[] = [
       {
         title: 'Added',
         items: [
-          '**sync:** Sync upstream ZzClawTerm (40 commits): dual-pane file manager, logical line numbers for terminal snapshots, WindTerm Dark/Light themes, settings panel visibility management with a remote monitoring tab, per-connection username source handling, session retry with tab placement, tab close buttons, built-in editor font size, document language recognition, and more.',
+          '**sync:** Sync upstream NyaTerm (40 commits): dual-pane file manager, logical line numbers for terminal snapshots, WindTerm Dark/Light themes, settings panel visibility management with a remote monitoring tab, per-connection username source handling, session retry with tab placement, tab close buttons, built-in editor font size, document language recognition, and more.',
           '**settings:** New Settings → Terminal → X11 tab: a centered X11 icon shows the server state (accent while running, gray otherwise; hover for status, display, and path details); local DISPLAY and X server path settings moved here.',
           '**settings:** X server path becomes a dropdown ("ZzXsrv (default)" auto-discovery / "Custom" with a native browse button), validated to require an existing vcxsrv.exe before settings can be applied.',
           '**settings:** New "Show X server tray icon" toggle (on by default; launches new instances with `-notrayicon` when off); a red "restart the X server to take effect" hint appears while a running managed instance disagrees with the toggle.',
@@ -4628,7 +4664,7 @@ const changelogReleasesZhCN: ChangelogRelease[] = [
       {
         title: 'Added',
         items: [
-          '**sync:** Sync upstream ZzClawTerm (82 commits): custom theme management with CSS color parsing, theme editor contrast handling, tab drag reordering and overflow scrolling, terminal wheel zoom, Telnet keep-alive configuration, remote desktop key bindings and upload resource management, cooperative cloud sync cancellation with unreadable-snapshot recovery, transfer progress reporting, editor save permission preservation, Windows Terminal settings compatibility (jsonc-parser), Alt-as-meta handling, scroll history state management, and more.',
+          '**sync:** Sync upstream NyaTerm (82 commits): custom theme management with CSS color parsing, theme editor contrast handling, tab drag reordering and overflow scrolling, terminal wheel zoom, Telnet keep-alive configuration, remote desktop key bindings and upload resource management, cooperative cloud sync cancellation with unreadable-snapshot recovery, transfer progress reporting, editor save permission preservation, Windows Terminal settings compatibility (jsonc-parser), Alt-as-meta handling, scroll history state management, and more.',
           '**build:** All forked dependencies (including portable-pty) now resolve to GitCode mirrors; no direct nyakang repository references remain.',
         ],
       },
@@ -4647,7 +4683,7 @@ const changelogReleasesZhCN: ChangelogRelease[] = [
         title: 'Added',
         items: [
           '**update:** New Gitee update source; automatic mode checks and downloads in Gitee → GitCode → GitHub order.',
-          '**sync:** Sync upstream ZzClawTerm (15 commits): quick command category drag-and-drop with the "all" category as drop target, terminal rendering performance (glyph support, styled-span rendering rework), held `*`/`**` flush after 50ms output idle, session text scrollback limit, whitespace preservation for connection passwords, cloud sync snapshot secret decryption rework, restored v1 icon palette and server glyph, non-ASCII font family name rendering fixes, and more.',
+          '**sync:** Sync upstream NyaTerm (15 commits): quick command category drag-and-drop with the "all" category as drop target, terminal rendering performance (glyph support, styled-span rendering rework), held `*`/`**` flush after 50ms output idle, session text scrollback limit, whitespace preservation for connection passwords, cloud sync snapshot secret decryption rework, restored v1 icon palette and server glyph, non-ASCII font family name rendering fixes, and more.',
         ],
       },
       {
@@ -4670,7 +4706,7 @@ const changelogReleasesZhCN: ChangelogRelease[] = [
       {
         title: 'Added',
         items: [
-          '**sync:** Sync upstream ZzClawTerm through v2.0.0-preview.5 (82 commits): V1 plugin system, Hex editor, terminal tab drag, transfer drag-and-drop import/export with batch deletion, character encoding support, custom serial baud rates, terminal command navigation and semantic keyword highlighting, quick command categories, collapsible connection folders, and more.',
+          '**sync:** Sync upstream NyaTerm through v2.0.0-preview.5 (82 commits): V1 plugin system, Hex editor, terminal tab drag, transfer drag-and-drop import/export with batch deletion, character encoding support, custom serial baud rates, terminal command navigation and semantic keyword highlighting, quick command categories, collapsible connection folders, and more.',
           '**terminal:** Connection password autofill with confirmation, and input line resynchronization for Tab completion.',
           '**ai:** AI agent JSON protocol, execution policy and history management enhancements, and global proxy settings.',
           '**remote-desktop:** RA2_256 server trust verification for RDP.',
