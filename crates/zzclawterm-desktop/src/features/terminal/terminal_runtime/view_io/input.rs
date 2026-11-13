@@ -86,12 +86,9 @@ pub(super) fn terminal_should_track_command_suggestion_input(
 
 impl ZzClawTermApp {
     pub(in crate::features) fn active_terminal_input_blocked(&self) -> bool {
-        self.active_workspace_tab().is_some_and(|key| {
-            matches!(
-                crate::models::WorkspaceTabId::from_layout_key(&key),
-                crate::models::WorkspaceTabId::Editor(_)
-            )
-        }) || self.session.start_has_active_pending()
+        self.active_workspace_tab()
+            .is_some_and(|key| !crate::models::WorkspaceTabId::from_layout_key(&key).is_session())
+            || self.session.start_has_active_pending()
             || self.session.start_has_active_failed()
     }
 

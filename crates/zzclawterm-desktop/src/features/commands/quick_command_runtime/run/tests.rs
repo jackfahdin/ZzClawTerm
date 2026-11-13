@@ -6,6 +6,7 @@ use zzclawterm_core::QuickCommand;
 
 use super::{quick_command_delivery_status, quick_command_executes};
 use crate::features::ZzClawTermApp;
+use crate::features::file_manager::{FileManagerSeed, PaneEndpoint};
 use crate::features::test_support::{app_with_visible_local_session, editor_document};
 use crate::models::SessionLaunchConfig;
 use crate::test_support::{TestAppCleanup, TestConfigDir};
@@ -169,6 +170,22 @@ impl WireFixture {
         assert_eq!(actual, expected);
     }
 
+    fn open_file_manager(&mut self) {
+        self.cx.executor().allow_parking();
+        self.cx.update_entity(&self.app, |app, cx| {
+            let path = self._root.path().to_string_lossy().into_owned();
+            app.open_file_manager_tab(
+                Some(FileManagerSeed {
+                    left: PaneEndpoint::Local,
+                    left_path: Some(zzclawterm_files::sftp::RemoteFilePath::new(path.clone())),
+                    right: PaneEndpoint::Local,
+                    right_path: Some(zzclawterm_files::sftp::RemoteFilePath::new(path)),
+                }),
+                cx,
+            );
+        });
+    }
+
     fn open_editor(&mut self) {
         self.cx.update_entity(&self.app, |app, cx| {
             let document = editor_document(
@@ -264,6 +281,36 @@ fn staged_quick_command_rejects_editor_workspace_like_ordinary_input() {
     fixture.send(r"staged\pcommand");
     fixture.advance();
     fixture.assert_wire(0, b"");
+}
+
+#[test]
+fn staged_quick_command_rejects_file_manager_workspace_like_ordinary_input() {
+    let mut fixture = WireFixture::new(1);
+    fixture.open_file_manager();
+    fixture.cx.update_entity(&fixture.app, |app, cx| {
+        assert!(!app.send_terminal_input(b"typed".to_vec(), cx));
+    });
+    fixture.send("ordinary");
+    fixture.send(r"staged\pcommand");
+    fixture.send(r"\pdelayed");
+    fixture.advance();
+    fixture.assert_wire(0, b"");
+}
+
+#[test]
+fn staged_quick_command_keeps_sending_to_pinned_target_after_opening_file_manager() {
+    let mut fixture = WireFixture::new(1);
+    fixture.send(r"echo foo\pbar");
+    fixture.assert_wire(0, b"echo foo");
+    fixture.open_file_manager();
+    fixture.advance();
+    fixture.assert_wire(0, b"bar\r");
+    fixture.cx.update_entity(&fixture.app, |app, _| {
+        assert_eq!(
+            app.session.command_history_for(&fixture.ids[0]).unwrap(),
+            ["echo foobar"]
+        );
+    });
 }
 
 #[test]
