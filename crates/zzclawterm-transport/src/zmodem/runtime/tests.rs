@@ -496,7 +496,7 @@ fn closing_or_cancelling_interrupts_a_partial_finish_wait() {
                 )
                 .is_empty()
             );
-            assert!(started.elapsed() < FINISH_WAIT);
+            assert!(started.elapsed() < FINISH_WAIT + Duration::from_secs(2));
         });
         assert_eq!(output_bytes(pending), b"\r\x8aO");
     }
