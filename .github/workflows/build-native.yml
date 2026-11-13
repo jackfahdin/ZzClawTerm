@@ -48,6 +48,20 @@ jobs:
 
       - name: Install Linux system dependencies
         uses: ./.github/actions/install-linux-deps
+        with:
+          extra_packages: libclang-dev cmake ninja-build libgtest-dev libprotobuf-dev protobuf-compiler libusb-1.0-0-dev libssl-dev zlib1g-dev libbrotli-dev liblz4-dev libpcre2-dev libzstd-dev
+
+      - name: Prepare Android native dependencies
+        shell: bash
+        run: |
+          python3 scripts/release/prepare_android.py
+          python3 - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          target = subprocess.check_output(['rustc', '-vV'], text=True).split('host: ')[1].splitlines()[0]
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write(f'FFMPEG_DIR={(Path("target/android-deps/ffmpeg") / target).resolve()}\n')
+          PY
 
       - name: Test workspace
         run: cargo test --workspace --locked --no-fail-fast
@@ -91,6 +105,20 @@ jobs:
 
       - name: Install Linux system dependencies
         uses: ./.github/actions/install-linux-deps
+        with:
+          extra_packages: libclang-dev cmake ninja-build libgtest-dev libprotobuf-dev protobuf-compiler libusb-1.0-0-dev libssl-dev zlib1g-dev libbrotli-dev liblz4-dev libpcre2-dev libzstd-dev
+
+      - name: Prepare Android native dependencies
+        shell: bash
+        run: |
+          python3 scripts/release/prepare_android.py
+          python3 - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          target = subprocess.check_output(['rustc', '-vV'], text=True).split('host: ')[1].splitlines()[0]
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write(f'FFMPEG_DIR={(Path("target/android-deps/ffmpeg") / target).resolve()}\n')
+          PY
 
       - name: Check formatting
         run: cargo fmt --all -- --check
