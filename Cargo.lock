@@ -14812,6 +14812,7 @@ dependencies = [
  "zzclawterm-core",
  "zzclawterm-desktop",
  "zzclawterm-store",
+ "zzclawterm-transport",
  "zzclawterm-ui",
 ]
 

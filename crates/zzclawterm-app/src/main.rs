@@ -58,6 +58,10 @@ fn main() -> anyhow::Result<()> {
     if let Err(error) = crash_report::cleanup_old_reports(&runtime.crash_dir()) {
         tracing::warn!(%error, "could not clean up old panic reports");
     }
+    #[cfg(windows)]
+    if let Err(error) = zzclawterm_transport::local_conpty::configure_from_executable() {
+        tracing::warn!(%error, "could not configure bundled ConPTY");
+    }
     zzclawterm_desktop::preload_i18n()
         .map_err(anyhow::Error::msg)
         .context("preload translation catalogs")?;
