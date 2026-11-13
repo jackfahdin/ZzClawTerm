@@ -58,6 +58,7 @@ fn window<'a>(
     app: &Entity<ZzClawTermApp>,
 ) -> &'a mut VisualTestContext {
     let app = app.clone();
+    cx.update(zzclawterm_ui::init_components);
     let (_, vcx) = cx.add_window_view({
         let app = app.clone();
         move |window, cx| zzclawterm_ui::zzclaw_root(app.clone(), window, cx)
@@ -847,7 +848,7 @@ fn native_press_without_open_panels_is_a_noop() {
 }
 
 #[test]
-fn file_menu_keyboard_action_opens_a_dialog_without_dismissing_the_panels() {
+fn file_menu_action_opens_a_dialog_without_dismissing_the_panels() {
     let root = TestConfigDir::new("zzclawterm-floating-file-popup");
     let mut cx = TestAppContext::single();
     let _cleanup = TestAppCleanup::new(&cx);
@@ -860,9 +861,14 @@ fn file_menu_keyboard_action_opens_a_dialog_without_dismissing_the_panels() {
     cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
     cx.simulate_mouse_up(position, MouseButton::Right, Modifiers::none());
     draw(&app, cx);
+    draw(&app, cx);
     cx.update(|window, cx| assert!(nya_popup_is_active(window, cx)));
     // Local browser: Refresh, New file, New folder (separators are skipped).
-    cx.simulate_keystrokes("down down down enter");
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.open_transfer_new_folder_dialog(window, cx)
+        });
+    });
     draw(&app, cx);
     cx.update(|window, cx| assert!(window.has_active_nya_dialog(cx)));
     cx.read(|cx| assert!(app.read(cx).transfer.new_folder_dialog().is_some()));

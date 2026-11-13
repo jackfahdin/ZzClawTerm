@@ -58,6 +58,15 @@ fn open_suggestions(
             Bounds::new(point(px(0.), px(0.)), size(px(800.), px(600.))),
         );
         app.note_shell_editing_input(b"echo", cx);
+        app.terminal.editing.state_mut().mapping =
+            Some(zzclawterm_terminal::editing::InputMapping {
+                cells: Vec::new(),
+                end: (0, 0),
+                row_revisions: Vec::new(),
+                anchor: None,
+            });
+        app.terminal.editing.state_mut().model.phase =
+            zzclawterm_core::terminal::editing::EditPhase::Ready;
         let request = app
             .prepare_command_suggestion_search(
                 app.terminal.assist.command_suggestion_search_gen,

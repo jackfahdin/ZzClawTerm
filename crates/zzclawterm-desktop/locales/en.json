@@ -4547,7 +4547,7 @@
     "x11DeniedHelp": "Enable X11Forwarding in sshd_config and install xauth on the server.",
     "x11Unavailable": "Could not connect to the local X11 server",
     "x11Target": "Display target: %{target}",
-    "x11WindowsHelp": "Windows: install and start VcXsrv or Xming, then try again.",
+    "x11WindowsHelp": "Windows: install and start ZzXsrv or Xming, then try again.",
     "x11MacosHelp": "macOS: install and start XQuartz, then try again.",
     "x11LinuxHelp": "Linux: check DISPLAY and make sure Xorg/Xwayland is running.",
     "tmuxUnconfirmed": "tmux startup command detected, but control mode was not confirmed",
