@@ -903,6 +903,7 @@ mod tests {
         CONFIRM_MAX_BYTES, CONFIRM_TIMEOUT, CONTROL_PREFIX, SILENT_HINT_DELAY, SINGLE_C_WINDOW,
     };
     use super::{ControlMode, HintStatus, TmuxControlDetector, TmuxFeed, tmux_control_command};
+    use std::time::Duration;
 
     const STARTUP: &[u8] = b"%begin 1 2 0\r\n%end 1 2 0\r\n%window-add @0\r\n%sessions-changed\r\n%session-changed $0 0\r\n";
 

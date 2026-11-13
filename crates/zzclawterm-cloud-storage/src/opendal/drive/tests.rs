@@ -1,4 +1,3 @@
-use opendal::HttpTransport as _;
 use std::sync::{Arc, Mutex};
 
 use zzclawterm_core::cloud_sync::credentials::DriveProvider;
