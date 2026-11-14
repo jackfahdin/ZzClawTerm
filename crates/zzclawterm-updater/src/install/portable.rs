@@ -5,9 +5,10 @@ use std::path::Path;
 use zzclawterm_core::packaging::portable::windows_portable_layout;
 use zzclawterm_core::updater::UpdateArchitecture;
 
-const MAX_ENTRIES: usize = 128;
+const MAX_ENTRIES: usize = 4096;
 const MAX_PAYLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 const BACKUP_DIRECTORY: &str = "portable-backup";
+const VCXSRV_DIRECTORY: &str = "vcxsrv";
 
 pub(super) fn recovery_pending(work: &Path) -> bool {
     // Also survives a helper crash: never automatically delete a pending backup.
@@ -75,9 +76,12 @@ fn extract_with_limits(
         }
         let is_data = relative == layout.data_directory()
             || relative.starts_with(&format!("{}/", layout.data_directory()));
+        let is_vcxsrv_file = relative.starts_with(&format!("{VCXSRV_DIRECTORY}/"));
+        let is_vcxsrv = relative == VCXSRV_DIRECTORY || is_vcxsrv_file;
         if entry.is_dir() {
             if !relative.is_empty()
                 && !is_data
+                && !is_vcxsrv
                 && !files
                     .iter()
                     .any(|file| file.starts_with(&format!("{relative}/")))
@@ -88,7 +92,7 @@ fn extract_with_limits(
             }
             continue;
         }
-        if !is_data && !files.contains(&relative) {
+        if !is_data && !is_vcxsrv_file && !files.contains(&relative) {
             return Err(format!(
                 "portable update archive contains an unexpected file: {name}"
             ));
@@ -210,6 +214,48 @@ fn checked_metadata(path: &Path) -> Result<Option<std::fs::Metadata>, String> {
     }
 }
 
+fn subtree_files(root: &Path, directory: &str) -> Result<Vec<String>, String> {
+    fn collect(root: &Path, directory: &str, files: &mut Vec<String>) -> Result<(), String> {
+        let path = root.join(directory);
+        let Some(metadata) = checked_metadata(&path)? else {
+            return Ok(());
+        };
+        if !metadata.is_dir() {
+            return Err(format!(
+                "portable update directory is not regular: {}",
+                path.display()
+            ));
+        }
+        for entry in std::fs::read_dir(&path)
+            .map_err(|error| format!("failed to inspect {}: {error}", path.display()))?
+        {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| "portable update path is not valid UTF-8".to_string())?;
+            let relative = format!("{directory}/{name}");
+            let metadata = checked_metadata(&root.join(&relative))?
+                .ok_or("portable update directory entry disappeared")?;
+            if metadata.is_dir() {
+                collect(root, &relative, files)?;
+            } else if metadata.is_file() {
+                files.push(relative);
+            } else {
+                return Err(format!(
+                    "portable update path is not a regular file: {relative}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    collect(root, directory, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
 fn validate_payload_path(root: &Path, name: &str, required: bool) -> Result<(), String> {
     let mut path = root.to_path_buf();
     for part in name.split('/') {
@@ -239,14 +285,24 @@ pub(super) fn commit_portable_files_with(
     architecture: UpdateArchitecture,
     mut rename: impl FnMut(&Path, &Path) -> Result<(), String>,
 ) -> Result<(), PortableUpdateError> {
-    let files = windows_portable_layout().files(architecture);
-    let removed = ["zzclawterm-activex-helper.exe"];
+    let mut files: Vec<String> = windows_portable_layout()
+        .files(architecture)
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    files.extend(subtree_files(staged, VCXSRV_DIRECTORY)?);
+    let mut removed = vec!["zzclawterm-activex-helper.exe".to_string()];
+    removed.extend(
+        subtree_files(target, VCXSRV_DIRECTORY)?
+            .into_iter()
+            .filter(|name| !files.contains(name)),
+    );
     // Validate the whole payload and destination before moving any installed file.
     for name in &files {
         validate_payload_path(staged, name, true)?;
         validate_payload_path(target, name, false)?;
     }
-    for name in removed {
+    for name in &removed {
         validate_payload_path(target, name, false)?;
     }
     let backup = work.join(BACKUP_DIRECTORY);
@@ -255,7 +311,7 @@ pub(super) fn commit_portable_files_with(
     let mut backed_up = Vec::new();
     let mut installed = Vec::new();
     let result = (|| {
-        for name in files.iter().copied().chain(removed).collect::<Vec<_>>() {
+        for name in files.iter().chain(&removed) {
             let current = target.join(name);
             if current.exists() {
                 let previous = backup.join(name);
@@ -272,7 +328,7 @@ pub(super) fn commit_portable_files_with(
                 .map_err(|error| format!("failed to prepare installation for {name}: {error}"))?;
             rename(&staged.join(name), &output)
                 .map_err(|error| format!("failed to replace {name}: {error}"))?;
-            installed.push(*name);
+            installed.push(name);
         }
         Ok::<(), String>(())
     })();
@@ -395,6 +451,7 @@ mod tests {
                 "ZzClawTerm.exe:stream",
                 "conpty\\x64\\conpty.dll",
                 "conpty/unknown.dll",
+                "vcxsrv",
                 "ZZCLAWTERM.EXE",
                 "data/../../outside",
                 "conpty/x86/conpty.dll",
@@ -745,6 +802,52 @@ mod tests {
             b"old"
         );
         assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn portable_archives_extract_bundled_xserver_above_legacy_entry_limit() {
+        let architecture = UpdateArchitecture::X86_64;
+        let root = TestTempDir::new("zzclawterm-portable-xserver");
+        let archive = root.join("archive.zip");
+        let destination = root.join("staged");
+        let mut entries = entries(architecture);
+        for index in 0..130 {
+            entries.push((
+                format!(
+                    "{}/vcxsrv/component-{index}.dll",
+                    windows_portable_layout().root
+                ),
+                b"xserver".to_vec(),
+            ));
+        }
+        write_zip(&archive, &entries, None);
+
+        extract_windows_portable(&archive, &destination, architecture).unwrap();
+        assert_eq!(
+            std::fs::read(destination.join("vcxsrv/component-129.dll")).unwrap(),
+            b"xserver"
+        );
+    }
+
+    #[test]
+    fn portable_commit_replaces_the_bundled_xserver_tree() {
+        let architecture = UpdateArchitecture::X86_64;
+        let root = TestTempDir::new("zzclawterm-portable-xserver-commit");
+        let (staged, target, work) = (root.join("staged"), root.join("target"), root.join("work"));
+        write_files(&staged, architecture, b"new");
+        write_files(&target, architecture, b"old");
+        std::fs::create_dir_all(staged.join("vcxsrv")).unwrap();
+        std::fs::write(staged.join("vcxsrv/vcxsrv.exe"), b"new-xserver").unwrap();
+        std::fs::create_dir_all(target.join("vcxsrv")).unwrap();
+        std::fs::write(target.join("vcxsrv/obsolete.dll"), b"old-xserver").unwrap();
+        std::fs::create_dir(&work).unwrap();
+
+        commit_portable_files_with(&staged, &target, &work, architecture, rename).unwrap();
+        assert_eq!(
+            std::fs::read(target.join("vcxsrv/vcxsrv.exe")).unwrap(),
+            b"new-xserver"
+        );
+        assert!(!target.join("vcxsrv/obsolete.dll").exists());
     }
 
     fn verify_real_package(archive: &Path, architecture: UpdateArchitecture) {
