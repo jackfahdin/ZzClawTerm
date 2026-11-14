@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import plistlib
 import shutil
 import struct
