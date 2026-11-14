@@ -467,7 +467,7 @@ impl<'a> ControlSession<'a> {
             return PendingKind::Ignore;
         }
         if let Some(PendingKind::UserCommand { barrier }) = self.pending_responses.front() {
-            if !failed && lines.len() == 1 && lines[0] == barrier.as_bytes() {
+            if !failed && lines.iter().any(|line| line == barrier.as_bytes()) {
                 self.pending_responses.pop_front();
                 return PendingKind::Ignore;
             }
@@ -2601,6 +2601,39 @@ mod stability_tests {
         ));
         assert!(session.pending_responses.is_empty());
         assert!(!session.queue_user_command("new-window\nkill-server"));
+    }
+
+    #[test]
+    fn user_barrier_allows_notifications_in_the_same_response_block() {
+        let queue = SessionEventQueue::new();
+        let sessions = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, _rx) = mailbox::channel();
+        let mut session = ControlSession::new(&queue, "host", &sessions, tx);
+        assert!(session.queue_user_command("new-window"));
+        let outgoing = session.outgoing.pop_front().unwrap();
+        let PendingKind::UserCommand { barrier } = &outgoing.responses[0] else {
+            panic!()
+        };
+        let lines = vec![b"%window-add @1".to_vec(), barrier.as_bytes().to_vec()];
+        session.pending_responses.extend(outgoing.responses);
+        session
+            .pending_responses
+            .push_back(PendingKind::WindowsRefresh);
+        let id = BlockId {
+            time: 1,
+            number: 2,
+            flags: 1,
+        };
+
+        assert!(matches!(
+            session.response_kind(id, &lines, false),
+            PendingKind::Ignore
+        ));
+        assert!(matches!(
+            session.response_kind(id, &[], false),
+            PendingKind::WindowsRefresh
+        ));
+        assert!(session.pending_responses.is_empty());
     }
 
     #[tokio::test]
