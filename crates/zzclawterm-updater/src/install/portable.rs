@@ -5,7 +5,7 @@ use std::path::Path;
 use zzclawterm_core::packaging::portable::windows_portable_layout;
 use zzclawterm_core::updater::UpdateArchitecture;
 
-const MAX_ENTRIES: usize = 4096;
+const MAX_ENTRIES: usize = 65_536;
 const MAX_PAYLOAD_BYTES: u64 = 1024 * 1024 * 1024;
 const BACKUP_DIRECTORY: &str = "portable-backup";
 const VCXSRV_DIRECTORY: &str = "vcxsrv";
@@ -811,7 +811,7 @@ mod tests {
         let archive = root.join("archive.zip");
         let destination = root.join("staged");
         let mut entries = entries(architecture);
-        for index in 0..130 {
+        for index in 0..4097 {
             entries.push((
                 format!(
                     "{}/vcxsrv/component-{index}.dll",
@@ -824,7 +824,7 @@ mod tests {
 
         extract_windows_portable(&archive, &destination, architecture).unwrap();
         assert_eq!(
-            std::fs::read(destination.join("vcxsrv/component-129.dll")).unwrap(),
+            std::fs::read(destination.join("vcxsrv/component-4096.dll")).unwrap(),
             b"xserver"
         );
     }
