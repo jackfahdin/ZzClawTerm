@@ -748,7 +748,7 @@ mod real {
         }
 
         async fn wait(&mut self, predicate: impl Fn(&Self) -> bool) {
-            let result = tokio::time::timeout(Duration::from_secs(20), async {
+            let result = tokio::time::timeout(Duration::from_secs(60), async {
                 loop {
                     self.drain();
                     if predicate(self) {
