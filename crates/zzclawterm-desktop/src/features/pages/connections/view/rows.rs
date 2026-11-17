@@ -1,8 +1,10 @@
 use std::{sync::Arc, time::Duration};
+use zzclawterm_ui::icons::{resolve_connection_icon, saved_connection_icon};
+use zzclawterm_ui::notification::{ZzClawNotificationKind, ZzClawNotificationWindowExt as _};
 
 use gpui::{
-    AnyElement, AppContext as _, Context, FontWeight, IntoElement, KeyDownEvent, MouseButton,
-    MouseDownEvent, RenderOnce, SharedString, Window, div,
+    AnyElement, AppContext as _, ClipboardItem, Context, FontWeight, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, RenderOnce, SharedString, Window, div,
     prelude::{
         FluentBuilder, InteractiveElement, ParentElement, StatefulInteractiveElement, Styled,
     },
@@ -17,14 +19,13 @@ use zzclawterm_ui::{
 use crate::features::{
     connections::ConnectionDragKind, connections::ConnectionDragPayload,
     connections::ConnectionDragPreview, connections::ConnectionDropPosition,
-    connections::ConnectionDropTarget, icons::resolve_connection_icon,
     text_inputs::ORDINARY_INPUT_SHELL_PADDING_X_PX, text_inputs::ordinary_input_focus_ring,
-    text_inputs::ordinary_input_shell_border_color, view_widgets::connection_type_icon,
-    view_widgets::mono_icon,
+    text_inputs::ordinary_input_shell_border_color, view_widgets::mono_icon,
 };
 
 use super::super::list::{
-    ConnectionDetailRow, ConnectionSectionHeader, connection_detail_rows, connection_tree_indent_px,
+    ConnectionDetailRow, ConnectionSectionHeader, connection_detail_rows, connection_share_text,
+    connection_tree_indent_px,
 };
 use super::super::panel::{ConnectionListSnapshot, ConnectionPanel};
 use super::CONNECTION_ACTION_CLEARANCE_PX;
@@ -46,23 +47,23 @@ fn connection_group_icon(expanded: bool) -> gpui::Svg {
 /// hoverable TooltipContent.
 #[derive(IntoElement)]
 pub(in crate::features) struct ConnectionDetailsHoverCard {
-    app: gpui::WeakEntity<crate::features::ZzClawTermApp>,
     connection_id: String,
     rows: Arc<[ConnectionDetailRow]>,
+    share_text: String,
     palette: crate::theme::ThemePalette,
 }
 
 impl ConnectionDetailsHoverCard {
     pub(in crate::features) fn new(
-        app: gpui::WeakEntity<crate::features::ZzClawTermApp>,
         connection_id: String,
         rows: Arc<[ConnectionDetailRow]>,
+        share_text: String,
         palette: crate::theme::ThemePalette,
     ) -> Self {
         Self {
-            app,
             connection_id,
             rows,
+            share_text,
             palette,
         }
     }
@@ -70,7 +71,6 @@ impl ConnectionDetailsHoverCard {
 
 impl RenderOnce for ConnectionDetailsHoverCard {
     fn render(self, _: &mut Window, _: &mut gpui::App) -> impl IntoElement {
-        let app = self.app.clone();
         let mut grid = div().flex().flex_col().gap(px(6.));
         for (index, row) in self.rows.iter().enumerate() {
             let value = div()
@@ -80,11 +80,10 @@ impl RenderOnce for ConnectionDetailsHoverCard {
                 .text_color(rgb(self.palette.text))
                 .when(row.multiline, |this| this.whitespace_normal())
                 .when(!row.multiline, |this| {
-                    this.overflow_hidden().whitespace_nowrap().text_ellipsis()
+                    this.whitespace_nowrap().line_clamp(1).text_ellipsis()
                 })
                 .child(row.value.clone());
             let copy = row.copy_value.clone().map(|copy_value| {
-                let app = app.clone();
                 let copy_id = format!("connection-detail-copy-{}-{index}", self.connection_id);
                 let copy_selector = copy_id.clone();
                 div()
@@ -100,20 +99,60 @@ impl RenderOnce for ConnectionDetailsHoverCard {
                             .tooltip(t!("savedConnections.copy").to_string())
                             .on_click(move |_, window, cx| {
                                 cx.stop_propagation();
-                                let target = window.window_handle();
-                                if let Some(app) = app.upgrade() {
-                                    app.update(cx, |app, cx| {
-                                        app.copy_text_with_feedback_at(
-                                            Some(target),
-                                            "copy-connection-detail",
-                                            copy_value.clone(),
-                                            cx,
-                                        );
-                                    });
-                                }
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    copy_value.clone(),
+                                ));
+                                window.notify_operation(
+                                    "copy-connection-detail",
+                                    ZzClawNotificationKind::Success,
+                                    t!("common.copied").to_string(),
+                                    cx,
+                                );
                             }),
                     )
             });
+            // connection_detail_rows always places the description last.
+            let action = if index + 1 == self.rows.len() {
+                let share_id = format!("connection-detail-share-{}", self.connection_id);
+                let share_selector = share_id.clone();
+                let share_text = self.share_text.clone();
+                div()
+                    .id(SharedString::from(share_id.clone()))
+                    .debug_selector(move || share_selector.clone())
+                    .size(px(20.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        ZzClawIconButton::new(format!("{share_id}-button"), "icons/share.svg")
+                            .icon_size(px(12.))
+                            .size(px(20.))
+                            .tooltip(t!("savedConnections.share").to_string())
+                            .on_click(move |_, window, cx| {
+                                cx.stop_propagation();
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    share_text.clone(),
+                                ));
+                                window.notify_operation(
+                                    "share-connection-detail",
+                                    ZzClawNotificationKind::Success,
+                                    t!("common.copied").to_string(),
+                                    cx,
+                                );
+                            }),
+                    )
+                    .into_any_element()
+            } else {
+                div()
+                    .size(px(20.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .children(copy)
+                    .into_any_element()
+            };
             grid = grid.child(
                 div()
                     .min_w_0()
@@ -129,16 +168,7 @@ impl RenderOnce for ConnectionDetailsHoverCard {
                             .child(row.label.clone()),
                     )
                     .child(value)
-                    .child(
-                        div()
-                            .w(px(20.))
-                            .h(px(20.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .children(copy),
-                    ),
+                    .child(action),
             );
         }
 
@@ -164,6 +194,7 @@ impl RenderOnce for ConnectionDetailsHoverCard {
 pub(in crate::features::pages::connections) fn connection_section(
     snapshot: &ConnectionListSnapshot,
     section: ConnectionSectionHeader,
+    viewport: &gpui::ScrollHandle,
     cx: &mut Context<ConnectionPanel>,
 ) -> impl IntoElement {
     // The flat list only ever emits headers for real groups; root sections are
@@ -259,86 +290,31 @@ pub(in crate::features::pages::connections) fn connection_section(
                 .then_some(section.group_id.clone())
                 .flatten(),
             |this, drag_group_id| {
-                let drop_group_id = drag_group_id.clone();
                 let label = section.label.clone();
-                this.cursor_move()
-                    .on_drag(
-                        ConnectionDragPayload {
-                            kind: ConnectionDragKind::Group,
-                            id: drag_group_id.clone(),
-                            label,
-                        },
-                        |payload, position, _, cx| {
-                            cx.new(|_| ConnectionDragPreview::new(payload.clone(), position))
-                        },
-                    )
-                    .on_drag_move(cx.listener({
-                        let target_id = drop_group_id.clone();
-                        move |panel, event: &gpui::DragMoveEvent<ConnectionDragPayload>, _, cx| {
-                            panel.with_app(cx, |this, cx| {
-                                let _ = event.drag(cx);
-                                let y = event.event.position.y;
-                                let bounds = event.bounds;
-                                let rel = if bounds.size.height > px(0.) {
-                                    ((y - bounds.origin.y) / bounds.size.height).clamp(0., 1.)
-                                } else {
-                                    0.5
-                                };
-                                let position = if rel < 0.25 {
-                                    ConnectionDropPosition::Before
-                                } else if rel > 0.75 {
-                                    ConnectionDropPosition::After
-                                } else {
-                                    ConnectionDropPosition::Inside
-                                };
-                                let next = ConnectionDropTarget {
-                                    id: Some(target_id.clone()),
-                                    kind: ConnectionDragKind::Group,
-                                    position,
-                                };
-                                if this.connection_state.set_list_drop_target_if_changed(next) {
-                                    this.ensure_drop_hover_clock(cx);
-                                    cx.notify();
-                                }
-                            })
-                        }
-                    }))
-                    .on_drop(
-                        cx.listener(move |panel, payload: &ConnectionDragPayload, _, cx| {
-                            panel.with_app(cx, |this, cx| {
-                                let position = this.connection_state.list_drop_position_for_target(
-                                    &drop_group_id,
-                                    ConnectionDropPosition::Inside,
-                                );
-                                this.connection_state.clear_list_drop_target();
-                                match payload.kind {
-                                    ConnectionDragKind::Connection => {
-                                        this.move_connection_into_group(
-                                            payload.id.clone(),
-                                            Some(drop_group_id.clone()),
-                                            cx,
-                                        );
-                                    }
-                                    ConnectionDragKind::Group => match position {
-                                        ConnectionDropPosition::Inside => {
-                                            this.move_group_into_group(
-                                                payload.id.clone(),
-                                                Some(drop_group_id.clone()),
-                                                cx,
-                                            );
-                                        }
-                                        _ => {
-                                            this.move_group_before(
-                                                payload.id.clone(),
-                                                drop_group_id.clone(),
-                                                cx,
-                                            );
-                                        }
-                                    },
-                                }
-                            })
-                        }),
-                    )
+                let drag_scroll = viewport.clone();
+                this.cursor_move().on_drag(
+                    ConnectionDragPayload {
+                        icon: None,
+                        custom_icon: None,
+                        palette,
+                        panel: cx.weak_entity(),
+                        kind: ConnectionDragKind::Group,
+                        id: drag_group_id.clone(),
+                        label,
+                    },
+                    move |payload, position, window, cx| {
+                        let _ = payload.panel.update(cx, |panel, cx| {
+                            panel.arm_tree_drag(
+                                payload,
+                                window.mouse_position(),
+                                drag_scroll.bounds(),
+                                drag_scroll.clone(),
+                                cx,
+                            )
+                        });
+                        cx.new(|_| ConnectionDragPreview::new(payload.clone(), position))
+                    },
+                )
             },
         )
         .on_click(cx.listener(move |panel, _, _, cx| {
@@ -507,12 +483,13 @@ fn connection_group_editor_input_box(
 }
 
 pub(in crate::features::pages::connections) fn saved_connection_row(
-    app: gpui::WeakEntity<crate::features::ZzClawTermApp>,
     snapshot: &ConnectionListSnapshot,
     connection: SavedConnection,
     depth: usize,
+    hover_viewport: &gpui::ScrollHandle,
     cx: &mut Context<ConnectionPanel>,
 ) -> impl IntoElement {
+    let drag_scroll = hover_viewport.clone();
     let selected = snapshot.is_selected(&connection.id);
     // The arrow keys walk filtered results without disturbing the selection,
     // so the active row gets its own fainter wash plus a ring.
@@ -529,12 +506,12 @@ pub(in crate::features::pages::connections) fn saved_connection_row(
         .cloned();
     let details_rows: Arc<[ConnectionDetailRow]> =
         connection_detail_rows(&connection, &snapshot.connections_by_id).into();
+    let share_text = connection_share_text(&connection, &details_rows);
     let drop_position = snapshot
         .drop_position_for_kind_target(ConnectionDragKind::Connection, Some(&connection.id));
     let show_before = drop_position == Some(ConnectionDropPosition::Before);
     let show_after = drop_position == Some(ConnectionDropPosition::After);
     let show_inside = drop_position == Some(ConnectionDropPosition::Inside);
-    let row_id = connection.id.clone();
     // Tauri ConnectionItem: py-1.5 single-line row (~34px) with hover actions.
     let palette = snapshot.chrome.palette;
     let row_selector = format!("connection-row-{}", connection.id);
@@ -572,84 +549,27 @@ pub(in crate::features::pages::connections) fn saved_connection_row(
         .cursor_move()
         .on_drag(
             ConnectionDragPayload {
+                icon: Some(icon_def),
+                custom_icon: custom_icon.clone(),
+                palette,
+                panel: cx.weak_entity(),
                 kind: ConnectionDragKind::Connection,
                 id: connection.id.clone(),
                 label: connection.name.clone(),
             },
-            |payload, position, _, cx| {
+            move |payload, position, window, cx| {
+                let _ = payload.panel.update(cx, |panel, cx| {
+                    panel.arm_tree_drag(
+                        payload,
+                        window.mouse_position(),
+                        drag_scroll.bounds(),
+                        drag_scroll.clone(),
+                        cx,
+                    )
+                });
                 cx.new(|_| ConnectionDragPreview::new(payload.clone(), position))
             },
         )
-        .on_drag_move(cx.listener({
-            let target_id = row_id.clone();
-            move |panel, event: &gpui::DragMoveEvent<ConnectionDragPayload>, _, cx| {
-                panel.with_app(cx, |this, cx| {
-                    let _payload = event.drag(cx);
-                    let y = event.event.position.y;
-                    let bounds = event.bounds;
-                    let rel = if bounds.size.height > px(0.) {
-                        ((y - bounds.origin.y) / bounds.size.height).clamp(0., 1.)
-                    } else {
-                        0.5
-                    };
-                    let position = if rel < 0.33 {
-                        ConnectionDropPosition::Before
-                    } else if rel > 0.66 {
-                        ConnectionDropPosition::After
-                    } else {
-                        // Mid band: treat as before for connections (reorder only).
-                        ConnectionDropPosition::Before
-                    };
-                    let next = ConnectionDropTarget {
-                        id: Some(target_id.clone()),
-                        kind: ConnectionDragKind::Connection,
-                        position,
-                    };
-                    if this.connection_state.set_list_drop_target_if_changed(next) {
-                        this.ensure_drop_hover_clock(cx);
-                        cx.notify();
-                    }
-                })
-            }
-        }))
-        .on_drop({
-            let target_id = connection.id.clone();
-            cx.listener(move |panel, payload: &ConnectionDragPayload, _, cx| {
-                panel.with_app(cx, |this, cx| {
-                    let position = this
-                        .connection_state
-                        .list_drop_position_for_target(&target_id, ConnectionDropPosition::Before);
-                    this.connection_state.clear_list_drop_target();
-                    match payload.kind {
-                        ConnectionDragKind::Connection => match position {
-                            ConnectionDropPosition::After => {
-                                this.move_connection_after(
-                                    payload.id.clone(),
-                                    target_id.clone(),
-                                    cx,
-                                );
-                            }
-                            _ => {
-                                this.move_connection_before(
-                                    payload.id.clone(),
-                                    target_id.clone(),
-                                    cx,
-                                );
-                            }
-                        },
-                        ConnectionDragKind::Group => {
-                            let parent = this
-                                .connection_state
-                                .connections()
-                                .iter()
-                                .find(|c| c.id == target_id)
-                                .and_then(|c| c.group_id.clone());
-                            this.move_group_into_group(payload.id.clone(), parent, cx);
-                        }
-                    }
-                })
-            })
-        })
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|_, _, _, cx| {
@@ -699,11 +619,13 @@ pub(in crate::features::pages::connections) fn saved_connection_row(
                     // Match Tauri's `pr-14`: at maximum horizontal scroll the
                     // final glyph can move clear of the viewport-fixed actions.
                     .pr(px(CONNECTION_ACTION_CLEARANCE_PX))
-                    .child(if let Some(image) = custom_icon {
-                        gpui::img(image).size(px(16.)).into_any_element()
-                    } else {
-                        connection_type_icon(palette, icon_def, selected, 16.).into_any_element()
-                    })
+                    .child(saved_connection_icon(
+                        palette,
+                        icon_def,
+                        custom_icon,
+                        selected,
+                        16.,
+                    ))
                     .child(
                         div()
                             .text_size(px(12.))
@@ -717,16 +639,20 @@ pub(in crate::features::pages::connections) fn saved_connection_row(
                             .whitespace_nowrap()
                             .child(connection.name.clone()),
                     ),
-                ConnectionDetailsHoverCard::new(app, connection.id.clone(), details_rows, palette),
+                ConnectionDetailsHoverCard::new(
+                    connection.id.clone(),
+                    details_rows,
+                    share_text,
+                    palette,
+                ),
             )
-            // Beside the row, vertically centred on it, matching Tauri's
-            // `side="right" align="center" sideOffset={6}`. A card below the row
-            // would cover the neighbouring connections. `Positioner::side`
-            // flips to the left when the panel is docked right, so this holds
-            // for either dock edge.
+            // Use the visible list edges, independent of name width, nesting
+            // and horizontal scrolling. Side placement flips at window edges.
+            .horizontal_viewport(hover_viewport)
             .placement(ZzClawPopoverPlacement::Right)
             .align(ZzClawPopoverAlign::Center)
-            .offset(px(6.))
+            // The scroll viewport excludes the list shell padding.
+            .offset(px(super::CONNECTION_LIST_PADDING_PX + 6.))
             .open_delay(Duration::from_millis(350))
             .close_delay(Duration::from_millis(120))
             .appearance(false),
@@ -760,39 +686,55 @@ pub(in crate::features::pages::connections) fn saved_connection_row(
 
 #[cfg(test)]
 mod hover_card_tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{cell::Cell, rc::Rc, sync::Arc, time::Duration};
 
     use gpui::{
-        AppContext as _, Context, Entity, InteractiveElement as _, Modifiers, ParentElement as _,
-        Render, Styled as _, TestAppContext, Window, div, px,
+        AppContext as _, ClipboardItem, Context, InteractiveElement as _, KeyDownEvent, KeyUpEvent,
+        Keystroke, Modifiers, ParentElement as _, Render, StatefulInteractiveElement as _,
+        Styled as _, TestAppContext, Window, div, px,
     };
     use zzclawterm_ui::{ZzClawHoverCard, ZzClawPopoverAlign, ZzClawPopoverPlacement};
 
-    use crate::features::ZzClawTermApp;
     use crate::theme::{apply_component_theme, theme_palette};
 
     use super::{ConnectionDetailRow, ConnectionDetailsHoverCard};
 
+    const SHARE_TEXT: &str = "Name: Production\nType: SSH\nHost: example.com\nDescription: Production server with a long description that wraps onto several lines\nSecond line";
+
     struct HoverCardHarness {
-        app: Entity<ZzClawTermApp>,
+        parent_clicks: Rc<Cell<usize>>,
     }
 
     impl Render for HoverCardHarness {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
-            let rows: Arc<[ConnectionDetailRow]> = [ConnectionDetailRow {
-                label: "Host".to_string(),
-                value: "example.com".to_string(),
-                copy_value: Some("example.com".to_string()),
-                multiline: false,
-            }]
+            let rows: Arc<[ConnectionDetailRow]> = [
+                ConnectionDetailRow {
+                    label: "Host".to_string(),
+                    value: "example.com".to_string(),
+                    copy_value: Some("example.com".to_string()),
+                    multiline: false,
+                },
+                ConnectionDetailRow {
+                    label: "Description".to_string(),
+                    value:
+                        "Production server with a long description that wraps onto several lines\nSecond line"
+                            .to_string(),
+                    copy_value: None,
+                    multiline: false,
+                },
+            ]
             .into();
+            let parent_clicks = self.parent_clicks.clone();
             // Left-aligned host, so the card has room on its preferred side and
             // the assertions below read the un-flipped placement.
             div()
+                .id("connection-share-parent")
+                .tab_group()
                 .size_full()
                 .flex()
                 .items_center()
                 .justify_start()
+                .on_click(move |_, _, _| parent_clicks.set(parent_clicks.get() + 1))
                 .child(
                     ZzClawHoverCard::new(
                         "connection-details-hover-card-test",
@@ -800,9 +742,9 @@ mod hover_card_tests {
                             .debug_selector(|| "connection-details-hover-card-trigger-test".into())
                             .size(px(40.)),
                         ConnectionDetailsHoverCard::new(
-                            self.app.downgrade(),
                             "test".to_string(),
                             rows,
+                            SHARE_TEXT.to_string(),
                             theme_palette("github-dark"),
                         ),
                     )
@@ -817,14 +759,7 @@ mod hover_card_tests {
     }
 
     #[gpui::test]
-    fn connection_hover_card_stays_open_and_copy_button_works(cx: &mut TestAppContext) {
-        let dir = crate::test_support::TestConfigDir::new("zzclawterm-connection-hover-copy");
-        let _cleanup = crate::test_support::TestAppCleanup::new(cx);
-        let app = crate::features::test_support::app_with_visible_local_session(
-            cx,
-            dir.path(),
-            "connection-hover",
-        );
+    fn connection_hover_card_stays_open_and_copy_and_share_buttons_work(cx: &mut TestAppContext) {
         cx.update(|cx| {
             apply_component_theme(
                 theme_palette("github-dark"),
@@ -833,9 +768,12 @@ mod hover_card_tests {
                 cx,
             )
         });
+        let parent_clicks = Rc::new(Cell::new(0));
         let (_, cx) = cx.add_window_view(|window, cx| {
             window.activate_window();
-            let view = cx.new(|_| HoverCardHarness { app });
+            let view = cx.new(|_| HoverCardHarness {
+                parent_clicks: parent_clicks.clone(),
+            });
             zzclawterm_ui::zzclaw_root(view, window, cx)
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -855,6 +793,10 @@ mod hover_card_tests {
         let content = cx
             .debug_bounds(content_selector)
             .expect("opened hover-card content");
+        assert!(
+            content.size.height < px(80.),
+            "a long description must remain on one line"
+        );
         // Beside the row, not under it: a card below would cover the
         // neighbouring connections in the list.
         assert_eq!(content.left(), trigger.right() + px(6.));
@@ -869,6 +811,29 @@ mod hover_card_tests {
             "moving from the trigger into content must cancel delayed close"
         );
 
+        cx.update(|window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(String::new()));
+            window.blur(cx);
+            window.focus_next(cx);
+            window.focus_next(cx);
+            assert!(window.focused(cx).is_some());
+            window.draw(cx).clear(cx);
+        });
+        let keystroke = Keystroke::parse("enter").expect("Enter keystroke");
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
+        let keyboard_clipboard = cx.update(|_, cx| {
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .unwrap_or_default()
+        });
+        assert_eq!(keyboard_clipboard, SHARE_TEXT, "Enter must activate share");
+        assert_eq!(parent_clicks.get(), 0);
+
         let copy = cx
             .debug_bounds("connection-detail-copy-test-0")
             .expect("copy button target");
@@ -879,5 +844,23 @@ mod hover_card_tests {
                 .unwrap_or_default()
         });
         assert_eq!(clipboard, "example.com");
+
+        let share = cx
+            .debug_bounds("connection-detail-share-test")
+            .expect("share button target");
+        assert!(share.left() >= content.left() && share.right() <= content.right());
+        assert!(share.top() >= content.top() && share.bottom() <= content.bottom());
+        cx.simulate_click(share.center(), Modifiers::default());
+        let clipboard = cx.update(|_, cx| {
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .unwrap_or_default()
+        });
+        assert_eq!(clipboard, SHARE_TEXT);
+        assert_eq!(
+            parent_clicks.get(),
+            0,
+            "copy actions must not activate the row"
+        );
     }
 }

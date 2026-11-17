@@ -546,3 +546,378 @@ fn ssh_compatibility_mode_survives_editor_save_reload_and_profile_changes() {
         }
     }
 }
+
+#[test]
+fn default_editor_loads_each_protocol_and_keeps_its_unsaved_draft() {
+    use super::default_session_settings_kind_id;
+    use crate::app_shell::{GlobalStateMutation, SharedStateDomain};
+    use crate::features::connections::connection_runtime::helpers::build_default_session_settings;
+    use crate::features::connections::state::ConnectionFeatureState;
+    use crate::features::test_support::app_with_visible_local_session;
+    use crate::models::ConnectionKindTab;
+    use crate::test_support::TestAppCleanup;
+    use gpui::TestAppContext;
+
+    let root = TestTempDir::new("zzclawterm-default-editor-protocols");
+    let mut cx = TestAppContext::single();
+    let _cleanup = TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "local");
+    app.update(&mut cx, |app, cx| {
+        let kinds = [
+            ConnectionKindTab::Ssh,
+            ConnectionKindTab::Local,
+            ConnectionKindTab::Telnet,
+            ConnectionKindTab::Serial,
+            ConnectionKindTab::Rdp,
+            ConnectionKindTab::Vnc,
+            ConnectionKindTab::Adb,
+        ];
+        let mut catalog = serde_json::Map::new();
+        for kind in kinds {
+            let mut draft = ConnectionFeatureState::prepare_editor_kind(
+                app.new_connection_editor_state(None, false),
+                kind,
+            );
+            draft.defaults_mode = true;
+            draft.recording = Some(zzclawterm_core::ConnectionRecordingSettings {
+                auto_start: Some(true),
+                ..Default::default()
+            });
+            let built = build_default_session_settings(&draft).unwrap();
+            catalog.insert(
+                default_session_settings_kind_id(kind).into(),
+                serde_json::to_value(built).unwrap(),
+            );
+        }
+        app.process_state.update(cx, |state, cx| {
+            let mut snapshot = state.snapshot().clone();
+            snapshot.default_session_settings = Some(catalog.into());
+            state.mutate(
+                GlobalStateMutation::ReplaceSnapshot {
+                    snapshot: Box::new(snapshot),
+                    domain: SharedStateDomain::Settings,
+                },
+                cx,
+            );
+        });
+        let mut initial = app.new_connection_editor_state(None, false);
+        initial.defaults_mode = true;
+        app.apply_default_session_settings(&mut initial, cx);
+        app.connection_state.begin_editor(initial);
+        for kind in kinds {
+            app.set_connection_editor_kind(kind, cx);
+            let mut draft = app.connection_state.active_editor_draft().unwrap();
+            assert_eq!(draft.kind, kind);
+            assert_eq!(
+                draft.recording.as_ref().unwrap().auto_start,
+                Some(true),
+                "{kind:?}"
+            );
+            draft.recording.as_mut().unwrap().auto_start = Some(false);
+            app.connection_state.replace_editor_kind(draft);
+        }
+        for kind in kinds {
+            app.set_connection_editor_kind(kind, cx);
+            assert_eq!(
+                app.connection_state
+                    .active_editor_draft()
+                    .unwrap()
+                    .recording
+                    .unwrap()
+                    .auto_start,
+                Some(false)
+            );
+        }
+        app.connection_state.close_editor();
+    });
+}
+
+#[test]
+fn inherited_agent_all_policy_requires_fresh_consent_for_defaults_and_connections() {
+    use crate::features::connections::connection_runtime::helpers::apply_session_defaults;
+    use zzclawterm_core::SshAgentForwardingPolicy;
+    let mut defaults = connection_editor_from_saved(connection("defaults", None, 0), false);
+    defaults.agent_forwarding_config.enabled = true;
+    defaults.agent_forwarding_config.policy = SshAgentForwardingPolicy::All;
+    defaults.agent_allow_all_confirmed = true;
+    for defaults_mode in [false, true] {
+        let mut draft = connection_editor_from_saved(connection("new", None, 0), false);
+        draft.defaults_mode = defaults_mode;
+        apply_session_defaults(&defaults, &mut draft);
+        assert!(draft.agent_forwarding_config.enabled);
+        assert!(matches!(
+            draft.agent_forwarding_config.policy,
+            SshAgentForwardingPolicy::All
+        ));
+        assert!(!draft.agent_allow_all_confirmed);
+    }
+}
+
+#[test]
+fn saving_defaults_with_inactive_agent_all_opens_confirmation_before_submitting() {
+    use crate::features::test_support::app_with_visible_local_session;
+    use crate::test_support::TestAppCleanup;
+    use gpui::TestAppContext;
+    use zzclawterm_ui::ZzClawDialogWindowExt as _;
+    let root = TestTempDir::new("zzclawterm-default-agent-confirmation");
+    let mut cx = TestAppContext::single();
+    let _cleanup = TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "local");
+    app.update(&mut cx, |app, cx| {
+        let mut draft = app.new_connection_editor_state(None, false);
+        draft.defaults_mode = true;
+        app.connection_state.begin_editor(draft.clone());
+        draft.agent_forwarding_config.enabled = true;
+        draft.agent_forwarding_config.policy = zzclawterm_core::SshAgentForwardingPolicy::All;
+        app.connection_state.replace_editor_kind(draft);
+        app.set_connection_editor_kind(crate::models::ConnectionKindTab::Telnet, cx);
+    });
+    app.update(&mut cx, |app, cx| app.sync_component_theme(cx));
+    let host = gpui::AppContext::new(&mut cx, |_| gpui::EmptyView);
+    let (_, cx) =
+        cx.add_window_view(move |window, cx| zzclawterm_ui::zzclaw_root(host, window, cx));
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| app.save_connection_editor(window, cx));
+        assert!(window.has_active_nya_dialog(cx));
+        assert!(!app.read(cx).connection_state.editor_save_in_flight());
+        assert_eq!(
+            app.read(cx)
+                .connection_state
+                .active_editor_draft()
+                .unwrap()
+                .kind,
+            crate::models::ConnectionKindTab::Ssh
+        );
+        assert!(
+            app.read(cx)
+                .process_state
+                .read(cx)
+                .snapshot()
+                .default_session_settings
+                .is_none()
+        );
+    });
+}
+
+#[test]
+fn new_protocol_inherits_identity_once_and_preserves_each_protocol_draft() {
+    use crate::features::test_support::app_with_visible_local_session;
+    use crate::models::{ConnectionEditorField, ConnectionKindTab};
+    use crate::test_support::TestAppCleanup;
+    let root = TestTempDir::new("zzclawterm-new-protocol-identity");
+    let mut cx = gpui::TestAppContext::single();
+    let _cleanup = TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "local");
+    app.update(&mut cx, |app, cx| {
+        let mut initial = app.new_connection_editor_state(Some("group".into()), false);
+        initial.name = "Shared identity".into();
+        initial.host = "server.example".into();
+        initial.username = "operator".into();
+        initial.description = "description".into();
+        initial.tags = vec!["tag".into()];
+        initial.pending_group_name = Some("New group".into());
+        initial.password = "synthetic-test-password".into();
+        app.connection_state.begin_editor(initial);
+        app.set_connection_editor_kind(ConnectionKindTab::Telnet, cx);
+        let telnet = app.connection_state.active_editor_draft().unwrap();
+        assert_eq!(telnet.name, "Shared identity");
+        assert_eq!(telnet.host, "server.example");
+        assert_eq!(telnet.username, "operator");
+        assert_eq!(telnet.pending_group_name.as_deref(), Some("New group"));
+        assert_eq!(telnet.port, "23");
+        assert!(telnet.password.is_empty());
+        app.connection_state
+            .set_editor_field_text(ConnectionEditorField::Name, "Telnet name".into());
+        app.set_connection_editor_kind(ConnectionKindTab::Ssh, cx);
+        assert_eq!(
+            app.connection_state.active_editor_draft().unwrap().name,
+            "Shared identity"
+        );
+        app.connection_state
+            .set_editor_field_text(ConnectionEditorField::Port, "2022".into());
+        app.set_connection_editor_kind(ConnectionKindTab::Rdp, cx);
+        assert_eq!(
+            app.connection_state.active_editor_draft().unwrap().port,
+            "2022"
+        );
+        app.set_connection_editor_kind(ConnectionKindTab::Telnet, cx);
+        assert_eq!(
+            app.connection_state.active_editor_draft().unwrap().name,
+            "Telnet name"
+        );
+        app.connection_state.close_editor();
+    });
+}
+
+/// Device and baud changes preserve the name in both the draft and input.
+#[test]
+fn serial_device_and_baud_changes_preserve_the_name_input() {
+    use crate::features::test_support::app_with_visible_local_session;
+    use crate::models::{ConnectionEditorField, ConnectionEditorSelect, ConnectionKindTab};
+    use crate::test_support::TestAppCleanup;
+    let root = TestTempDir::new("zzclawterm-serial-title");
+    let mut cx = gpui::TestAppContext::single();
+    let _cleanup = TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "local");
+    app.update(&mut cx, |app, cx| {
+        let draft = app.new_connection_editor_state(None, false);
+        app.connection_state.begin_editor(draft);
+        app.connection_state.build_editor_fields(cx);
+        app.set_connection_editor_kind(ConnectionKindTab::Serial, cx);
+        let initial_name = app.connection_state.active_editor_draft().unwrap().name;
+        app.set_connection_editor_select_value(
+            ConnectionEditorSelect::SerialPort,
+            Some("COM9"),
+            cx,
+        );
+        assert_eq!(
+            app.connection_state.active_editor_draft().unwrap().name,
+            initial_name
+        );
+        // The input retains the initial name.
+        assert_eq!(
+            app.connection_state.editor_fields()[&ConnectionEditorField::Name]
+                .read(cx)
+                .value(cx),
+            initial_name
+        );
+        // The baud popover also preserves both values.
+        app.set_connection_editor_baud_rate("921600".to_string(), cx);
+        assert_eq!(
+            app.connection_state.active_editor_draft().unwrap().name,
+            initial_name
+        );
+        assert_eq!(
+            app.connection_state.editor_fields()[&ConnectionEditorField::Name]
+                .read(cx)
+                .value(cx),
+            initial_name
+        );
+        app.connection_state.close_editor();
+    });
+}
+
+#[test]
+fn default_session_changes_ignore_navigation_and_freeze_while_saving() {
+    use crate::features::test_support::app_with_visible_local_session;
+    use crate::models::{ConnectionEditorSection, ConnectionKindTab};
+    use crate::test_support::TestAppCleanup;
+    let root = TestTempDir::new("zzclawterm-default-session-dirty");
+    let mut cx = gpui::TestAppContext::single();
+    let _cleanup = TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "local");
+    app.update(&mut cx, |app, cx| {
+        let mut draft = app.new_connection_editor_state(None, false);
+        draft.defaults_mode = true;
+        app.connection_state.begin_editor(draft);
+        app.connection_state
+            .select_editor_section(ConnectionEditorSection::Terminal);
+        app.set_connection_editor_kind(ConnectionKindTab::Telnet, cx);
+        assert!(app.connection_state.modified_default_drafts().is_empty());
+        app.connection_state.set_editor_select_value(
+            crate::models::ConnectionEditorSelect::Encoding,
+            Some("GBK".into()),
+        );
+        app.set_connection_editor_kind(ConnectionKindTab::Ssh, cx);
+        app.connection_state.set_editor_select_value(
+            crate::models::ConnectionEditorSelect::Encoding,
+            Some("UTF-8".into()),
+        );
+        let changed = app.connection_state.modified_default_drafts();
+        assert_eq!(changed.len(), 2);
+        assert_eq!(changed[0].kind, ConnectionKindTab::Ssh);
+        assert_eq!(changed[1].kind, ConnectionKindTab::Telnet);
+        let generation = app.connection_state.begin_editor_save().unwrap();
+        app.set_connection_editor_kind(ConnectionKindTab::Rdp, cx);
+        app.connection_state.set_editor_select_value(
+            crate::models::ConnectionEditorSelect::Encoding,
+            Some("late edit".into()),
+        );
+        let active = app.connection_state.active_editor_draft().unwrap();
+        assert_eq!(active.kind, ConnectionKindTab::Ssh);
+        assert_eq!(active.encoding, "UTF-8");
+        app.connection_state.finish_editor_save_request(generation);
+        assert_eq!(app.connection_state.modified_default_drafts().len(), 2);
+        app.connection_state.close_editor();
+    });
+}
+
+#[test]
+fn saving_defaults_reveals_an_invalid_inactive_protocol_without_submitting() {
+    use crate::features::test_support::app_with_visible_local_session;
+    use crate::models::{ConnectionEditorField, ConnectionKindTab};
+    use crate::test_support::TestAppCleanup;
+    let root = TestTempDir::new("zzclawterm-default-hidden-invalid");
+    let mut cx = gpui::TestAppContext::single();
+    let _cleanup = TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "local");
+    app.update(&mut cx, |app, cx| {
+        let mut draft = app.new_connection_editor_state(None, false);
+        draft.defaults_mode = true;
+        app.connection_state.begin_editor(draft);
+        app.connection_state.build_editor_fields(cx);
+        app.connection_state.set_editor_field_text(
+            ConnectionEditorField::SftpShellDetectionTimeout,
+            "invalid".into(),
+        );
+        app.set_connection_editor_kind(ConnectionKindTab::Telnet, cx);
+        app.connection_state.set_editor_select_value(
+            crate::models::ConnectionEditorSelect::Encoding,
+            Some("GBK".into()),
+        );
+    });
+    let host = gpui::AppContext::new(&mut cx, |_| gpui::EmptyView);
+    let (_, cx) =
+        cx.add_window_view(move |window, cx| zzclawterm_ui::zzclaw_root(host, window, cx));
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.save_connection_editor(window, cx);
+            assert_eq!(
+                app.connection_state.active_editor_draft().unwrap().kind,
+                ConnectionKindTab::Ssh
+            );
+            assert!(!app.connection_state.editor_save_in_flight());
+            assert_eq!(app.connection_state.modified_default_drafts().len(), 2);
+            app.connection_state.close_editor();
+        });
+    });
+}
+
+#[test]
+fn saving_default_sessions_persists_all_modified_protocols_before_closing() {
+    use crate::features::test_support::app_with_visible_local_session;
+    use crate::models::{ConnectionEditorSelect, ConnectionKindTab};
+    use crate::test_support::TestAppCleanup;
+    let root = TestTempDir::new("zzclawterm-default-save-all");
+    let mut cx = gpui::TestAppContext::single();
+    let _cleanup = TestAppCleanup::new(&cx);
+    let app = app_with_visible_local_session(&mut cx, root.path(), "local");
+    let store = app.update(&mut cx, |app, cx| {
+        let mut draft = app.new_connection_editor_state(None, false);
+        draft.defaults_mode = true;
+        app.connection_state.begin_editor(draft);
+        app.connection_state
+            .set_editor_select_value(ConnectionEditorSelect::Encoding, Some("UTF-8".into()));
+        app.set_connection_editor_kind(ConnectionKindTab::Telnet, cx);
+        app.connection_state
+            .set_editor_select_value(ConnectionEditorSelect::Encoding, Some("GBK".into()));
+        app.store_blocking_client()
+    });
+    let host = gpui::AppContext::new(&mut cx, |_| gpui::EmptyView);
+    let (_, cx) =
+        cx.add_window_view(move |window, cx| zzclawterm_ui::zzclaw_root(host, window, cx));
+    cx.update(|window, cx| app.update(cx, |app, cx| app.save_connection_editor(window, cx)));
+    // The worker barrier makes the persistence result available before pumping GPUI.
+    let saved = store
+        .request_fn(zzclawterm_store::StoreDomain::Settings, |store| {
+            store.load_default_session_settings()
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved["ssh"]["encoding"], "UTF-8");
+    assert_eq!(saved["telnet"]["encoding"], "GBK");
+    cx.run_until_parked();
+    assert!(app.read_with(cx, |app, _| {
+        app.connection_state.active_editor_draft().is_none()
+    }));
+}

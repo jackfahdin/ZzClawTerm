@@ -14,11 +14,11 @@ use zzclawterm_ui::{
 };
 
 use crate::features::ZzClawTermApp;
-use crate::features::icons::resolve_connection_icon;
 use crate::features::shell::{
-    NewSessionMenuAnchor, SessionTabDragPreview, SessionTabTooltip, WorkspaceTabDragPayload,
+    NewSessionMenuAnchor, SessionTabDragPreview, WorkspaceTabDragPayload,
 };
 use crate::features::view_widgets::{connection_spinner, themed_icon};
+use zzclawterm_ui::icons::resolve_connection_icon;
 
 use super::super::super::view_helpers::session_kind_icon_path;
 
@@ -245,7 +245,7 @@ impl ZzClawTermApp {
             id: SessionStripTabId::Start(sequence),
             request_id: Some(request_id),
             name: failed_name,
-            error: Some(failed_error),
+            error: Some(_),
         } = tab
         else {
             unreachable!("failed tab requires a failed connection attempt");
@@ -285,7 +285,6 @@ impl ZzClawTermApp {
             preview_accent: accent,
         };
         let app = cx.weak_entity();
-        let tooltip_app = cx.weak_entity();
         let drop_request_id = request_id.clone();
         div()
             .id(SharedString::from(format!(
@@ -414,16 +413,6 @@ impl ZzClawTermApp {
                         this.close_failed_session_start(close_request_id.clone(), cx);
                     })),
             )
-            .tooltip(move |_, cx| {
-                cx.new(|_| {
-                    SessionTabTooltip::new(
-                        tooltip_app.clone(),
-                        failed_name.clone(),
-                        vec![failed_error.clone()],
-                    )
-                })
-                .into()
-            })
             .on_click(cx.listener(move |this, event, window, cx| {
                 this.handle_tab_target_click(action_target.clone(), event, window, cx);
             }))

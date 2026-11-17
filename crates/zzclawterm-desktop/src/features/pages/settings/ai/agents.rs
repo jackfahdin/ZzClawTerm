@@ -4,6 +4,7 @@ use crate::features::mcp::McpHostStatus;
 use crate::features::pages::settings::panel::SettingsPanel;
 use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 use rust_i18n::t;
+use zzclawterm_core::ai::mcp_execution::McpTerminalExecutionMode;
 use zzclawterm_core::{AiPermissionMode, CodexThreadMode, McpTerminalDisplayMode};
 use zzclawterm_ui::{ZzClawButton, ZzClawSelectOption};
 
@@ -394,6 +395,24 @@ impl SettingsPanel {
             false,
             cx,
         );
+        let execution_mode = self.form_select_control(
+            "ai-mcp-terminal-execution-mode",
+            vec![
+                ZzClawSelectOption::new("auto", t!("ai.mcp.executionAuto")),
+                ZzClawSelectOption::new("inline", t!("ai.mcp.executionInline")),
+                ZzClawSelectOption::new("background", t!("ai.mcp.executionBackground")),
+            ],
+            Some(
+                match settings.external_mcp.terminal_execution_mode {
+                    McpTerminalExecutionMode::Auto => "auto",
+                    McpTerminalExecutionMode::Inline => "inline",
+                    McpTerminalExecutionMode::Background => "background",
+                }
+                .into(),
+            ),
+            false,
+            cx,
+        );
         let display_mode = self.form_select_control(
             "ai-mcp-terminal-display-mode",
             vec![
@@ -462,8 +481,14 @@ impl SettingsPanel {
                     .child(ai_field(palette, t!("ai.mcp.sessionScope"), None, scope))
                     .child(ai_field(
                         palette,
+                        t!("ai.mcp.terminalExecution"),
+                        Some(t!("ai.mcp.terminalExecutionDesc").into()),
+                        execution_mode,
+                    ))
+                    .child(ai_field(
+                        palette,
                         t!("ai.mcp.terminalDisplay"),
-                        None,
+                        Some(t!("ai.mcp.terminalDisplayDesc").into()),
                         display_mode,
                     )),
             )
