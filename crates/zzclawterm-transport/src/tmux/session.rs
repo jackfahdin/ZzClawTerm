@@ -469,8 +469,25 @@ impl<'a> ControlSession<'a> {
             _ => None,
         };
         #[cfg(test)]
+        let hash = |bytes: &[u8]| {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::hash::DefaultHasher::new();
+            bytes.hash(&mut hasher);
+            hasher.finish()
+        };
+        #[cfg(test)]
+        let barrier_hash = self.pending_responses.front().and_then(|kind| match kind {
+            PendingKind::UserCommand { barrier } => Some((barrier.len(), hash(barrier.as_bytes()))),
+            _ => None,
+        });
+        #[cfg(test)]
+        let response_hashes: Vec<(usize, u64)> = lines
+            .iter()
+            .map(|line| (line.len(), hash(line.as_slice())))
+            .collect();
+        #[cfg(test)]
         eprintln!(
-            "tmux response time={} number={} flags={} failed={} lines={} front={:?} pending={} barrier_match={:?}",
+            "tmux response time={} number={} flags={} failed={} lines={} front={:?} pending={} barrier_match={:?} barrier_hash={:?} response_hashes={:?}",
             id.time,
             id.number,
             id.flags,
@@ -478,7 +495,9 @@ impl<'a> ControlSession<'a> {
             lines.len(),
             self.pending_responses.front().map(std::mem::discriminant),
             self.pending_responses.len(),
-            barrier_match
+            barrier_match,
+            barrier_hash,
+            response_hashes
         );
         // Commands run by hooks / asynchronous tmux jobs are not replies to
         // client input and must not consume an internal query's FIFO entry.
