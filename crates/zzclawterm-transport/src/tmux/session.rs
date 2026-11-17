@@ -461,6 +461,17 @@ impl<'a> ControlSession<'a> {
     }
 
     fn response_kind(&mut self, id: BlockId, lines: &[Vec<u8>], failed: bool) -> PendingKind {
+        #[cfg(test)]
+        eprintln!(
+            "tmux response time={} number={} flags={} failed={} lines={} front={:?} pending={}",
+            id.time,
+            id.number,
+            id.flags,
+            failed,
+            lines.len(),
+            self.pending_responses.front().map(std::mem::discriminant),
+            self.pending_responses.len()
+        );
         // Commands run by hooks / asynchronous tmux jobs are not replies to
         // client input and must not consume an internal query's FIFO entry.
         if id.flags & 1 == 0 {
