@@ -196,8 +196,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("escaped");
         let ready = directory.path().join("ready");
+        let release = directory.path().join("release");
         let script = format!(
-            "(sleep 0.6; touch {}) & printf ready > {}; wait",
+            "(attempt=0; while [ ! -e {} ]; do [ $attempt -lt 300 ] || exit 1; attempt=$((attempt+1)); sleep 0.01; done; touch {}) </dev/null >/dev/null 2>&1 & printf ready > {}; wait",
+            crate::host::sh_quote(release.to_str().unwrap()),
             crate::host::sh_quote(marker.to_str().unwrap()),
             crate::host::sh_quote(ready.to_str().unwrap())
         );
@@ -228,8 +230,13 @@ mod tests {
             panic!("controlled supervisor panic");
         });
         assert!(result.is_err());
-        std::thread::sleep(Duration::from_millis(700));
-        assert!(!marker.exists());
+        assert!(!marker.exists(), "the descendant completed before cleanup");
+        std::fs::write(release, b"released").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!marker.exists(), "the descendant survived cleanup");
         assert!(run("exit 0", None, Duration::from_secs(2)).is_ok());
     }
 
