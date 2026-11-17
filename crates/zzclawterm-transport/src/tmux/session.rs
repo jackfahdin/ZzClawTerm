@@ -462,15 +462,23 @@ impl<'a> ControlSession<'a> {
 
     fn response_kind(&mut self, id: BlockId, lines: &[Vec<u8>], failed: bool) -> PendingKind {
         #[cfg(test)]
+        let barrier_match = match self.pending_responses.front() {
+            Some(PendingKind::UserCommand { barrier }) => {
+                lines.iter().position(|line| line == barrier.as_bytes())
+            }
+            _ => None,
+        };
+        #[cfg(test)]
         eprintln!(
-            "tmux response time={} number={} flags={} failed={} lines={} front={:?} pending={}",
+            "tmux response time={} number={} flags={} failed={} lines={} front={:?} pending={} barrier_match={:?}",
             id.time,
             id.number,
             id.flags,
             failed,
             lines.len(),
             self.pending_responses.front().map(std::mem::discriminant),
-            self.pending_responses.len()
+            self.pending_responses.len(),
+            barrier_match
         );
         // Commands run by hooks / asynchronous tmux jobs are not replies to
         // client input and must not consume an internal query's FIFO entry.
