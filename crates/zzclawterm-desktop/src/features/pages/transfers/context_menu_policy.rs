@@ -1,6 +1,4 @@
-use self::TransferContextMenuAction as Action;
-use self::TransferContextMenuNode::{Action as Item, Separator};
-
+pub(super) use zzclawterm_files::file_browser::transfer_paths::send_to_target_directory;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TransferContextMenuNode {
     Action(TransferContextMenuAction),
@@ -107,7 +105,7 @@ pub(super) struct TransferEntryMenuCapabilities {
 pub(super) fn transfer_entry_context_menu_policy(
     capabilities: TransferEntryMenuCapabilities,
 ) -> Vec<TransferContextMenuNode> {
-    use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
+    use TransferContextMenuAction as Action;
     use TransferContextMenuNode::{Action as Item, Separator};
 
     let mut items = vec![Item(Action::Open)];
@@ -154,6 +152,9 @@ pub(super) fn transfer_entry_context_menu_policy(
 pub(super) fn transfer_current_directory_context_menu_policy(
     terminal_available: bool,
 ) -> Vec<TransferContextMenuNode> {
+    use TransferContextMenuAction as Action;
+    use TransferContextMenuNode::{Action as Item, Separator};
+
     let mut items = vec![
         Item(Action::Refresh),
         Item(Action::Upload),
@@ -172,6 +173,9 @@ pub(super) fn transfer_current_directory_context_menu_policy(
 }
 
 pub(super) fn transfer_parent_directory_context_menu_policy() -> Vec<TransferContextMenuNode> {
+    use TransferContextMenuAction as Action;
+    use TransferContextMenuNode::{Action as Item, Separator};
+
     vec![Item(Action::GoUp), Separator, Item(Action::Refresh)]
 }
 
@@ -195,39 +199,6 @@ pub(super) fn send_to_candidate_is_eligible(
     candidate.session_id != source_session_id
         && candidate.has_browser_backend
         && !candidate.is_disconnected
-}
-
-/// Resolve the destination directory for a "Send to" transfer.
-///
-/// Prefers the target session's own cached browser directory; otherwise falls
-/// back to that session's home (or `cwd`). The source session's path must never
-/// leak in here, so both fallbacks are explicit target-session inputs.
-pub(super) fn send_to_target_directory(
-    cached_current_path: Option<&str>,
-    target_home_or_cwd: Option<&str>,
-) -> String {
-    let normalize = |value: &str| -> Option<String> {
-        let trimmed = value.trim();
-        (!trimmed.is_empty() && trimmed != ".").then(|| trimmed.trim_end_matches('/').to_string())
-    };
-    cached_current_path
-        .and_then(normalize)
-        .or_else(|| target_home_or_cwd.and_then(normalize))
-        .unwrap_or_else(|| ".".to_string())
-}
-
-/// Join a target directory and a source entry name into a destination path.
-///
-/// The entry name comes from the source listing; the directory is the resolved
-/// target directory above. Root is preserved so `/` + `file` becomes `/file`.
-#[cfg(test)]
-pub(super) fn send_to_destination_path(target_dir: &str, entry_name: &str) -> String {
-    let dir = target_dir.trim_end_matches('/');
-    match dir {
-        "" if target_dir.starts_with('/') => format!("/{entry_name}"),
-        "" | "." => entry_name.to_string(),
-        dir => format!("{dir}/{entry_name}"),
-    }
 }
 
 #[cfg(test)]
@@ -260,9 +231,9 @@ mod tests {
         ));
     }
     use super::{
-        SendToCandidate, TransferContextMenuNode as Node, TransferEntryMenuCapabilities,
-        send_to_candidate_is_eligible, send_to_destination_path, send_to_target_directory,
-        transfer_action_bar_enabled, transfer_context_action_visible_for_backend,
+        SendToCandidate, TransferContextMenuAction as Action, TransferContextMenuNode as Node,
+        TransferEntryMenuCapabilities, send_to_candidate_is_eligible, transfer_action_bar_enabled,
+        transfer_context_action_visible_for_backend,
         transfer_current_directory_context_menu_policy,
         transfer_directory_terminal_actions_visible, transfer_entry_context_menu_policy,
         transfer_parent_directory_context_menu_policy, transfer_visible_context_menu_nodes,
@@ -294,7 +265,6 @@ mod tests {
 
     #[test]
     fn local_backend_hides_remote_only_actions() {
-        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         use zzclawterm_files::file_browser::FileBrowserBackendKind::{Local, Remote};
 
         for action in [
@@ -318,7 +288,6 @@ mod tests {
 
     #[test]
     fn file_menu_groups_copy_and_terminal_actions() {
-        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         assert_eq!(
             transfer_entry_context_menu_policy(TransferEntryMenuCapabilities {
                 show_open_internal: true,
@@ -350,7 +319,6 @@ mod tests {
 
     #[test]
     fn preview_action_follows_open_and_only_for_files() {
-        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         let file = transfer_entry_context_menu_policy(TransferEntryMenuCapabilities {
             show_preview: true,
             ..Default::default()
@@ -371,7 +339,6 @@ mod tests {
 
     #[test]
     fn directory_menu_inserts_favorite_group() {
-        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         let items = transfer_entry_context_menu_policy(TransferEntryMenuCapabilities {
             is_directory: true,
             ..Default::default()
@@ -389,7 +356,6 @@ mod tests {
 
     #[test]
     fn preview_action_shows_for_every_file_including_unrenderable_types() {
-        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         // Parity: the preview action is offered for any non-directory file. A
         // type the preview cannot render (e.g. a `.zip`) still gets the action;
         // the window opens and shows the unsupported message. The capability is
@@ -405,7 +371,6 @@ mod tests {
 
     #[test]
     fn current_and_parent_directory_menus_match_tauri_groups() {
-        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         assert_eq!(
             transfer_current_directory_context_menu_policy(true),
             vec![
@@ -434,7 +399,6 @@ mod tests {
 
     #[test]
     fn send_to_submenu_follows_download_with_its_own_separator() {
-        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         let items = transfer_entry_context_menu_policy(TransferEntryMenuCapabilities {
             has_send_targets: true,
             ..Default::default()
@@ -455,7 +419,6 @@ mod tests {
 
     #[test]
     fn send_to_submenu_absent_without_eligible_targets() {
-        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         let items = transfer_entry_context_menu_policy(TransferEntryMenuCapabilities {
             ..Default::default()
         });
@@ -474,7 +437,6 @@ mod tests {
 
     #[test]
     fn tree_entries_offer_creation_and_terminal_requires_availability() {
-        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         let items = transfer_entry_context_menu_policy(TransferEntryMenuCapabilities {
             is_tree_view: true,
             ..Default::default()
@@ -491,7 +453,6 @@ mod tests {
 
     #[test]
     fn local_menu_removes_remote_actions_without_empty_groups() {
-        use crate::features::pages::transfers::context_menu_policy::TransferContextMenuAction as Action;
         use zzclawterm_files::file_browser::FileBrowserBackendKind::Local;
 
         let nodes = transfer_visible_context_menu_nodes(
@@ -551,38 +512,38 @@ mod tests {
     }
 
     #[test]
-    fn send_to_target_directory_prefers_cache_then_home_never_source() {
-        // Cached browser path wins.
-        assert_eq!(
-            send_to_target_directory(Some("/srv/data/"), Some("/home/bob")),
-            "/srv/data"
-        );
-        // No usable cache falls back to the target session's home/cwd.
-        assert_eq!(
-            send_to_target_directory(None, Some("/home/bob")),
-            "/home/bob"
-        );
-        assert_eq!(
-            send_to_target_directory(Some("."), Some("/home/bob")),
-            "/home/bob"
-        );
-        // Nothing usable at all degrades to the safe relative default, and it is
-        // never seeded from a source path (the caller passes only target inputs).
-        assert_eq!(send_to_target_directory(Some("   "), None), ".");
-        assert_eq!(send_to_target_directory(None, None), ".");
-    }
-
-    #[test]
     fn send_to_destination_path_joins_directory_and_entry_name() {
         assert_eq!(
-            send_to_destination_path("/srv/data", "file.txt"),
+            zzclawterm_files::file_browser::file_browser_join(
+                zzclawterm_files::file_browser::FileBrowserBackendKind::Remote,
+                "/srv/data",
+                "file.txt"
+            ),
             "/srv/data/file.txt"
         );
         assert_eq!(
-            send_to_destination_path("/srv/data/", "file.txt"),
+            zzclawterm_files::file_browser::file_browser_join(
+                zzclawterm_files::file_browser::FileBrowserBackendKind::Remote,
+                "/srv/data/",
+                "file.txt"
+            ),
             "/srv/data/file.txt"
         );
-        assert_eq!(send_to_destination_path("/", "file.txt"), "/file.txt");
-        assert_eq!(send_to_destination_path(".", "file.txt"), "file.txt");
+        assert_eq!(
+            zzclawterm_files::file_browser::file_browser_join(
+                zzclawterm_files::file_browser::FileBrowserBackendKind::Remote,
+                "/",
+                "file.txt"
+            ),
+            "/file.txt"
+        );
+        assert_eq!(
+            zzclawterm_files::file_browser::file_browser_join(
+                zzclawterm_files::file_browser::FileBrowserBackendKind::Remote,
+                ".",
+                "file.txt"
+            ),
+            "file.txt"
+        );
     }
 }

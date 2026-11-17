@@ -1,12 +1,14 @@
 use std::path::PathBuf;
 
 use gpui::{Context, Window};
+use zzclawterm_core::ConnectionType;
 
 use crate::features::formatting::short_id;
 use crate::features::{ZzClawTermApp, session::SavedConnectionStartOptions};
 use crate::models::{SessionLaunchConfig, StartupCommandRequest};
 
 use super::session_runtime::{MultiplexSshStartRequest, SessionStartFocusTarget};
+use super::state::{SerialConnectContinuation, SerialConnectSelection};
 
 const RECONNECTING_BANNER: &str = "\r\n\x1b[36m[Reconnecting…]\x1b[0m\r\n";
 
@@ -69,7 +71,7 @@ impl ZzClawTermApp {
         let custom_color = self.session.tab_color(&source_session_id);
         let workspace_split = self.session.start_take_pending_workspace_split();
 
-        match metadata.launch_config.clone() {
+        match metadata.launch_config_for_restart() {
             SessionLaunchConfig::AdbShell(config) => {
                 self.open_android_view(
                     config,
@@ -220,7 +222,7 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         };
-        let SessionLaunchConfig::Ssh(config) = metadata.launch_config.clone() else {
+        let SessionLaunchConfig::Ssh(config) = metadata.launch_config_for_restart() else {
             self.shell
                 .set_status("active session is not SSH".to_string());
             cx.notify();
@@ -335,7 +337,7 @@ impl ZzClawTermApp {
         self.cancel_file_sudo_for_sessions(&[session_id.to_owned()], cx);
         self.cancel_native_runs_for_disconnected_session(session_id, cx);
         self.commands.cancel_staged_quick_command(session_id);
-        self.terminal.invalidate_shell_editing_session(session_id);
+        self.terminal.disconnect_shell_editing_session(session_id);
         self.clear_terminal_mouse_report_for_session(session_id);
         self.terminal.clear_session_pressed_keys(session_id);
         self.transfer.clear_file_clipboard_for_session(session_id);
@@ -396,6 +398,16 @@ impl ZzClawTermApp {
     pub(in crate::features) fn reconnect_session(
         &mut self,
         session_id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reconnect_session_with_serial_selection(session_id, None, window, cx);
+    }
+
+    pub(in crate::features) fn reconnect_session_with_serial_selection(
+        &mut self,
+        session_id: String,
+        serial_selection: Option<SerialConnectSelection>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -462,6 +474,49 @@ impl ZzClawTermApp {
             self.retry_rdp_runtime(&session_id, cx);
             return;
         }
+        if let Some(connection) = saved.as_ref()
+            && let ConnectionType::Serial {
+                connect_prompt,
+                port_name,
+                baud_rate,
+                ..
+            } = &connection.config
+        {
+            if connect_prompt.asks_anything() && serial_selection.is_none() {
+                self.open_serial_connect_prompt(
+                    connection.clone(),
+                    SerialConnectContinuation::Reconnect { session_id },
+                    *connect_prompt,
+                    port_name.clone(),
+                    *baud_rate,
+                    cx,
+                );
+                return;
+            }
+            let selected_port = serial_selection
+                .as_ref()
+                .map_or(port_name.as_str(), |selection| selection.port_name.as_str());
+            if self
+                .session
+                .serial_ports_in_use(Some(&session_id), None)
+                .contains(selected_port.trim())
+            {
+                self.shell
+                    .set_status(rust_i18n::t!("dialog.serialPortInUse"));
+                cx.notify();
+                return;
+            }
+        } else if let SessionLaunchConfig::Serial(config) = &metadata.launch_config
+            && self
+                .session
+                .serial_ports_in_use(Some(&session_id), None)
+                .contains(config.port_name.trim())
+        {
+            self.shell
+                .set_status(rust_i18n::t!("dialog.serialPortInUse"));
+            cx.notify();
+            return;
+        }
         self.remote_ops.clear_stats_sample(&session_id);
         self.session.begin_reconnect_action(session_id.clone());
         self.session.start.clear_active_selection();
@@ -521,10 +576,7 @@ impl ZzClawTermApp {
         self.session.mark_session_disconnected(&old_id);
         self.close_terminal_executions_for_session(&old_id, cx);
         if let Some(connection) = saved {
-            let ssh_runtime_mode = match &metadata.launch_config {
-                SessionLaunchConfig::Ssh(config) => Some(config.effective_runtime_mode()),
-                _ => None,
-            };
+            let ssh_runtime_mode = metadata.ssh_runtime_mode();
             self.continue_saved_connection_start(
                 connection,
                 SavedConnectionStartOptions {
@@ -546,6 +598,7 @@ impl ZzClawTermApp {
                     locked,
                     insert_index: Some(source_index),
                     reconnect_session_id: Some(old_id.clone()),
+                    serial_selection,
                     startup_command: reconnect_cwd_command.map(|command| StartupCommandRequest {
                         command,
                         delay_ms: 0,
@@ -568,7 +621,7 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
-        let launch_config = metadata.launch_config;
+        let launch_config = metadata.launch_config_for_restart();
         let source_connection_id = metadata.source_connection_id;
         let ai_execution_profile = metadata.ai_execution_profile;
         match launch_config {

@@ -16,7 +16,8 @@ class PluginDependencyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             crates = (
-                "zzclawterm-terminal-gpui",
+                "zzclawterm-terminal-gpui", "zzclawterm-terminal-runtime",
+                "zzclawterm-i18n", "zzclawterm-completion-runtime",
                 "zzclawterm-files", "zzclawterm-recording", "zzclawterm-remote-ops",
                 "zzclawterm-core", "zzclawterm-android", "zzclawterm-transport", "zzclawterm-terminal", "zzclawterm-store", "zzclawterm-sync",
                 "zzclawterm-remote-desktop", "zzclawterm-desktop", "zzclawterm-plugin-api", "zzclawterm-plugin-host",
@@ -31,6 +32,37 @@ class PluginDependencyTests(unittest.TestCase):
                 (directory / "Cargo.toml").write_text(document, encoding="utf-8")
             with patch.object(check_architecture, "ROOT", root):
                 return check_architecture.dependency_errors()
+
+    def test_catalog_and_completion_dependencies_include_aliased_dev_and_target_entries(self):
+        for source in ["zzclawterm-i18n", "zzclawterm-completion-runtime"]:
+            for target in ["zzclawterm-core", "zzclawterm-desktop", "zzclawterm-store", "zzclawterm-ui", "zzclawterm-i18n", "zzclawterm-completion-runtime", "gpui_platform"]:
+                for section in ["dependencies", "dev-dependencies", "build-dependencies", "target.'cfg(windows)'.dev-dependencies"]:
+                    with self.subTest(source=source, target=target, section=section):
+                        errors = self.check_dependencies("", "", {source:
+                            f'[{section}]\nhidden = {{ package = "{target}", version = "1" }}\n'})
+                        allowed = source == "zzclawterm-completion-runtime" and target == "zzclawterm-core"
+                        expected = [] if allowed else [f"crate_boundary: {source} must not depend on {target.replace('_', '-')}" ]
+                        self.assertEqual(errors, expected)
+            self.assertEqual(self.check_dependencies("", "", {source:
+                '[dev-dependencies]\nhidden-transport.workspace = true\n'}),
+                [f"crate_boundary: {source} must not depend on zzclawterm-transport"])
+
+    def test_terminal_runtime_accepts_only_its_four_workspace_dependencies(self):
+        allowed = {"zzclawterm-core", "zzclawterm-terminal", "zzclawterm-transport", "zzclawterm-recording"}
+        for package in sorted(allowed | {"zzclawterm-desktop", "zzclawterm-terminal-gpui", "zzclawterm-ui", "zzclawterm-store", "zzclawterm-files", "gpui-platform"}):
+            for section in ["dependencies", "dev-dependencies", "build-dependencies", "target.'cfg(windows)'.dev-dependencies"]:
+                with self.subTest(package=package, section=section):
+                    errors = self.check_dependencies("", "", {"zzclawterm-terminal-runtime":
+                        f'[{section}]\nhidden = {{ package = "{package}", version = "1" }}\n'})
+                    self.assertEqual(errors, [] if package in allowed else [
+                        f"crate_boundary: zzclawterm-terminal-runtime must not depend on {package}"])
+
+    def test_terminal_runtime_never_becomes_a_lower_level_dependency(self):
+        for crate in ["zzclawterm-core", "zzclawterm-terminal", "zzclawterm-transport", "zzclawterm-recording", "zzclawterm-files", "zzclawterm-remote-ops"]:
+            with self.subTest(crate=crate):
+                errors = self.check_dependencies("", "", {crate:
+                    '[dev-dependencies]\nhidden = { package = "zzclawterm-terminal-runtime", version = "1" }\n'})
+                self.assertEqual(errors, [f"crate_boundary: {crate} must not depend on zzclawterm-terminal-runtime"])
 
     def test_guest_and_host_keep_their_allowed_dependencies(self):
         self.assertEqual(self.check_dependencies(

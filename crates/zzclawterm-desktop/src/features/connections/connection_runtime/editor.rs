@@ -9,8 +9,9 @@ use zzclawterm_core::{
 use zzclawterm_store::{ConnectionStore, StorageError, StoreDomain};
 
 use super::helpers::{
-    ConnectionEditorToggle, ConnectionEditorValidationError, build_saved_connection_from_editor,
-    connection_editor_from_saved, validate_editor_account,
+    ConnectionEditorToggle, ConnectionEditorValidationError, apply_session_defaults,
+    build_default_session_settings, build_saved_connection_from_editor,
+    connection_editor_from_saved, default_session_settings_kind_id, validate_editor_account,
 };
 use crate::features::ZzClawTermApp;
 use crate::models::{
@@ -50,6 +51,10 @@ fn save_editor_connection(
         auth.password = original.and_then(|auth| auth.password.clone());
         auth.has_password = original.is_some_and(|auth| auth.has_password);
     }
+    persisted.tree_order = previous
+        .as_ref()
+        .filter(|old| old.group_id == persisted.group_id)
+        .and_then(|old| old.tree_order);
     persisted.sort_order = if let Some(previous) = previous.as_ref()
         && previous.group_id == persisted.group_id
     {
@@ -84,7 +89,14 @@ impl ZzClawTermApp {
         &self,
         editor: &ConnectionEditorState,
     ) -> Option<String> {
-        build_saved_connection_from_editor(editor)
+        // Default session settings have no identity fields, so validation uses
+        // the lenient defaults builder instead of the strict connection one.
+        let built = if editor.defaults_mode {
+            build_default_session_settings(editor).map(|_| ())
+        } else {
+            build_saved_connection_from_editor(editor).map(|_| ())
+        };
+        built
             .and_then(|_| validate_editor_account(editor, self.security.passwords()))
             .err()
             .map(|error| self.connection_editor_validation_message(&error))
@@ -216,6 +228,140 @@ impl ZzClawTermApp {
         }
     }
 
+    /// The baseline draft behind every new connection and the default
+    /// session settings editor.
+    fn new_connection_editor_state(
+        &mut self,
+        parent_group_id: Option<String>,
+        connect_after_save: bool,
+    ) -> ConnectionEditorState {
+        ConnectionEditorState {
+            defaults_mode: false,
+            android_usb: false,
+            android_screen: Default::default(),
+            id: None,
+            kind: ConnectionKindTab::Ssh,
+            name: String::new(),
+            description: String::new(),
+            tags: Vec::new(),
+            new_tag: String::new(),
+            icon: None,
+            // A new connection has no icon yet, so let the first successful
+            // SSH session fill one in.
+            icon_auto_detect: true,
+            group_id: parent_group_id.filter(|value| !value.trim().is_empty()),
+            new_group_name: String::new(),
+            pending_group_name: None,
+            pending_group_parent_id: None,
+            host: String::new(),
+            port: "22".to_string(),
+            username: "root".to_string(),
+            domain: String::new(),
+            auth_mode: "password".to_string(),
+            rdp_backend: "builtin".to_string(),
+            rdp_security: RdpSecuritySettings::default(),
+            rdp_display: RdpDisplaySettings::default(),
+            rdp_clipboard: RdpClipboardSettings::default(),
+            rdp_reconnect: RdpReconnectSettings::default(),
+
+            vnc_security: VncSecuritySettings::default(),
+            vnc_display: VncDisplaySettings::default(),
+            vnc_clipboard: VncClipboardSettings::default(),
+            vnc_reconnect: VncReconnectSettings::default(),
+            vnc_shared: true,
+            vnc_view_only: false,
+            password_source: ConnectionEditorPasswordSource::Ask,
+            password_id: None,
+            account_id: None,
+            username_source: zzclawterm_core::ConnectionUsernameSource::Connection,
+            password_source_touched: false,
+            password_source_demoted: false,
+            password_edit: crate::models::ConnectionPasswordEdit::Keep,
+            field_errors: Default::default(),
+            password: zzclawterm_core::SecretString::default(),
+            existing_password: None,
+            existing_password_locked: false,
+            key_id: None,
+            otp_id: None,
+            auto_fill_otp: false,
+            proxy_id: None,
+            proxy_jump_id: None,
+            host_key_alias: None,
+            x11_forwarding: false,
+            dynamic_tab_title: false,
+            agent_endpoint: Default::default(),
+            agent_forwarding_config: zzclawterm_core::SshAgentForwardingConfig::default(),
+            agent_allow_all_confirmed: false,
+            agent_forwarding_endpoint_index: 0,
+            agent_preview: None,
+            agent_preview_loading: false,
+            backspace_mode: "del".to_string(),
+            encoding: String::new(),
+            ssh_compatibility_mode: false,
+            ssh_profile: Default::default(),
+            terminal_type: None,
+            sftp_enabled: true,
+            sftp_compatibility_mode: false,
+            sftp_cwd_follow_mode: "shell_integration".to_string(),
+            sftp_shell_detection_timeout_ms: "3000".to_string(),
+            sftp_pipeline_depth: None,
+            sftp_extra: Default::default(),
+            sftp_filename_encoding: String::new(),
+            ssh_algorithm_mode: "compatible".to_string(),
+            ssh_algorithm_kex: Vec::new(),
+            ssh_algorithm_ciphers: Vec::new(),
+            ssh_algorithm_macs: Vec::new(),
+            ssh_algorithm_host_keys: Vec::new(),
+            ssh_algorithm_tab: ConnectionEditorSshAlgorithmTab::KeyExchange,
+            shell_path: String::new(),
+            shell_args: String::new(),
+            working_dir: String::new(),
+            serial_port: self
+                .connection_state
+                .serial_ports()
+                .iter()
+                .find(|port| !self.serial_port_in_use(&port.port_name))
+                .map(|port| port.port_name.clone())
+                .unwrap_or_default(),
+            baud_rate: "115200".to_string(),
+            serial_prompt_port: false,
+            serial_prompt_baud_rate: false,
+            data_bits: "8".to_string(),
+            parity: "none".to_string(),
+            flow_control: Default::default(),
+            stop_bits: "1".to_string(),
+            raw_tcp_cli: false,
+            telnet_enter_mode: "cr".to_string(),
+            local_echo: false,
+            local_line_edit: false,
+            force_character_at_a_time: false,
+            send_naws: true,
+            send_sga: true,
+            telnet_auto_login_enabled: true,
+            telnet_auto_login_send_wake_enter: true,
+            telnet_keep_alive_interval_secs:
+                zzclawterm_core::models::connection::DEFAULT_TELNET_KEEP_ALIVE_INTERVAL_SECS
+                    .to_string(),
+            telnet_auto_login_timeout_ms: "60000".to_string(),
+            telnet_auto_login_username_prompt_regex: String::new(),
+            telnet_auto_login_password_prompt_regex: String::new(),
+            telnet_auto_login_success_prompt_regex: String::new(),
+            telnet_auto_login_failure_prompt_regex: String::new(),
+            telnet_auto_login_max_retries: "0".to_string(),
+            post_login_enabled: false,
+            post_login_command: String::new(),
+            post_login_delay_ms: "1000".to_string(),
+            recording: None,
+
+            forwarding_tab: ConnectionEditorForwardingTab::Agent,
+
+            connect_after_save,
+            section: crate::models::ConnectionEditorSection::Basic,
+            focused_field: ConnectionEditorField::Name,
+            error: None,
+        }
+    }
+
     pub(in crate::features) fn open_connection_editor(
         &mut self,
         connection_id: Option<String>,
@@ -240,127 +386,9 @@ impl ZzClawTermApp {
             };
             connection_editor_from_saved(connection, connect_after_save)
         } else {
-            ConnectionEditorState {
-                android_usb: false,
-                android_screen: Default::default(),
-                id: None,
-                kind: ConnectionKindTab::Ssh,
-                name: String::new(),
-                description: String::new(),
-                tags: Vec::new(),
-                new_tag: String::new(),
-                icon: None,
-                // A new connection has no icon yet, so let the first successful
-                // SSH session fill one in.
-                icon_auto_detect: true,
-                group_id: parent_group_id.filter(|value| !value.trim().is_empty()),
-                new_group_name: String::new(),
-                pending_group_name: None,
-                pending_group_parent_id: None,
-                host: String::new(),
-                port: "22".to_string(),
-                username: "root".to_string(),
-                domain: String::new(),
-                auth_mode: "password".to_string(),
-                rdp_backend: "builtin".to_string(),
-                rdp_security: RdpSecuritySettings::default(),
-                rdp_display: RdpDisplaySettings::default(),
-                rdp_clipboard: RdpClipboardSettings::default(),
-                rdp_reconnect: RdpReconnectSettings::default(),
-
-                vnc_security: VncSecuritySettings::default(),
-                vnc_display: VncDisplaySettings::default(),
-                vnc_clipboard: VncClipboardSettings::default(),
-                vnc_reconnect: VncReconnectSettings::default(),
-                vnc_shared: true,
-                vnc_view_only: false,
-                password_source: ConnectionEditorPasswordSource::Ask,
-                password_id: None,
-                account_id: None,
-                username_source: zzclawterm_core::ConnectionUsernameSource::Connection,
-                password_source_touched: false,
-                password_source_demoted: false,
-                password_edit: crate::models::ConnectionPasswordEdit::Keep,
-                field_errors: Default::default(),
-                password: zzclawterm_core::SecretString::default(),
-                existing_password: None,
-                existing_password_locked: false,
-                key_id: None,
-                otp_id: None,
-                auto_fill_otp: false,
-                proxy_id: None,
-                proxy_jump_id: None,
-                host_key_alias: None,
-                x11_forwarding: false,
-                dynamic_tab_title: false,
-                agent_endpoint: Default::default(),
-                agent_forwarding_config: zzclawterm_core::SshAgentForwardingConfig::default(),
-                agent_allow_all_confirmed: false,
-                agent_forwarding_endpoint_index: 0,
-                agent_preview: None,
-                agent_preview_loading: false,
-                backspace_mode: "del".to_string(),
-                encoding: String::new(),
-                ssh_compatibility_mode: false,
-                ssh_profile: Default::default(),
-                terminal_type: None,
-                sftp_enabled: true,
-                sftp_compatibility_mode: false,
-                sftp_cwd_follow_mode: "shell_integration".to_string(),
-                sftp_shell_detection_timeout_ms: "3000".to_string(),
-                sftp_pipeline_depth: None,
-                sftp_extra: Default::default(),
-                sftp_filename_encoding: String::new(),
-                ssh_algorithm_mode: "compatible".to_string(),
-                ssh_algorithm_kex: Vec::new(),
-                ssh_algorithm_ciphers: Vec::new(),
-                ssh_algorithm_macs: Vec::new(),
-                ssh_algorithm_host_keys: Vec::new(),
-                ssh_algorithm_tab: ConnectionEditorSshAlgorithmTab::KeyExchange,
-                shell_path: String::new(),
-                shell_args: String::new(),
-                working_dir: String::new(),
-                serial_port: self
-                    .connection_state
-                    .serial_ports()
-                    .first()
-                    .cloned()
-                    .unwrap_or_default(),
-                baud_rate: "115200".to_string(),
-                data_bits: "8".to_string(),
-                parity: "none".to_string(),
-                flow_control: Default::default(),
-                stop_bits: "1".to_string(),
-                raw_tcp_cli: false,
-                telnet_enter_mode: "cr".to_string(),
-                local_echo: false,
-                local_line_edit: false,
-                force_character_at_a_time: false,
-                send_naws: true,
-                send_sga: true,
-                telnet_auto_login_enabled: true,
-                telnet_auto_login_send_wake_enter: true,
-                telnet_keep_alive_interval_secs:
-                    zzclawterm_core::models::connection::DEFAULT_TELNET_KEEP_ALIVE_INTERVAL_SECS
-                        .to_string(),
-                telnet_auto_login_timeout_ms: "60000".to_string(),
-                telnet_auto_login_username_prompt_regex: String::new(),
-                telnet_auto_login_password_prompt_regex: String::new(),
-                telnet_auto_login_success_prompt_regex: String::new(),
-                telnet_auto_login_failure_prompt_regex: String::new(),
-                telnet_auto_login_max_retries: "0".to_string(),
-                post_login_enabled: false,
-                post_login_command: String::new(),
-                post_login_delay_ms: "1000".to_string(),
-                recording: None,
-
-                forwarding_tab: ConnectionEditorForwardingTab::Agent,
-
-                connect_after_save,
-                section: crate::models::ConnectionEditorSection::Basic,
-                focused_field: ConnectionEditorField::Name,
-                error: None,
-            }
+            let mut editor = self.new_connection_editor_state(parent_group_id, connect_after_save);
+            self.apply_default_session_settings(&mut editor, cx);
+            editor
         };
 
         if editor.kind == ConnectionKindTab::Adb {
@@ -397,10 +425,167 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn close_connection_editor(&mut self, cx: &mut Context<Self>) {
+        if self.connection_state.editor_save_in_flight() {
+            return;
+        }
         self.connection_state.close_editor();
         self.connection_state.clear_editor_fields();
         self.shell
             .set_status(t!("dialog.connectionEditorClosed").to_string());
+        cx.notify();
+    }
+
+    /// "文件 > 默认会话设置": the new-connection surface minus the basic-info
+    /// tab. Saved parameters seed every future new connection.
+    pub(in crate::features) fn open_default_session_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh_connection_auth_catalog(cx);
+        let mut editor = self.new_connection_editor_state(None, false);
+        editor.defaults_mode = true;
+        self.apply_default_session_settings(&mut editor, cx);
+        editor.section = crate::models::ConnectionEditorSection::for_kind(editor.kind, true)
+            .first()
+            .copied()
+            .unwrap_or(crate::models::ConnectionEditorSection::Network);
+        editor.focused_field = ConnectionEditorField::Port;
+
+        if editor.kind == ConnectionKindTab::Adb {
+            self.prepare_android_tracker(cx);
+        }
+        self.connection_state.begin_editor(editor);
+        self.connection_state.build_editor_fields(cx);
+        if !self.open_connection_editor_window(cx) {
+            let editor_focus = self.connection_state.editor_focus_handle();
+            window.focus(&editor_focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// The stored default session settings for a connection kind, if any.
+    fn stored_default_session_settings(
+        &self,
+        kind: ConnectionKindTab,
+        cx: &gpui::App,
+    ) -> Option<SavedConnection> {
+        let state = self.process_state.read(cx);
+        let stored = state.snapshot().default_session_settings.as_ref()?;
+        let entry = stored.get(default_session_settings_kind_id(kind))?;
+        serde_json::from_value(entry.clone()).ok()
+    }
+
+    /// Seed a fresh new-connection draft with the stored defaults. Basic info
+    /// (identity, addressing, credentials) is intentionally untouched.
+    fn apply_default_session_settings(
+        &mut self,
+        editor: &mut ConnectionEditorState,
+        cx: &gpui::App,
+    ) {
+        let Some(stored) = self.stored_default_session_settings(editor.kind, cx) else {
+            let state = self.process_state.read(cx);
+            if let Some(catalog) = &state.snapshot().default_session_settings
+                && (!catalog.is_object()
+                    || catalog
+                        .get(default_session_settings_kind_id(editor.kind))
+                        .is_some())
+            {
+                editor.error = Some(t!("dialog.defaultSessionSettingsUnsupported").to_string());
+            }
+            return;
+        };
+        let defaults = connection_editor_from_saved(stored, false);
+        apply_session_defaults(&defaults, editor);
+    }
+
+    fn save_default_session_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.connection_state.editor_save_in_flight() {
+            return;
+        }
+        let drafts = self.connection_state.modified_default_drafts();
+        if drafts.is_empty() {
+            self.close_connection_editor(cx);
+            return;
+        }
+        let mut values = Vec::with_capacity(drafts.len());
+        for editor in drafts {
+            let built = match build_default_session_settings(&editor).and_then(|built| {
+                validate_editor_account(&editor, self.security.passwords()).map(|()| built)
+            }) {
+                Ok(built) => built,
+                Err(error) => {
+                    self.set_connection_editor_kind(editor.kind, cx);
+                    let message = self.connection_editor_validation_message(&error);
+                    let location = error.location(&editor);
+                    self.reveal_connection_editor_validation(location, message, window, cx);
+                    return;
+                }
+            };
+            if editor.agent_forwarding_config.enabled
+                && matches!(
+                    editor.agent_forwarding_config.policy,
+                    zzclawterm_core::SshAgentForwardingPolicy::All
+                )
+                && !editor.agent_allow_all_confirmed
+            {
+                self.set_connection_editor_kind(editor.kind, cx);
+                self.ensure_editor_agent_consent(&editor, window, cx);
+                return;
+            }
+            match serde_json::to_value(built) {
+                Ok(value) => values.push((
+                    default_session_settings_kind_id(editor.kind).to_string(),
+                    value,
+                )),
+                Err(error) => {
+                    self.set_connection_editor_error(
+                        t!("dialog.connectionSaveFailed", error = error).to_string(),
+                        cx,
+                    );
+                    return;
+                }
+            }
+        }
+        let Some(save_generation) = self.connection_state.begin_editor_save() else {
+            return;
+        };
+        let saved_status = t!("dialog.defaultSessionSettingsSaved").to_string();
+        self.shell
+            .set_status("saving default session settings...".to_string());
+        let submitted = self.submit_store_request(
+            0,
+            zzclawterm_store::store_mutation(StoreDomain::Settings, move |store| {
+                store.save_default_session_settings_batch(&values)
+            }),
+            move |this, event, cx| match event.outcome {
+                Ok(()) => {
+                    if this
+                        .connection_state
+                        .finish_editor_save_request(save_generation)
+                    {
+                        this.close_connection_editor(cx);
+                        this.shell.set_status(saved_status);
+                        cx.notify();
+                    }
+                }
+                Err(error) => {
+                    if !this
+                        .connection_state
+                        .finish_editor_save_request(save_generation)
+                    {
+                        return;
+                    }
+                    let message = t!("dialog.connectionSaveFailed", error = error).to_string();
+                    this.set_connection_editor_error(message, cx);
+                }
+            },
+            cx,
+        );
+        if !submitted {
+            self.connection_state
+                .finish_editor_save_request(save_generation);
+        }
         cx.notify();
     }
 
@@ -466,6 +651,24 @@ impl ZzClawTermApp {
             .set_editor_field_text(ConnectionEditorField::BaudRate, value.clone());
         self.connection_state
             .reset_editor_field(ConnectionEditorField::BaudRate, &value, cx);
+        // Choosing a rate is an explicit decision, so the deferred option and
+        // the rate cannot both be in effect.
+        self.connection_state
+            .set_editor_serial_prompt_baud_rate(false);
+        self.connection_state.set_editor_baud_popover_open(false);
+        cx.notify();
+    }
+
+    /// Defer the baud rate to the moment a serial session connects.
+    pub(in crate::features) fn set_connection_editor_baud_prompt(
+        &mut self,
+        ask: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.connection_state
+            .set_editor_serial_prompt_baud_rate(ask);
+        // Picking from the popover always closes it, even when the answer was
+        // already the current one.
         self.connection_state.set_editor_baud_popover_open(false);
         cx.notify();
     }
@@ -898,7 +1101,66 @@ impl ZzClawTermApp {
         kind: ConnectionKindTab,
         cx: &mut Context<Self>,
     ) {
-        if self.connection_state.set_editor_kind(kind) {
+        if self.connection_state.editor_save_in_flight() {
+            return;
+        }
+        let draft = self.connection_state.active_editor_draft();
+        if let Some(current) = draft
+            .as_ref()
+            .filter(|draft| draft.defaults_mode || draft.id.is_none())
+        {
+            if current.kind == kind {
+                return;
+            }
+            self.connection_state.remember_editor_kind();
+            let restored = self.connection_state.take_editor_kind(kind);
+            let mut next = restored.unwrap_or_else(|| {
+                let mut next = self.new_connection_editor_state(current.group_id.clone(), current.connect_after_save);
+                next.defaults_mode = current.defaults_mode;
+                next = crate::features::connections::state::ConnectionFeatureState::prepare_editor_kind(next, kind);
+                self.apply_default_session_settings(&mut next, cx);
+                if !current.defaults_mode {
+                    next.inherit_new_connection_identity(current);
+                }
+                self.connection_state.register_default_kind_baseline(&next);
+                next
+            });
+            next.section =
+                crate::models::ConnectionEditorSection::initial_for_kind(kind, next.defaults_mode);
+            // A serial draft may be titled after its device; that title belongs
+            // to the device, not to the kind the user switched to.
+            if current.kind == ConnectionKindTab::Serial && kind != ConnectionKindTab::Serial {
+                crate::features::connections::state::drop_device_name(
+                    &mut next,
+                    &current.serial_port,
+                    &current.baud_rate,
+                );
+            }
+            // The first device in the list counts as picked, so the serial tab
+            // opens with a title instead of an empty name box. A draft that was
+            // built before the device list arrived gets that device now.
+            if kind == ConnectionKindTab::Serial {
+                if next.serial_port.trim().is_empty() && !next.defaults_mode && next.id.is_none() {
+                    next.serial_port = self
+                        .connection_state
+                        .serial_ports()
+                        .iter()
+                        .find(|port| !self.serial_port_in_use(&port.port_name))
+                        .map(|port| port.port_name.clone())
+                        .unwrap_or_default();
+                }
+                crate::features::connections::state::adopt_serial_device_name(&mut next);
+            }
+            self.connection_state.replace_editor_kind(next);
+            self.connection_state.hide_editor_secrets(cx);
+            self.dismiss_connection_editor_menus(cx);
+            self.connection_state.sync_editor_fields_from_draft(cx);
+        }
+        if draft
+            .as_ref()
+            .is_none_or(|draft| !draft.defaults_mode && draft.id.is_some())
+            && self.connection_state.set_editor_kind(kind)
+        {
             self.connection_state.hide_editor_secrets(cx);
             self.connection_state
                 .select_editor_section(crate::models::ConnectionEditorSection::Basic);
@@ -1223,14 +1485,12 @@ impl ZzClawTermApp {
         });
     }
 
-    pub(in crate::features) fn save_connection_editor(
+    fn ensure_editor_agent_consent(
         &mut self,
+        editor: &ConnectionEditorState,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let Some(mut editor) = self.connection_state.active_editor_draft() else {
-            return;
-        };
+    ) -> bool {
         if editor.agent_forwarding_config.enabled
             && matches!(
                 editor.agent_forwarding_config.policy,
@@ -1253,13 +1513,34 @@ impl ZzClawTermApp {
                 window,
                 cx,
             );
+            return false;
+        }
+        true
+    }
+
+    pub(in crate::features) fn save_connection_editor(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut editor) = self.connection_state.active_editor_draft() else {
+            return;
+        };
+        if self.connection_state.editor_save_in_flight() {
             return;
         }
-
+        if editor.defaults_mode {
+            self.save_default_session_settings(window, cx);
+            return;
+        }
+        if !self.ensure_editor_agent_consent(&editor, window, cx) {
+            return;
+        }
         let pending_group = editor.pending_group_name.as_ref().map(|name| Group {
             id: uuid(),
             name: name.clone(),
             parent_id: editor.pending_group_parent_id.clone(),
+            tree_order: None,
             sort_order: self.connection_state.groups().len() as i32,
             created_at_ms: None,
             updated_at_ms: None,

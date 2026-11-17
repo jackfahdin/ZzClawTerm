@@ -1,6 +1,5 @@
 use super::basis::batch_kind_value;
 use super::draft::AssetBatchEditDraft;
-use crate::features::icons::{CONNECTION_ICON_OPTIONS, DEFAULT_CONNECTION_ICON};
 use crate::features::pages::connections::editor::connection::options;
 use crate::features::pages::connections::list::ConnectionEditorChoice;
 use gpui::SharedString;
@@ -10,6 +9,7 @@ use zzclawterm_core::{
     SavedPassword, SshAgentEndpoint, SshAgentForwardingPolicy, SshKey,
 };
 use zzclawterm_ui::ZzClawSelectOption;
+use zzclawterm_ui::icons::{CONNECTION_ICON_OPTIONS, DEFAULT_CONNECTION_ICON};
 fn choice_options(choices: Vec<ConnectionEditorChoice>) -> Vec<ZzClawSelectOption> {
     choices
         .into_iter()
@@ -194,10 +194,11 @@ pub(super) fn recording_mode_select_options(selected: &str) -> Vec<ZzClawSelectO
 }
 
 pub(super) fn serial_port_select_options(
-    ports: &[String],
+    ports: &[zzclawterm_transport::SerialPortInfo],
+    in_use: &std::collections::HashSet<String>,
     selected: &str,
 ) -> Vec<ZzClawSelectOption> {
-    choice_options(options::serial_port_choices(ports, selected))
+    choice_options(options::serial_port_choices(ports, in_use, selected))
 }
 
 pub(super) fn baud_rate_select_options(selected: &str) -> Vec<ZzClawSelectOption> {

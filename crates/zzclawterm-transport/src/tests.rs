@@ -89,7 +89,6 @@ fn tmux_host_close_releases_full_pane_output_without_cancelling_other_hosts() {
             crate::ManagedSession::Ssh(crate::SshChannelTransport {
                 info,
                 shell_enabled: true,
-                attempt: SshSessionConfig::default().attempt,
                 command_tx,
                 tmux_tx,
                 tmux_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -4038,7 +4037,6 @@ fn manager_drop_wakes_pane_output_and_unlocks_registry_before_joining_ssh() {
         crate::ManagedSession::Ssh(crate::SshChannelTransport {
             info,
             shell_enabled: true,
-            attempt: SshSessionConfig::default().attempt,
             command_tx,
             tmux_tx,
             tmux_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -4078,5 +4076,181 @@ fn zsh_inline_and_rc_activation_preserve_saved_history_and_pop_their_stack() {
             assert!(history.contains("__ZZCLAWTERM_USER_AFTER__"));
             assert!(!history.contains("ZZCLAWTERM_INJ"));
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn zsh_injection_never_echoes_past_the_ready_marker() {
+    // The client suppresses session output until the OSC 7777 ready marker and
+    // shows everything after it (#1235). A shell echoes each injected physical
+    // line before executing it, so a cleanup line trailing the marker's line
+    // becomes visible whenever SSH channel packetization delivers it in a
+    // later arrival window. Run a real interactive zsh in a PTY, delay the
+    // bytes after the marker's physical line into their own arrival window,
+    // and replay the captured stream through the client-side suppression
+    // filter to require that no injection internals leak.
+    if !std::process::Command::new("zsh")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        return;
+    }
+    for mode in [
+        super::ShellIntegrationMode::Full,
+        super::ShellIntegrationMode::CwdOnly,
+    ] {
+        let ready = crate::ssh_shell_integration::build_ssh_ready_marker("echo-leak-probe");
+        let integration = super::prepare_shell_integration(
+            crate::ssh_shell_integration::ShellKind::Zsh,
+            &ready,
+            mode,
+        )
+        .expect("prepared zsh shell integration");
+        let script = String::from_utf8(integration.inline_script()).expect("utf8 script");
+        let marker_line_start = script
+            .rfind("\nprintf '")
+            .map(|index| index + 1)
+            .expect("ready marker printf must start its own physical line for the probe split");
+        let marker_line_end = marker_line_start
+            + script[marker_line_start..]
+                .find('\n')
+                .map(|index| index + 1)
+                .unwrap_or(script.len() - marker_line_start);
+        let (head, tail) = script.split_at(marker_line_end);
+
+        let pty = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open zsh echo leak probe pty");
+        let mut command = CommandBuilder::new("zsh");
+        command.args(["-f", "-i"]);
+        command.env("PROMPT", "");
+        command.env("RPROMPT", "");
+        command.env("TERM", "xterm-256color");
+        let mut reader = pty
+            .master
+            .try_clone_reader()
+            .expect("clone zsh echo leak probe reader");
+        let mut writer = pty
+            .master
+            .take_writer()
+            .expect("take zsh echo leak probe writer");
+        let mut child = pty
+            .slave
+            .spawn_command(command)
+            .expect("spawn zsh echo leak probe");
+        drop(pty.slave);
+
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let reader_output = output.clone();
+        let reader_thread = std::thread::spawn(move || {
+            let mut buffer = [0_u8; 4096];
+            while let Ok(read) = reader.read(&mut buffer) {
+                if read == 0 {
+                    break;
+                }
+                reader_output
+                    .lock()
+                    .expect("zsh echo leak probe output lock")
+                    .extend_from_slice(&buffer[..read]);
+            }
+        });
+
+        writer
+            .write_all(b"printf '__ZZCLAWTERM_PTY_READY__\\n'\n")
+            .expect("initialize zsh echo leak probe");
+        writer.flush().expect("flush zsh echo leak probe setup");
+        let setup_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let shell_ready = output
+                .lock()
+                .expect("zsh echo leak probe output lock")
+                .windows(b"__ZZCLAWTERM_PTY_READY__\r\n".len())
+                .any(|window| window == b"__ZZCLAWTERM_PTY_READY__\r\n");
+            if shell_ready {
+                break;
+            }
+            if Instant::now() >= setup_deadline {
+                let _ = child.kill();
+                panic!("timed out preparing interactive zsh echo leak probe");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(400));
+
+        // Darwin drops excess PTY input instead of applying back-pressure to
+        // a multi-KiB write. Keep echo enabled, but pace the physical lines just
+        // like the history probes so this test receives the complete script.
+        write_pty_paced(&mut writer, head);
+        if !tail.is_empty() {
+            // Deliver whatever trails the marker's line in a later arrival
+            // window, the way SSH channel packetization does on real links.
+            std::thread::sleep(Duration::from_millis(250));
+            write_pty_paced(&mut writer, tail);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        writer
+            .write_all(b"printf '__ZZCLAWTERM_AFTER__\\n'\nexit\n")
+            .expect("finish zsh echo leak probe");
+        let child_deadline = Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll zsh echo leak probe") {
+                break status;
+            }
+            if Instant::now() >= child_deadline {
+                let _ = child.kill();
+                let captured = String::from_utf8_lossy(
+                    &output.lock().expect("zsh echo leak probe output lock"),
+                )
+                .into_owned();
+                panic!("interactive zsh echo leak probe timed out: {captured:?}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(status.success(), "zsh echo leak probe failed: {status:?}");
+        drop(writer);
+        drop(pty.master);
+        reader_thread
+            .join()
+            .expect("join zsh echo leak probe reader");
+        let captured =
+            String::from_utf8_lossy(&output.lock().expect("zsh echo leak probe output lock"))
+                .into_owned();
+        assert!(
+            captured.contains("__ZZCLAWTERM_AFTER__"),
+            "zsh must keep executing input after the injection for {mode:?}: {captured:?}"
+        );
+
+        // Replay the stream through the client-side suppression filter.
+        let mut state = crate::ssh_shell_integration::SshShellIntegrationState::new(
+            Some(integration),
+            ready,
+            None,
+        );
+        state.begin_suppression();
+        let mut visible_after_ready = Vec::new();
+        for chunk in captured.as_bytes().chunks(1024) {
+            let result = state.filter_output(chunk);
+            visible_after_ready.extend_from_slice(&result.visible);
+        }
+        assert!(
+            state.is_normal(),
+            "ready marker must end output suppression for {mode:?}: {captured:?}"
+        );
+        let visible = String::from_utf8_lossy(&visible_after_ready);
+        assert!(
+            !visible.contains("ZZCLAWTERM_INJ"),
+            "injection internals echoed past the ready marker for {mode:?}: {visible:?}"
+        );
+        assert!(
+            !visible.contains("fc -P"),
+            "history cleanup echoed past the ready marker for {mode:?}: {visible:?}"
+        );
     }
 }

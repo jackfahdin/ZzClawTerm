@@ -76,7 +76,16 @@ impl ZzClawTermApp {
                                 .connection_state
                                 .serial_ports()
                                 .iter()
-                                .map(|port| ZzClawSelectOption::new(port.clone(), port.clone()))
+                                .map(|port| {
+                                    let label = match port.detail() {
+                                        Some(detail) => {
+                                            format!("{} · {detail}", port.port_name)
+                                        }
+                                        None => port.port_name.clone(),
+                                    };
+                                    ZzClawSelectOption::new(port.port_name.clone(), label)
+                                        .disabled(self.serial_port_in_use(&port.port_name))
+                                })
                                 .collect::<Vec<_>>();
                             if serial_ports.is_empty() {
                                 div()

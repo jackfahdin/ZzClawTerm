@@ -51,3 +51,68 @@ cargo run -p zzclawterm-app --bin zzclawterm
 ## 许可证
 
 本项目基于 [Apache License 2.0](LICENSE) 开源。
+
+```text
+├── crates/
+│   ├── zzclawterm-app/             # Native GPUI application entry point and assets
+│   ├── zzclawterm-desktop/         # GPUI application composition and feature state
+│   ├── zzclawterm-core/            # UI-independent domain models and policies
+│   ├── zzclawterm-terminal/        # Terminal state machine and parsing
+│   ├── zzclawterm-terminal-runtime/ # Frame worker, search, and session event routing
+│   ├── zzclawterm-terminal-gpui/   # GPUI terminal layout, input, and painting
+│   ├── zzclawterm-transport/       # SSH, PTY, SFTP, Telnet, Serial, and transfers
+│   ├── zzclawterm-store/           # Persistence and database compatibility
+│   ├── zzclawterm-ui/              # Shared GPUI controls and theme integration
+│   ├── zzclawterm-remote-desktop/  # UI-independent RDP/VNC sessions and typed IPC
+│   ├── zzclawterm-rdp-helper/      # Isolated IronRDP protocol helper process
+│   ├── zzclawterm-vnc-helper/      # Isolated VNC protocol helper process
+│   └── zzclawterm-otp/             # OTP compatibility implementation
+├── docs-site/                   # Docusaurus documentation site
+├── Cargo.toml                   # Rust workspace definition
+└── Cargo.lock
+```
+
+---
+
+<a name="credits"></a>
+# Credits
+Thanks to the following projects and libraries that make ZzClawTerm possible:
+- [WindTerm](https://github.com/kingToolbox/WindTerm) - Inspired the design and features of ZzClawTerm
+- [tabby](https://github.com/Eugeny/tabby) - An excellent cross-platform terminal that provided many design inspirations
+- [Alacritty](https://github.com/alacritty/alacritty) - Terminal emulation components used by ZzClawTerm
+- [russh](https://github.com/warp-tech/russh) - An SSH client and server implementation in Rust
+
+---
+
+<a name="sponsor"></a>
+# Sponsor
+
+If ZzClawTerm helps your daily development, operations, or remote terminal workflow, you can support ongoing maintenance from the [Sponsor page](./docs-site/i18n/en/docusaurus-plugin-content-docs/current/sponsor.md).
+
+---
+
+<a name="contributors"></a>
+# Contributors
+
+<a href="https://github.com/nyakang/zzclawterm/graphs/contributors">
+  <img src="https://contrib-wall.coderkang.workers.dev/image?snapshot=EEZNlyhjBOrARLki-MUhXqKk&amp;sealed_token=eyJ2IjoxLCJ0eXBlIjoic25hcHNob3QiLCJzbmFwc2hvdCI6IkVFWk5seWhqQk9yQVJMa2ktTVVoWHFLayIsImV4cCI6MTgxNTAzNjQ0NH0.UwegiwfiT3KSKQ17n5ivt24EFwAtoaHZGRwx97t0ODA&amp;sealed_github_token=A6pS93BW-53hz_Cs.8rPY0yM6koNS_UowTbu8qkWzmPLRco8HJRJO2_yp5MZH9yz9o1Ob2g5MUL4aLFK24gjbDexjdErw6eR72ruRbNcsFciYuM4DghLZJgi9V5D9f1-_xFT-sGYK6ibc1A4aWz8EyvFIQo0byPAXv-d410cJmhwsH-bqc963L8J-z0kU6oIi-2zCSszxllze23WmJsWnTJBFUBrQbllg5cLwuHm6q-BMkjoVxChLdOMVwEs" alt="Contributors" />
+</a>
+
+---
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=nyakang%2Fzzclawterm&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=nyakang/zzclawterm&type=date&theme=dark&legend=top-left&sealed_token=B9FcRzP_4KoFVgTzgY_L9J4F1huRnhx9N962VMQBHjFsF-VtiApJNnKYWg5IaJDZtDm7iCd3epIU3uEZTSG2XVoU8jVssH-ge-gPjPGq5cRz9xtF2N_piA" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=nyakang/zzclawterm&type=date&legend=top-left&sealed_token=B9FcRzP_4KoFVgTzgY_L9J4F1huRnhx9N962VMQBHjFsF-VtiApJNnKYWg5IaJDZtDm7iCd3epIU3uEZTSG2XVoU8jVssH-ge-gPjPGq5cRz9xtF2N_piA" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=nyakang/zzclawterm&type=date&legend=top-left&sealed_token=B9FcRzP_4KoFVgTzgY_L9J4F1huRnhx9N962VMQBHjFsF-VtiApJNnKYWg5IaJDZtDm7iCd3epIU3uEZTSG2XVoU8jVssH-ge-gPjPGq5cRz9xtF2N_piA" />
+ </picture>
+</a>
+
+---
+
+<a name="license"></a>
+# License
+
+This project is licensed under the [Apache License 2.0](LICENSE).

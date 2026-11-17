@@ -38,13 +38,6 @@ struct MeasuredTerminal {
     prepaint_us: u64,
 }
 
-impl IntoElement for MeasuredTerminal {
-    type Element = Self;
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl Element for MeasuredTerminal {
     type RequestLayoutState = <ZzClawTerminalElement as Element>::RequestLayoutState;
     type PrepaintState = <ZzClawTerminalElement as Element>::PrepaintState;

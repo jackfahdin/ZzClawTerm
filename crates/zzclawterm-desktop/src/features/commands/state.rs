@@ -1,6 +1,6 @@
 //! Authoritative command catalog, history, runtime and quick-command UI state.
 
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::sync::Arc;
 
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{FocusHandle, ScrollHandle, UniformListScrollHandle};
@@ -58,6 +58,8 @@ pub(in crate::features) struct CommandFeatureInit {
     pub focus: QuickCommandFeatureFocus,
     pub store: StoreBlockingClient,
     pub scheduler: BlockingJobScheduler,
+    /// `<config dir>/completions`, holding user completion specs.
+    pub completion_specs_dir: Option<std::path::PathBuf>,
 }
 
 struct CommandCatalogState {
@@ -89,7 +91,11 @@ impl CommandFeatureState {
         let catalog = CommandCatalogState::new(init.commands, init.categories);
         let selected_category = valid_quick_category(&init.selected_category, &catalog.categories);
         let runtime = CommandRuntimeState::new(init.store.clone(), init.scheduler);
-        let completion = CompletionRuntime::new(init.store, runtime.result_sender());
+        let completion = CompletionRuntime::new_with_user_specs(
+            init.store,
+            runtime.result_sender(),
+            init.completion_specs_dir,
+        );
         Self {
             catalog,
             quick: QuickCommandFeatureState::new(
@@ -397,19 +403,6 @@ impl CommandFeatureState {
     pub(in crate::features) fn take_completion_sensitive(&mut self, session: &str) -> bool {
         self.completed_sensitive_submissions.remove(session)
     }
-    pub(in crate::features) fn observe_completion_command(
-        &mut self,
-        context: ShellCommandContext,
-        command: String,
-    ) -> bool {
-        if self.completion.observe(context, command) {
-            self.runtime.note_queued();
-            true
-        } else {
-            false
-        }
-    }
-
     pub(in crate::features) fn observe_completion_submission(
         &mut self,
         context: ShellCommandContext,
@@ -471,6 +464,7 @@ impl CommandFeatureState {
         event: CommandPersistenceResult,
     ) -> Result<(), String> {
         match event {
+            CommandPersistenceResult::HistoryMaintenanceWarning(message) => Err(message),
             CommandPersistenceResult::History(Ok(history)) => {
                 self.replace_command_history(history);
                 Ok(())
@@ -516,10 +510,6 @@ impl CommandFeatureState {
 
     pub(in crate::features) fn quick_view_mode(&self) -> QuickCommandViewMode {
         self.quick.list.view_mode
-    }
-
-    pub(in crate::features) fn quick_tooltip_control(&self) -> QuickCommandTooltipControl {
-        self.quick.list.tooltip.clone()
     }
 
     pub(in crate::features) fn set_quick_search_draft(&mut self, text: String) {
@@ -1224,58 +1214,6 @@ pub(in crate::features) struct QuickCommandFeatureFocus {
     pub variable: FocusHandle,
 }
 
-type QuickCommandTooltipDismiss = Rc<dyn Fn(&mut gpui::App)>;
-
-#[derive(Clone, Default)]
-pub(in crate::features) struct QuickCommandTooltipControl {
-    inner: Rc<RefCell<QuickCommandTooltipControlInner>>,
-}
-
-#[derive(Default)]
-struct QuickCommandTooltipControlInner {
-    suppressed_command_id: Option<String>,
-    active: Option<(String, QuickCommandTooltipDismiss)>,
-}
-
-impl QuickCommandTooltipControl {
-    pub(in crate::features) fn begin_hover(&self, command_id: &str) {
-        let mut inner = self.inner.borrow_mut();
-        if inner.suppressed_command_id.as_deref() == Some(command_id) {
-            inner.suppressed_command_id = None;
-        }
-        if inner
-            .active
-            .as_ref()
-            .is_some_and(|(active_id, _)| active_id != command_id)
-        {
-            inner.active = None;
-        }
-    }
-
-    pub(in crate::features) fn is_suppressed(&self, command_id: &str) -> bool {
-        self.inner.borrow().suppressed_command_id.as_deref() == Some(command_id)
-    }
-
-    pub(in crate::features) fn register(
-        &self,
-        command_id: String,
-        dismiss: QuickCommandTooltipDismiss,
-    ) {
-        self.inner.borrow_mut().active = Some((command_id, dismiss));
-    }
-
-    pub(in crate::features) fn dismiss(&self, command_id: &str, cx: &mut gpui::App) {
-        let dismiss = {
-            let mut inner = self.inner.borrow_mut();
-            inner.suppressed_command_id = Some(command_id.to_string());
-            inner.active.take().map(|(_, dismiss)| dismiss)
-        };
-        if let Some(dismiss) = dismiss {
-            dismiss(cx);
-        }
-    }
-}
-
 /// Panel list state: search, category filter, sort/view mode and their menus.
 struct QuickCommandListState {
     search_draft: String,
@@ -1283,7 +1221,6 @@ struct QuickCommandListState {
     sort_mode: QuickCommandSortMode,
     view_mode: QuickCommandViewMode,
     drop_target: Option<QuickCommandDropTarget>,
-    tooltip: QuickCommandTooltipControl,
     /// Owned by the panel list so the row scrollbar and the virtualized list
     /// share one scroll position across re-renders.
     row_scroll: UniformListScrollHandle,
@@ -1364,7 +1301,6 @@ impl QuickCommandFeatureState {
                 sort_mode,
                 view_mode,
                 drop_target: None,
-                tooltip: QuickCommandTooltipControl::default(),
                 row_scroll: UniformListScrollHandle::new(),
             },
             editor: QuickCommandEditorFeatureState {
@@ -1408,7 +1344,7 @@ impl QuickCommandFeatureState {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, path::Path, rc::Rc, sync::Arc};
+    use std::{path::Path, sync::Arc};
 
     use gpui::TestAppContext;
     use zzclawterm_core::{QuickCommand, QuickCommandCategory};
@@ -1422,7 +1358,7 @@ mod tests {
 
     use super::{
         CommandCatalogState, CommandFeatureInit, CommandFeatureState, QuickCommandCategoryChoice,
-        QuickCommandFeatureFocus, QuickCommandTooltipControl,
+        QuickCommandFeatureFocus,
     };
 
     fn command(id: &str) -> QuickCommand {
@@ -1474,6 +1410,7 @@ mod tests {
             },
             store,
             scheduler: BlockingJobScheduler::new(),
+            completion_specs_dir: None,
         })
     }
 
@@ -1527,26 +1464,6 @@ mod tests {
         state.select_quick_category("category-1".to_string());
         state.replace_quick_command_catalog(Vec::new(), Vec::new());
         assert_eq!(state.quick_selected_category(), "all");
-    }
-
-    #[test]
-    fn quick_tooltip_control_dismisses_and_resets_on_the_next_hover() {
-        let cx = TestAppContext::single();
-        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
-        let control = QuickCommandTooltipControl::default();
-        let dismiss_count = Rc::new(Cell::new(0));
-        let dismiss_count_for_handler = dismiss_count.clone();
-        control.register(
-            "command-1".to_string(),
-            Rc::new(move |_| dismiss_count_for_handler.set(dismiss_count_for_handler.get() + 1)),
-        );
-
-        cx.update(|cx| control.dismiss("command-1", cx));
-
-        assert_eq!(dismiss_count.get(), 1);
-        assert!(control.is_suppressed("command-1"));
-        control.begin_hover("command-1");
-        assert!(!control.is_suppressed("command-1"));
     }
 
     #[test]

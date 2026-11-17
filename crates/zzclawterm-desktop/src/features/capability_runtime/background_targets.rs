@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use zzclawterm_core::models::connection::{ConnectionType, SshProfile};
 use zzclawterm_core::models::sessions::SavedConnection;
 use zzclawterm_files::remote_file::RemoteFileService;
-use zzclawterm_mcp_protocol::{CapabilityAccess, ExecutionTarget, RpcError, definition_for_tool};
+use zzclawterm_mcp_protocol::{ExecutionTarget, RpcError};
 use zzclawterm_store::StoreDomain;
 
 pub(super) struct BackgroundTarget {
@@ -173,14 +173,9 @@ impl ZzClawTermApp {
                 "The saved SSH connection does not exist.",
             )
         })?;
-        validate_saved_target(
-            connection,
-            definition_for_tool(&request.tool).is_some_and(|definition| {
-                definition.access == CapabilityAccess::Write
-                    && request.tool == zzclawterm_mcp_protocol::tool::TERMINAL_START
-            }),
-        )
-        .map_err(|error| rpc_failure("permission_denied", &error.to_string()))
+        // Independent-exec gates are checked only when acquiring that backend.
+        validate_saved_target(connection, false)
+            .map_err(|error| rpc_failure("permission_denied", &error.to_string()))
     }
 
     pub(super) fn prepare_background_target(

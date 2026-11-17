@@ -59,6 +59,10 @@ pub struct Reply {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub advertised_length: Option<usize>,
+    pub chunk_delay: Option<Duration>,
+    /// Accept the request and close the connection without any response. This
+    /// is what an S3 gateway does when it retires an idle keep-alive socket.
+    pub disconnect: bool,
 }
 
 impl Reply {
@@ -68,6 +72,14 @@ impl Reply {
             headers: Vec::new(),
             body: body.into(),
             advertised_length: None,
+            chunk_delay: None,
+            disconnect: false,
+        }
+    }
+    pub fn disconnect() -> Self {
+        Self {
+            disconnect: true,
+            ..Self::new(0, Vec::new())
         }
     }
     pub fn header(mut self, name: &str, value: &str) -> Self {
@@ -85,7 +97,18 @@ impl Reply {
             write!(stream, "{name}: {value}\r\n")?;
         }
         stream.write_all(b"\r\n")?;
-        stream.write_all(&self.body)
+        if let Some(delay) = self.chunk_delay {
+            for (index, byte) in self.body.iter().enumerate() {
+                if index > 0 {
+                    std::thread::sleep(delay);
+                }
+                stream.write_all(&[*byte])?;
+                stream.flush()?;
+            }
+            Ok(())
+        } else {
+            stream.write_all(&self.body)
+        }
     }
 }
 
@@ -114,6 +137,9 @@ impl Server {
                         };
                         let reply = respond(&request);
                         received.lock().unwrap().push(request);
+                        if reply.disconnect {
+                            continue;
+                        }
                         let _ = reply.send(&mut stream);
                         // Windows can reset a just-closed socket before the
                         // peer has consumed its response. Half-close and drain

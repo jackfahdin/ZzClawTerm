@@ -1,21 +1,19 @@
 use super::helpers::{available_translation_providers, search_engine_url};
-use crate::features::{
-    ZzClawTermApp, icons::known_search_engine_icon, session::SerialUploadProtocol,
-};
+use crate::features::{ZzClawTermApp, session::SerialUploadProtocol};
 use crate::models::{AiPreparedRequest, NavItem, SettingsTab, TerminalSearchMode};
 use gpui::Context;
+use rust_i18n::t;
 use zzclawterm_core::{AiAction, AiContext};
 use zzclawterm_recording::recording::{RecordingMode, RecordingStatus};
 use zzclawterm_transport::SessionKind;
 use zzclawterm_ui::ZzClawMenuItem;
-
-use rust_i18n::t;
+use zzclawterm_ui::icons::known_search_engine_icon;
 
 impl ZzClawTermApp {
     pub(in crate::features) fn prepare_terminal_context_menu(&mut self, cx: &mut Context<Self>) {
         self.terminal.menus.action_link_menu = None;
         self.terminal.menus.action_link_tooltip = None;
-        self.terminal.assist.command_suggestions = None;
+        self.terminal.assist.commands.popup = None;
         self.terminal.assist.credential_suggestions = None;
         self.shell
             .set_status("terminal context menu opened".to_string());

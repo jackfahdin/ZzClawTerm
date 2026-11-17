@@ -655,6 +655,7 @@ fn round_trips_sessions_in_redb_compatible_tables() {
             id: "group-1".to_string(),
             name: "Servers".to_string(),
             parent_id: None,
+            tree_order: None,
             sort_order: 0,
             created_at_ms: None,
             updated_at_ms: None,
@@ -679,6 +680,7 @@ fn round_trips_sessions_in_redb_compatible_tables() {
             },
             group_id: Some("group-1".to_string()),
             description: Some("Primary".to_string()),
+            tree_order: None,
             sort_order: 0,
             icon: None,
             icon_auto_detect: None,
@@ -738,6 +740,7 @@ fn exports_and_imports_native_redb_backup() {
             id: "ops".to_string(),
             name: "Ops".to_string(),
             parent_id: None,
+            tree_order: None,
             sort_order: 0,
             created_at_ms: None,
             updated_at_ms: None,
@@ -757,6 +760,7 @@ fn exports_and_imports_native_redb_backup() {
             },
             group_id: Some("ops".to_string()),
             description: None,
+            tree_order: None,
             sort_order: 0,
             icon: None,
             icon_auto_detect: None,
@@ -826,6 +830,7 @@ fn exports_and_imports_portable_snapshot() {
                 id: "group-1".to_string(),
                 name: "Servers".to_string(),
                 parent_id: None,
+                tree_order: None,
                 sort_order: 0,
                 created_at_ms: None,
                 updated_at_ms: None,
@@ -850,6 +855,7 @@ fn exports_and_imports_portable_snapshot() {
                 },
                 group_id: Some("group-1".to_string()),
                 description: Some("Primary".to_string()),
+                tree_order: None,
                 sort_order: 0,
                 icon: None,
                 icon_auto_detect: None,
@@ -1130,6 +1136,7 @@ fn encrypted_portable_snapshot_requires_master_password() {
                 },
                 group_id: None,
                 description: None,
+                tree_order: None,
                 sort_order: 0,
                 icon: None,
                 icon_auto_detect: None,
@@ -1185,6 +1192,7 @@ fn encrypted_portable_snapshot_requires_master_password() {
                 },
                 group_id: None,
                 description: None,
+                tree_order: None,
                 sort_order: 0,
                 icon: None,
                 icon_auto_detect: None,
@@ -2173,6 +2181,7 @@ fn rejects_invalid_backup_without_replacing_current_database() {
                 },
                 group_id: None,
                 description: None,
+                tree_order: None,
                 sort_order: 0,
                 icon: None,
                 icon_auto_detect: None,
@@ -2252,6 +2261,7 @@ fn save_and_delete_connection_updates_store() {
         },
         group_id: None,
         description: None,
+        tree_order: None,
         sort_order: 0,
         icon: None,
         icon_auto_detect: None,
@@ -2286,6 +2296,7 @@ fn save_group_and_connection_persists_both_records() {
         id: "group-1".to_string(),
         name: "Servers".to_string(),
         parent_id: None,
+        tree_order: None,
         sort_order: 0,
         created_at_ms: None,
         updated_at_ms: None,
@@ -2305,6 +2316,7 @@ fn save_group_and_connection_persists_both_records() {
         },
         group_id: Some(group.id.clone()),
         description: None,
+        tree_order: None,
         sort_order: 0,
         icon: None,
         icon_auto_detect: None,
@@ -2349,6 +2361,7 @@ fn deleting_group_removes_descendants_and_grouped_connections() {
         id: "root".to_string(),
         name: "Root".to_string(),
         parent_id: None,
+        tree_order: None,
         sort_order: 0,
         created_at_ms: None,
         updated_at_ms: None,
@@ -2357,6 +2370,7 @@ fn deleting_group_removes_descendants_and_grouped_connections() {
         id: "child".to_string(),
         name: "Child".to_string(),
         parent_id: Some(root.id.clone()),
+        tree_order: None,
         sort_order: 0,
         created_at_ms: None,
         updated_at_ms: None,
@@ -2384,6 +2398,7 @@ fn deleting_group_removes_descendants_and_grouped_connections() {
                 },
                 group_id: Some(group_id),
                 description: None,
+                tree_order: None,
                 sort_order: 0,
                 icon: None,
                 icon_auto_detect: None,
@@ -2435,6 +2450,7 @@ fn load_sessions_decrypts_legacy_connection_password_record() {
         },
         group_id: None,
         description: None,
+        tree_order: None,
         sort_order: 0,
         icon: None,
         icon_auto_detect: None,
@@ -6442,6 +6458,12 @@ fn ai_settings_v6_preserves_unknown_fields_and_drops_explicitly_deprecated_field
         loaded.external_mcp.terminal_display_mode,
         zzclawterm_core::McpTerminalDisplayMode::Inline
     );
+    assert_eq!(
+        loaded.external_mcp.terminal_execution_mode,
+        zzclawterm_core::ai::mcp_execution::McpTerminalExecutionMode::Auto
+    );
+    loaded.external_mcp.terminal_execution_mode =
+        zzclawterm_core::ai::mcp_execution::McpTerminalExecutionMode::Inline;
     loaded.external_mcp.terminal_display_mode = zzclawterm_core::McpTerminalDisplayMode::Silent;
     assert_eq!(
         loaded.provider_profiles[0].base_url.as_deref(),
@@ -6472,12 +6494,17 @@ fn ai_settings_v6_preserves_unknown_fields_and_drops_explicitly_deprecated_field
     );
     assert_eq!(ai["external_mcp"]["future_mcp_field"], "preserved");
     assert_eq!(ai["external_mcp"]["terminal_display_mode"], "silent");
+    assert_eq!(ai["external_mcp"]["terminal_execution_mode"], "inline");
     assert!(ai["external_mcp"].get("server_mode").is_none());
     assert!(ai["external_mcp"].get("idle_timeout_minutes").is_none());
     let reloaded = store.load_ai_settings().expect("reload settings");
     assert_eq!(
         reloaded.external_mcp.terminal_display_mode,
         zzclawterm_core::McpTerminalDisplayMode::Silent
+    );
+    assert_eq!(
+        reloaded.external_mcp.terminal_execution_mode,
+        zzclawterm_core::ai::mcp_execution::McpTerminalExecutionMode::Inline
     );
 
     std::fs::remove_dir_all(dir).ok();
@@ -6725,6 +6752,7 @@ fn sync_snapshot_strips_device_local_ssh_agent_settings() {
             },
             group_id: None,
             description: None,
+            tree_order: None,
             sort_order: 0,
             icon: None,
             icon_auto_detect: None,
@@ -7444,6 +7472,7 @@ fn ssh_connection_for_asset(id: &str) -> SavedConnection {
         },
         group_id: None,
         description: None,
+        tree_order: None,
         sort_order: 0,
         icon: None,
         icon_auto_detect: None,
@@ -7562,6 +7591,7 @@ fn save_group_and_connection_encrypts_inline_password() {
         id: "group-secret".to_string(),
         name: "Servers".to_string(),
         parent_id: None,
+        tree_order: None,
         sort_order: 0,
         created_at_ms: None,
         updated_at_ms: None,
@@ -9387,4 +9417,112 @@ fn android_connections_and_adb_path_survive_database_reopen() {
     );
     drop(store);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn default_session_settings_round_trip_per_kind_and_reject_non_objects() {
+    let dir = unique_temp_dir("default-session-settings");
+    let store = ConnectionStore::open(&dir).unwrap();
+    assert_eq!(store.load_default_session_settings().unwrap(), None);
+
+    let ssh = serde_json::json!({"name": "", "type": "ssh", "host":"example.invalid", "port":22});
+    let telnet =
+        serde_json::json!({"name": "", "type":"telnet", "host":"example.invalid", "port": 23});
+    store.save_default_session_settings("ssh", &ssh).unwrap();
+    store
+        .save_default_session_settings("telnet", &telnet)
+        .unwrap();
+
+    let stored = store.load_default_session_settings().unwrap().unwrap();
+    assert_eq!(stored["ssh"]["port"], 22);
+    assert_eq!(stored["telnet"]["port"], 23);
+
+    // Saving one kind preserves the sibling entry and round-trips values.
+    let updated_ssh =
+        serde_json::json!({"name": "", "type":"ssh", "host":"example.invalid", "port": 2222});
+    store
+        .save_default_session_settings("ssh", &updated_ssh)
+        .unwrap();
+    let stored = store.load_default_session_settings().unwrap().unwrap();
+    assert_eq!(stored["ssh"]["port"], 2222);
+    assert_eq!(stored["telnet"]["port"], 23);
+
+    assert!(
+        store
+            .save_default_session_settings("bad", &serde_json::json!([1, 2]))
+            .is_err()
+    );
+    assert_eq!(
+        store.load_default_session_settings().unwrap().unwrap(),
+        stored
+    );
+
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn default_session_settings_survive_backup_restore_with_unknown_protocols() {
+    let root = unique_temp_dir("defaults-backup");
+    let store = ConnectionStore::open(&root).unwrap();
+    let defaults = serde_json::json!({
+        "ssh":{"type":"ssh","name":"", "host":"", "future":{"nested":7}},
+        "future_protocol":{"opaque":[1,2,3]}
+    });
+    let mut value = store.load_settings_value().unwrap();
+    value["default_session"] = defaults.clone();
+    store.save_settings_value(&value).unwrap();
+    let mut snapshot = store
+        .build_raw_portable_snapshot(
+            zzclawterm_core::portable_snapshot::PortableSnapshotKind::Backup,
+            "defaults-test",
+            "2.0.0",
+        )
+        .unwrap();
+    snapshot.recalculate_hash().unwrap();
+    let bytes = crate::portable_codec::encode_raw_portable_snapshot(&snapshot).unwrap();
+    let decoded = crate::portable_codec::decode_raw_portable_snapshot(&bytes).unwrap();
+    value.as_object_mut().unwrap().remove("default_session");
+    store.save_settings_value(&value).unwrap();
+    store.apply_raw_portable_snapshot(&decoded).unwrap();
+    assert_eq!(
+        store.load_default_session_settings().unwrap(),
+        Some(defaults)
+    );
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn default_session_batch_commits_all_protocols_or_preserves_the_entire_catalog() {
+    let root = TestTempDir::new("zzclawterm-default-session-batch");
+    let store = ConnectionStore::open(root.path()).unwrap();
+    let ssh = serde_json::json!({"id":"defaults", "name":"", "type":"ssh", "host":"localhost", "port":22, "encoding":"UTF-8", "future":{"version":8}});
+    let telnet = serde_json::json!({"id":"defaults", "name":"", "type":"telnet", "host":"localhost", "port":23, "encoding":"UTF-8"});
+    store
+        .save_default_session_settings_batch(&[
+            ("ssh".into(), ssh.clone()),
+            ("telnet".into(), telnet.clone()),
+        ])
+        .unwrap();
+    let before = store.load_default_session_settings().unwrap();
+    let mut changed = ssh.clone();
+    changed["encoding"] = serde_json::json!("GBK");
+    changed.as_object_mut().unwrap().remove("future");
+    assert!(
+        store
+            .save_default_session_settings_batch(&[
+                ("ssh".into(), changed.clone()),
+                ("telnet".into(), serde_json::json!({"type":"ssh"}))
+            ])
+            .is_err()
+    );
+    assert_eq!(store.load_default_session_settings().unwrap(), before);
+    store
+        .save_default_session_settings_batch(&[("ssh".into(), changed), ("telnet".into(), telnet)])
+        .unwrap();
+    let after = store.load_default_session_settings().unwrap().unwrap();
+    assert_eq!(after["ssh"]["encoding"], "GBK");
+    assert_eq!(after["ssh"]["future"]["version"], 8);
+    assert_eq!(after["telnet"], before.unwrap()["telnet"]);
 }

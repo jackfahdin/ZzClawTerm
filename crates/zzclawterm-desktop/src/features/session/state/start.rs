@@ -52,7 +52,7 @@ impl PendingSessionStart {
     ) -> Option<zzclawterm_core::models::ssh_runtime::SshRuntimeMode> {
         self.requested_ssh_runtime_mode.or_else(|| {
             self.launch_config.as_ref().and_then(|config| match config {
-                SessionLaunchConfig::Ssh(config) => Some(config.effective_runtime_mode()),
+                SessionLaunchConfig::Ssh(config) => Some(config.runtime_mode),
                 _ => None,
             })
         })
@@ -140,7 +140,21 @@ pub(in crate::features) struct SavedConnectionStartOptions {
     pub reconnect_session_id: Option<String>,
     pub workspace_split: Option<(WorkspaceSplitDirection, String)>,
     pub tab_placement: Option<SessionStartTabPlacement>,
+    /// Device and framing answered by the connect-time serial dialog. Set exactly
+    /// once, when the prompt is confirmed; it makes the prompt non-reentrant.
+    pub serial_selection: Option<SerialConnectSelection>,
+    /// Non-interactive starts (session restore, MCP/automation) must never block
+    /// on a dialog; deferred parameters require an explicit runtime selection,
+    /// otherwise the start fails before opening a device.
+    pub suppress_serial_prompt: bool,
     pub request_id: Option<String>,
+}
+
+/// The runtime serial parameters chosen at connect time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::features) struct SerialConnectSelection {
+    pub port_name: String,
+    pub baud_rate: u32,
 }
 
 impl SessionStartFeatureState {

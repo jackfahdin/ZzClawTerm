@@ -40,6 +40,7 @@ impl SessionFeatureState {
                 | SessionEvent::CleanupFailed { session_id, .. }
                 | SessionEvent::TmuxState { session_id, .. }
                 | SessionEvent::Notice { session_id, .. }
+                | SessionEvent::SshRuntimeModeConfirmed { session_id, .. }
                 | SessionEvent::Error { session_id, .. } => session_id,
             };
             if id == session_id {
@@ -327,6 +328,7 @@ impl SessionFeatureState {
         let metadata = self.metadata.get_mut(session_id)?;
         let already_disconnected = metadata.disconnected;
         metadata.disconnected = true;
+        self.clear_pending_command_submissions(session_id);
         self.protocols.remote_files.remove(session_id);
         self.protocols.ssh_connections.remove(session_id);
         Some(SessionDisconnectUpdate {
@@ -364,7 +366,6 @@ impl SessionFeatureState {
             self.tab_drag = None;
         }
         self.command_history.remove(session_id);
-        self.directly_recorded_command_history.remove(session_id);
         self.busy_actions.remove(session_id);
         if self.active_id() == Some(session_id) {
             self.clear_active_session();

@@ -341,6 +341,9 @@ struct MaintenanceWaiter {
 }
 
 enum WorkerMessage {
+    Close {
+        acknowledged: mpsc::Sender<()>,
+    },
     Execute {
         domain: StoreDomain,
         job: WorkerJob,
@@ -615,6 +618,14 @@ pub struct StoreRuntime {
 
 impl StoreRuntime {
     pub fn spawn(config: StoreConfig) -> Result<Self, std::io::Error> {
+        Self::spawn_input(StoreInput::Config(config))
+    }
+
+    pub fn spawn_opened(store: ConnectionStore) -> Result<Self, std::io::Error> {
+        Self::spawn_input(StoreInput::Opened(store))
+    }
+
+    fn spawn_input(input: StoreInput) -> Result<Self, std::io::Error> {
         let (sender, receiver) = mpsc::sync_channel(STORE_QUEUE_CAPACITY);
         let next_request_id = Arc::new(AtomicU64::new(1));
         let accepting = Arc::new(AtomicBool::new(true));
@@ -624,7 +635,7 @@ impl StoreRuntime {
         let worker_accepting = accepting.clone();
         std::thread::Builder::new()
             .name("zzclawterm-store".to_string())
-            .spawn(move || store_worker(config, receiver, worker_accepting))?;
+            .spawn(move || store_worker(input, receiver, worker_accepting))?;
         Ok(Self {
             ui_client: StoreUiClient {
                 sender: sender.clone(),
@@ -644,6 +655,18 @@ impl StoreRuntime {
             },
             mutation_receiver: Arc::new(Mutex::new(Some(mutation_receiver))),
         })
+    }
+
+    /// Acknowledges only after the database handle has been dropped.
+    /// Call from a blocking worker after the application's flush barriers.
+    pub fn close_blocking(&self) -> Result<(), StoreSubmitError> {
+        self.begin_shutdown();
+        let (acknowledged, receiver) = mpsc::channel();
+        self.ui_client
+            .sender
+            .send(WorkerMessage::Close { acknowledged })
+            .map_err(|_| StoreSubmitError::Disconnected)?;
+        receiver.recv().map_err(|_| StoreSubmitError::Disconnected)
     }
 
     pub fn ui_client(&self) -> StoreUiClient {
@@ -900,14 +923,24 @@ fn cloud_store_response<T>(
     })
 }
 
+enum StoreInput {
+    Config(StoreConfig),
+    Opened(ConnectionStore),
+}
+
 fn store_worker(
-    config: StoreConfig,
+    input: StoreInput,
     receiver: mpsc::Receiver<WorkerMessage>,
     accepting: Arc<AtomicBool>,
 ) {
-    let mut store =
-        ConnectionStore::open_with_portable_key_path(config.config_dir, config.portable_key_path)
-            .map_err(StoreOperationError::from);
+    let mut store = match input {
+        StoreInput::Config(config) => ConnectionStore::open_with_portable_key_path(
+            config.config_dir,
+            config.portable_key_path,
+        )
+        .map_err(StoreOperationError::from),
+        StoreInput::Opened(store) => Ok(store),
+    };
     let mut barrier_failures = Vec::new();
     let mut maintenance = MaintenanceSchedule::new(Instant::now());
     let mut waiters = Vec::new();
@@ -956,6 +989,11 @@ fn store_worker(
         };
         let ordinary_request = matches!(message, WorkerMessage::Execute { .. });
         match message {
+            WorkerMessage::Close { acknowledged } => {
+                drop(store);
+                let _ = acknowledged.send(());
+                break;
+            }
             WorkerMessage::ScheduleMaintenance {
                 requested_at,
                 waiter,
@@ -1096,6 +1134,7 @@ pub struct BootstrapSnapshot {
     pub command_history: Vec<CommandHistoryEntry>,
     pub keyword_highlights: KeywordHighlightConfig,
     pub settings: AppSettingsSummary,
+    pub default_session_settings: Option<serde_json::Value>,
     pub cloud_sync_settings: CloudSyncSettings,
     pub cloud_sync_state: CloudSyncState,
     pub translation_settings: TranslationSettings,
@@ -1250,6 +1289,7 @@ impl LoadBootstrap {
             command_history: store.list_command_history(64)?,
             keyword_highlights: store.load_keyword_highlights()?,
             settings: store.load_app_settings_summary()?,
+            default_session_settings: store.load_default_session_settings()?,
             cloud_sync_settings: store.load_cloud_sync_settings()?,
             cloud_sync_state: store.load_cloud_sync_state()?,
             translation_settings: store.load_translation_settings()?,
@@ -1859,6 +1899,22 @@ mod tests {
 
         drop(runtime);
         std::fs::remove_dir_all(config_dir).ok();
+    }
+
+    #[test]
+    fn close_acknowledges_only_after_releasing_the_transferred_database() {
+        let config_dir = temp_dir("shutdown-releases-database");
+        let store = crate::ConnectionStore::open(config_dir.path()).unwrap();
+        let runtime = StoreRuntime::spawn_opened(store).unwrap();
+        let client = runtime.blocking_client();
+        client.request(0, FlushBarrier).unwrap().outcome.unwrap();
+        assert!(crate::ConnectionStore::open_existing(config_dir.path()).is_err());
+        runtime.close_blocking().unwrap();
+        assert!(crate::ConnectionStore::open_existing(config_dir.path()).is_ok());
+        assert!(matches!(
+            client.request(0, FlushBarrier),
+            Err(super::StoreSubmitError::ShuttingDown)
+        ));
     }
 
     #[test]

@@ -22,6 +22,7 @@ struct OutputState {
     stop_presenting: bool,
     visible: bool,
     epoch: u64,
+    format: zzclawterm_android::ipc::PixelFormat,
     pixels: Vec<Vec<u8>>,
     decoded: Option<Arc<decoder::Decoded>>,
     generation: u64,
@@ -38,6 +39,7 @@ impl Default for OutputState {
             stop_presenting: false,
             visible: true,
             epoch: 0,
+            format: Default::default(),
             pixels: Vec::new(),
             decoded: None,
             generation: 0,
@@ -104,6 +106,17 @@ impl Output {
     fn refresh(&self) {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.epoch = state.epoch.wrapping_add(1);
+        self.presentation_changed.notify_one();
+    }
+    fn format(&self, format: zzclawterm_android::ipc::PixelFormat) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.format = format;
+        state.epoch = state.epoch.wrapping_add(1);
+        if let Some(frame) = state.latest.take()
+            && state.pixels.len() < 2
+        {
+            state.pixels.push(frame.pixels);
+        }
         self.presentation_changed.notify_one();
     }
     fn close(&self) {
@@ -185,7 +198,7 @@ fn presentation_loop(
     let mut presenter = decoder::Presenter::new();
     let mut presented = (0, 0, 0);
     loop {
-        let (decoded, epoch, pixels) = {
+        let (decoded, epoch, pixels, format) = {
             let mut state = output.state.lock().unwrap_or_else(|p| p.into_inner());
             loop {
                 if state.closed || state.stop_presenting {
@@ -198,7 +211,12 @@ fn presentation_loop(
                     && (decoded.generation, decoded.serial, state.epoch) != presented
                 {
                     let decoded = Arc::clone(decoded);
-                    break (decoded, state.epoch, state.pixels.pop().unwrap_or_default());
+                    break (
+                        decoded,
+                        state.epoch,
+                        state.pixels.pop().unwrap_or_default(),
+                        state.format,
+                    );
                 }
                 state = output
                     .presentation_changed
@@ -207,6 +225,7 @@ fn presentation_loop(
             }
         };
         *busy.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
+        presenter.format = format;
         let frame = presenter
             .present(&decoded, binding, pixels)
             .map_err(io::Error::other)?;
@@ -563,6 +582,7 @@ fn run() -> io::Result<()> {
                 Control::FrameAck { sequence } => output.acknowledge(sequence),
                 Control::Presentation { visible } => output.presentation(visible),
                 Control::RefreshPresentation => output.refresh(),
+                Control::FrameFormat { format } => output.format(format),
                 Control::ReleaseInputs => inputs.release()?,
                 Control::Disconnect => {
                     inputs.release()?;
@@ -573,7 +593,8 @@ fn run() -> io::Result<()> {
                 | Control::Scroll { .. }
                 | Control::Text { .. }
                 | Control::Paste { .. }
-                | Control::Rotate => {
+                | Control::Rotate
+                | Control::NotificationPanel { .. } => {
                     if let Err(code) = control.validate_input() {
                         output.control(Control::InputRejected {
                             operation: control.input_operation().expect("input variant"),
@@ -660,6 +681,8 @@ mod tests {
                 width: 1,
                 height: 1,
                 stride: 4,
+                format: Default::default(),
+                color: Default::default(),
                 pixels: vec![0; 4],
             });
         }
@@ -720,6 +743,14 @@ mod tests {
         let second = wait();
         assert!(second.sequence > first.sequence);
         assert_eq!(second.pts, first.pts);
+        output.format(zzclawterm_android::ipc::PixelFormat::I420);
+        let planar = wait();
+        assert_eq!(planar.format, zzclawterm_android::ipc::PixelFormat::I420);
+        assert_eq!(planar.pts, first.pts);
+        output.format(zzclawterm_android::ipc::PixelFormat::Bgra);
+        let fallback = wait();
+        assert_eq!(fallback.format, zzclawterm_android::ipc::PixelFormat::Bgra);
+        assert_eq!(fallback.pts, first.pts);
         output.close();
         worker.join().unwrap();
     }

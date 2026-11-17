@@ -10,10 +10,10 @@ use gpui::{
 use zzclawterm_core::{ConnectionType, Group, SavedConnection, build_group_path, truncate_preview};
 
 use crate::features::ZzClawTermApp;
-use crate::features::icons::resolve_connection_icon;
 use crate::features::shell::SessionTabTooltip;
 use crate::features::view_widgets::themed_icon;
 use crate::theme::ThemePalette;
+use zzclawterm_ui::icons::resolve_connection_icon;
 
 const NEW_SESSION_MENU_WIDTH: f32 = 300.;
 const NEW_SESSION_SUBMENU_WIDTH: f32 = 260.;
@@ -1078,6 +1078,7 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             parent_id: parent_id.map(str::to_string),
+            tree_order: None,
             sort_order,
             created_at_ms: None,
             updated_at_ms: None,
@@ -1105,6 +1106,7 @@ mod tests {
             },
             group_id: group_id.map(str::to_string),
             description: None,
+            tree_order: None,
             sort_order,
             icon: None,
             icon_auto_detect: None,

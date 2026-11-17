@@ -5,7 +5,7 @@
 //! [`AppSettingsSummary`]; document keys, field names and defaults are
 //! unchanged.
 
-use redb::ReadableTableMetadata;
+use redb::{ReadableTable, ReadableTableMetadata};
 use std::collections::HashMap;
 use zzclawterm_core::models::settings::TerminalWrapMode;
 use zzclawterm_core::models::window_decoration::WindowDecoration;
@@ -2116,6 +2116,81 @@ impl ConnectionStore {
         );
         self.save_settings_value(&value)?;
         self.load_app_settings_summary()
+    }
+
+    /// Per-connection-kind "default session settings" drafts, keyed by a
+    /// stable connection-kind id. Stored as schema-neutral JSON so older
+    /// versions ignore the key and newer versions diagnose malformed entries.
+    pub fn load_default_session_settings(&self) -> Result<Option<serde_json::Value>, StorageError> {
+        let value = self.load_settings_value()?;
+        Ok(json_path(&value, &["default_session"])
+            .filter(|entry| !entry.as_object().is_some_and(serde_json::Map::is_empty))
+            .cloned())
+    }
+
+    pub fn save_default_session_settings(
+        &self,
+        kind: &str,
+        settings: &serde_json::Value,
+    ) -> Result<(), StorageError> {
+        self.save_default_session_settings_batch(&[(kind.to_string(), settings.clone())])
+    }
+
+    /// Validate and merge every modified protocol under one write transaction.
+    /// A bad entry cannot leave the other protocols partially committed.
+    pub fn save_default_session_settings_batch(
+        &self,
+        settings: &[(String, serde_json::Value)],
+    ) -> Result<(), StorageError> {
+        if settings.is_empty() {
+            return Ok(());
+        }
+        let txn = self.db.begin_write()?;
+        let mut value = {
+            let table = txn.open_table(SETTINGS_TABLE)?;
+            match table.get(SETTINGS_DEFAULT)? {
+                Some(raw) => super::deserialize_json(raw.value())?,
+                None => super::default_settings_value(),
+            }
+        };
+        let mut entry = match json_path(&value, &["default_session"]) {
+            None => serde_json::Map::new(),
+            Some(serde_json::Value::Object(entry)) => entry.clone(),
+            Some(_) => {
+                return Err(StorageError::InvalidData(
+                    "unsupported default session catalog".into(),
+                ));
+            }
+        };
+        let mut seen = std::collections::HashSet::new();
+        for (kind, settings) in settings {
+            if !seen.insert(kind)
+                || !settings.is_object()
+                || settings.get("type").and_then(serde_json::Value::as_str) != Some(kind.as_str())
+            {
+                return Err(StorageError::InvalidData(
+                    "invalid or duplicate default session protocol".into(),
+                ));
+            }
+            let mut updated: zzclawterm_core::SavedConnection =
+                serde_json::from_value(settings.clone())?;
+            if let Some(previous) = entry.get(kind) {
+                let previous: zzclawterm_core::SavedConnection =
+                    serde_json::from_value(previous.clone())?;
+                updated
+                    .retain_extensions_from(&previous)
+                    .map_err(|message| StorageError::InvalidData(message.into()))?;
+            }
+            entry.insert(kind.clone(), serde_json::to_value(updated)?);
+        }
+        set_nested_json_value(
+            &mut value,
+            &["default_session"],
+            serde_json::Value::Object(entry),
+        );
+        write_json_in_txn(&txn, SETTINGS_TABLE, SETTINGS_DEFAULT, &value)?;
+        txn.commit()?;
+        Ok(())
     }
 }
 

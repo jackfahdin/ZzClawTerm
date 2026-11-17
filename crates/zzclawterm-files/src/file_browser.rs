@@ -1,3 +1,9 @@
+pub mod lightweight;
+pub mod listing;
+pub mod navigation;
+pub mod terminal_path;
+pub mod transfer_paths;
+
 use crate::local_fs::LocalFileService;
 use crate::remote_file::{
     FileCopyRequest, FileTransferEndpoint, RemoteFileService, RemoteTextDocument,

@@ -22,7 +22,8 @@ use zzclawterm_ui::{
 };
 
 mod network;
-use network::resource_network_card;
+pub(in crate::features::pages::remote) use network::NetworkCardPresentation;
+use network::{network_updated_text, resource_network_card};
 
 #[derive(Clone, Copy)]
 struct ResourceRowPosition {
@@ -61,6 +62,7 @@ pub(in crate::features::pages::remote) fn stats_panel(
     show_users: bool,
     stats_state: StatsPresentationState,
     network_select: Entity<ZzClawSelectState>,
+    network_presentation: NetworkCardPresentation,
     cx: &mut Context<RemoteMonitorPanel>,
 ) -> gpui::AnyElement {
     let palette = chrome.palette;
@@ -89,6 +91,12 @@ pub(in crate::features::pages::remote) fn stats_panel(
             .into_any_element();
     };
 
+    let stale = stats_state.stale(network_presentation.now, network_presentation.interval);
+    let stale_message = network_updated_text(
+        &stats_state,
+        network_presentation.now,
+        network_presentation.interval,
+    );
     let memory_total = stats.memory.used.saturating_add(stats.memory.available);
     let memory_percent = if memory_total > 0 {
         stats.memory.used as f64 / memory_total as f64 * 100.
@@ -146,6 +154,7 @@ pub(in crate::features::pages::remote) fn stats_panel(
                 .flex()
                 .flex_col()
                 .gap_2()
+                .when(stale, |body| body.child(div().text_size(px(11.)).text_color(rgb(palette.text_muted)).child(stale_message)))
                     .child(resource_section_card_with_action(
                         palette,
                         "icons/conn/server.svg",
@@ -371,7 +380,7 @@ pub(in crate::features::pages::remote) fn stats_panel(
                                     )),
                             ),
                     ))
-                .child(resource_network_card(palette, &stats_state, &network_select))
+                .child(resource_network_card(palette, &stats_state, &network_select, &network_presentation, cx))
                 .child(resource_section_card(palette, "icons/file/storage.svg", disk_label, disk_rows))
                 .overflow_y_scrollbar()
                 .id(SharedString::from("stats-scroll")),
@@ -1565,7 +1574,7 @@ fn format_resource_bytes(bytes: u64) -> String {
     if bytes == 0 {
         return "0 B".to_string();
     }
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
     let mut unit = 0;
     while value >= 1024. && unit + 1 < UNITS.len() {
@@ -1585,7 +1594,7 @@ fn format_resource_rate(bytes_per_sec: f64) -> String {
     if bytes_per_sec <= 0. {
         return "0 B/s".to_string();
     }
-    const UNITS: [&str; 4] = ["B/s", "KB/s", "MB/s", "GB/s"];
+    const UNITS: [&str; 4] = ["B/s", "KiB/s", "MiB/s", "GiB/s"];
     let mut value = bytes_per_sec;
     let mut unit = 0;
     while value >= 1024. && unit + 1 < UNITS.len() {
@@ -2256,10 +2265,10 @@ mod tests {
     #[test]
     fn resource_formatters_match_tauri_precision_and_warmup_placeholders() {
         assert_eq!(format_resource_bytes(0), "0 B");
-        assert_eq!(format_resource_bytes(95_596_000_000), "89.0 GB");
-        assert_eq!(format_resource_bytes(135_291_469_824), "126 GB");
+        assert_eq!(format_resource_bytes(95_596_000_000), "89.0 GiB");
+        assert_eq!(format_resource_bytes(135_291_469_824), "126 GiB");
         assert_eq!(format_resource_rate(0.), "0 B/s");
-        assert_eq!(format_resource_rate(4.6 * 1024.), "4.6 KB/s");
+        assert_eq!(format_resource_rate(4.6 * 1024.), "4.6 KiB/s");
         assert_eq!(format_resource_percent(None), "--");
         assert_eq!(format_resource_percent(Some(23.2)), "23%");
     }

@@ -1,21 +1,17 @@
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::Pixels;
 use rust_i18n::t;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use zzclawterm_core::CredentialPromptKind;
 use zzclawterm_core::mac_address::MacAddressFormat;
-use zzclawterm_core::{
-    CredentialPromptKind, SavedCredential, compile_prompt_regex, get_credential_prompt_pattern,
-};
 
 use crate::action_links::{ActionLinkAction, ActionLinkTarget};
 
 use super::event_wake::{ANY_INTEREST, EventWake};
 
-const CREDENTIAL_AUTOFILL_MATCH_REGEX_CACHE_LIMIT: usize = 512;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ConnectionKindTab {
     Ssh,
     Local,
@@ -72,7 +68,22 @@ pub(crate) enum ConnectionEditorSection {
 }
 
 impl ConnectionEditorSection {
-    pub(crate) fn for_kind(kind: ConnectionKindTab) -> &'static [Self] {
+    /// Sections offered by the editor. "Default session settings" reuses the
+    /// same surface without the basic-info tab, because identity fields never
+    /// carry over between connections.
+    pub(crate) fn for_kind(kind: ConnectionKindTab, defaults_mode: bool) -> &'static [Self] {
+        let sections = Self::for_kind_all_tabs(kind);
+        if defaults_mode {
+            match kind {
+                ConnectionKindTab::Serial => &[Self::Serial, Self::Terminal],
+                _ => &sections[1..],
+            }
+        } else {
+            sections
+        }
+    }
+
+    fn for_kind_all_tabs(kind: ConnectionKindTab) -> &'static [Self] {
         match kind {
             ConnectionKindTab::Adb => &[Self::Basic, Self::AndroidScreen],
             ConnectionKindTab::Ssh => &[
@@ -98,8 +109,19 @@ impl ConnectionEditorSection {
                 Self::Display,
                 Self::Session,
             ],
-            ConnectionKindTab::Serial => &[Self::Basic, Self::Serial, Self::Terminal],
+            ConnectionKindTab::Serial => &[Self::Basic, Self::Terminal],
             ConnectionKindTab::Local => &[Self::Basic, Self::Terminal],
+        }
+    }
+
+    pub(crate) fn initial_for_kind(kind: ConnectionKindTab, defaults_mode: bool) -> Self {
+        if defaults_mode {
+            Self::for_kind(kind, true)
+                .first()
+                .copied()
+                .unwrap_or(Self::Basic)
+        } else {
+            Self::Basic
         }
     }
 
@@ -280,12 +302,13 @@ impl ConnectionEditorField {
             | Self::ShellPath
             | Self::ShellArgs
             | Self::WorkingDir
+            | Self::SerialPort
+            | Self::BaudRate
             | Self::AgentEnvironmentVariable
             | Self::AgentUnixSocket => ConnectionEditorSection::Basic,
             Self::AgentForwardingEnvironmentVariable | Self::AgentForwardingSocketPath => {
                 ConnectionEditorSection::Forwarding
             }
-            Self::SerialPort | Self::BaudRate => ConnectionEditorSection::Serial,
             Self::PostLoginCommand | Self::PostLoginDelay => ConnectionEditorSection::PostLogin,
             Self::SftpShellDetectionTimeout => ConnectionEditorSection::Sftp,
             Self::TelnetKeepAliveInterval => ConnectionEditorSection::Compatibility,
@@ -303,8 +326,96 @@ impl ConnectionEditorField {
     }
 }
 
+/// Dropdown value that stands for "ask for the device when connecting" rather
+/// than a port name. It is never stored in `serial_port`, which keeps the last
+/// used device as the connect-time dialog's default.
+pub(crate) const SERIAL_PORT_ASK_AT_CONNECT: &str = "__ask_at_connect__";
+
+/// Title a new serial connection takes from its device.
+///
+/// The value can come from the enumerated list (`COM7`, `/dev/ttyUSB0`) or be
+/// typed by hand, where Windows also accepts a `\\.\COM10` prefix and Linux
+/// users often paste a `/dev/serial/by-id/...` path. Only the part that names
+/// the device is kept, so a pasted path does not turn into a title as long as
+/// the path itself. `None` means there is no device to name the connection
+/// after: nothing selected, or "ask when connecting" chosen.
+pub(crate) fn serial_connection_title(port_name: &str) -> Option<String> {
+    let port_name = port_name.trim();
+    if port_name.is_empty() || port_name == SERIAL_PORT_ASK_AT_CONNECT {
+        return None;
+    }
+    // Windows needs the prefix to address COM10 and above, but it is not part
+    // of the device's name.
+    let port_name = port_name.strip_prefix(r"\\.\").unwrap_or(port_name);
+    let device = port_name
+        .rsplit(['/', '\\'])
+        .find(|segment| !segment.is_empty())?;
+    Some(device.to_string())
+}
+
+/// Title a new serial connection takes from its device and framing.
+///
+/// This is the same shape a quick serial link gets (`COM7 @ 115200`), so a saved
+/// connection and a temporary one are named alike. The rate joins the title
+/// because one board is often opened at several of them; without a rate only the
+/// device is left.
+pub(crate) fn serial_connection_name(port_name: &str, baud_rate: &str) -> Option<String> {
+    let device = serial_connection_title(port_name)?;
+    let baud_rate = baud_rate.trim();
+    if baud_rate.is_empty() {
+        return Some(device);
+    }
+    Some(format!("{device} @ {baud_rate}"))
+}
+
+/// Name a serial connection is saved under when it has no device to speak of.
+///
+/// The connect prompt can own the device, leaving the editor without one; the
+/// connection list still needs something to show.
+pub(crate) const SERIAL_FALLBACK_NAME: &str = "Serial";
+
+/// Whether a name is the one a device and rate produce rather than one the user
+/// typed.
+///
+/// The device alone counts: names written before the rate joined the title, and
+/// connections imported with only a device, are the editor's default too. An
+/// empty name is nobody's choice yet, and neither is the bare ["Serial"] of a
+/// connection saved without a device, so both count as the device's as well.
+pub(crate) fn serial_name_restates_device(name: &str, port_name: &str, baud_rate: u32) -> bool {
+    let name = name.trim();
+    if name.is_empty() || name.eq_ignore_ascii_case(SERIAL_FALLBACK_NAME) {
+        return true;
+    }
+    serial_connection_name(port_name, &baud_rate.to_string()).as_deref() == Some(name)
+        || serial_connection_title(port_name).as_deref() == Some(name)
+}
+
+/// Title a serial tab carries for the device and rate it actually opens.
+///
+/// A name the user typed is kept verbatim. A name that only restated the device
+/// saved with the connection is the editor's default, so the tab follows the
+/// device this session really opened — which matters when the connect prompt
+/// asked: the same saved connection serves the `COM7` it was saved from and the
+/// `COM9` the board reappeared as, and the tab says which one is open.
+pub(crate) fn serial_session_title(
+    saved_name: &str,
+    saved_port_name: &str,
+    saved_baud_rate: u32,
+    port_name: &str,
+    baud_rate: u32,
+) -> String {
+    if !serial_name_restates_device(saved_name, saved_port_name, saved_baud_rate) {
+        return saved_name.to_string();
+    }
+    serial_connection_name(port_name, &baud_rate.to_string())
+        .unwrap_or_else(|| saved_name.to_string())
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ConnectionEditorState {
+    /// "Default session settings" mode: the same editor surface minus the
+    /// basic-info tab, saving reusable parameters instead of a connection.
+    pub(crate) defaults_mode: bool,
     pub(crate) android_usb: bool,
     pub(crate) android_screen: zzclawterm_core::models::android::AndroidScreenSettings,
     pub(crate) id: Option<String>,
@@ -390,6 +501,12 @@ pub(crate) struct ConnectionEditorState {
     pub(crate) working_dir: String,
     pub(crate) serial_port: String,
     pub(crate) baud_rate: String,
+    /// Ask for the device when a serial session starts. The saved port becomes a
+    /// hint and may stay empty.
+    pub(crate) serial_prompt_port: bool,
+    /// Ask for the baud rate when a serial session starts. The saved rate becomes
+    /// the dialog default.
+    pub(crate) serial_prompt_baud_rate: bool,
     pub(crate) data_bits: String,
     pub(crate) parity: String,
     pub(crate) flow_control: zzclawterm_core::models::connection::SerialFlowControl,
@@ -423,6 +540,58 @@ pub(crate) struct ConnectionEditorState {
 }
 
 impl ConnectionEditorState {
+    /// Compare raw settings, including invalid input, without counting navigation,
+    /// validation feedback or per-draft consent as edits.
+    pub(crate) fn default_settings_snapshot(&self) -> Self {
+        let mut snapshot = self.clone();
+        snapshot.id = None;
+        snapshot.section = ConnectionEditorSection::Basic;
+        snapshot.focused_field = ConnectionEditorField::Name;
+        snapshot.error = None;
+        snapshot.field_errors.clear();
+        snapshot.agent_allow_all_confirmed = false;
+        snapshot.agent_forwarding_endpoint_index = 0;
+        snapshot.agent_preview = None;
+        snapshot.agent_preview_loading = false;
+        snapshot.ssh_algorithm_tab = ConnectionEditorSshAlgorithmTab::KeyExchange;
+        snapshot.forwarding_tab = ConnectionEditorForwardingTab::Agent;
+        snapshot
+    }
+
+    pub(crate) fn inherit_new_connection_identity(&mut self, source: &Self) {
+        self.name = source.name.clone();
+        self.description = source.description.clone();
+        self.tags = source.tags.clone();
+        self.new_tag = source.new_tag.clone();
+        self.icon = source.icon.clone();
+        self.icon_auto_detect = source.icon_auto_detect;
+        self.group_id = source.group_id.clone();
+        self.new_group_name = source.new_group_name.clone();
+        self.pending_group_name = source.pending_group_name.clone();
+        self.pending_group_parent_id = source.pending_group_parent_id.clone();
+        self.host = source.host.clone();
+        self.username = source.username.clone();
+        let standard_port = match source.kind {
+            ConnectionKindTab::Ssh => "22",
+            ConnectionKindTab::Telnet => "23",
+            ConnectionKindTab::Rdp => "3389",
+            ConnectionKindTab::Vnc => "5900",
+            ConnectionKindTab::Adb => "5555",
+            _ => "",
+        };
+        if !standard_port.is_empty()
+            && !source.port.trim().is_empty()
+            && source.port != standard_port
+        {
+            self.port = source.port.clone();
+        }
+    }
+
+    /// Tabs the editor navigation offers for this draft.
+    pub(crate) fn sections(&self) -> &'static [ConnectionEditorSection] {
+        ConnectionEditorSection::for_kind(self.kind, self.defaults_mode)
+    }
+
     pub(crate) fn uses_mstsc_rdp(&self) -> bool {
         self.kind == ConnectionKindTab::Rdp && self.rdp_backend == "mstsc"
     }
@@ -440,7 +609,7 @@ impl ConnectionEditorState {
     }
 
     pub(crate) fn select_section(&mut self, section: ConnectionEditorSection) -> bool {
-        if !ConnectionEditorSection::for_kind(self.kind).contains(&section) {
+        if !self.sections().contains(&section) {
             return false;
         }
         self.section = section;
@@ -567,49 +736,6 @@ pub(crate) struct TranslationDialogState {
     pub(crate) provider_label: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CommandSuggestionItem {
-    pub(crate) fillable: bool,
-    pub(crate) description: String,
-    pub(crate) command: String,
-    pub(crate) display: String,
-    pub(crate) source: String,
-    pub(crate) score: u32,
-    pub(crate) indices: Vec<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CommandSuggestionState {
-    /// Previous results may stay visible during typing, but cannot be accepted.
-    pub(crate) refreshing: bool,
-    pub(crate) mode: zzclawterm_core::completion::types::CompletionMode,
-    pub(crate) completion_revision: u64,
-    pub(crate) scope: Option<zzclawterm_core::completion::types::CompletionScope>,
-    pub(crate) session_id: String,
-    pub(crate) input_version: u64,
-    pub(crate) sync_revision: u64,
-    pub(crate) draft: String,
-    pub(crate) items: Vec<CommandSuggestionItem>,
-    pub(crate) selected_index: Option<usize>,
-    /// Visible viewport row, including the presentation shift for cleared rows.
-    pub(crate) cursor_row: usize,
-    pub(crate) cursor_col: usize,
-}
-
-impl CommandSuggestionState {
-    pub(crate) fn begin_input_refresh(&mut self, text: &str) -> bool {
-        let ordinary_edit = (!text.is_empty() && text.chars().all(|ch| !ch.is_control()))
-            || matches!(text, "\u{7f}" | "\u{8}" | "\u{1b}[3~");
-        let changed =
-            self.refreshing != ordinary_edit || (ordinary_edit && self.selected_index.is_some());
-        self.refreshing = ordinary_edit;
-        if ordinary_edit {
-            self.selected_index = None;
-        }
-        changed
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CredentialSuggestionState {
     pub(crate) session_id: String,
@@ -619,174 +745,23 @@ pub(crate) struct CredentialSuggestionState {
     /// Only a unique precise match is preselected. Ambiguous matches and the
     /// unfiltered fallback require an explicit choice before Enter can fill.
     pub(crate) selected_index: Option<usize>,
-    /// Visible viewport row, including the presentation shift for cleared rows.
-    pub(crate) cursor_row: usize,
-    pub(crate) cursor_col: usize,
 }
 
-/// A credential the autofill pipeline can act on. Vault entries come from the
-/// security center; the connection-password candidate is derived from the
-/// active session's source connection and is resolved through the connection
-/// store at fill time, never the credential vault.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CredentialAutofillTarget {
-    Vault(SavedCredential),
-    ConnectionPassword(ConnectionPasswordTarget),
-}
+use zzclawterm_core::credential_autofill::matching::CredentialAutofillMatcher;
+pub(crate) use zzclawterm_core::credential_autofill::matching::{
+    ConnectionPasswordTarget, CredentialAutofillAction, CredentialAutofillMatchEvent,
+    CredentialAutofillMatchRequest, CredentialAutofillMatchRequestKey, CredentialAutofillTarget,
+    PendingCredentialAutofill, credential_autofill_action,
+};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ConnectionPasswordTarget {
-    pub(crate) connection_id: String,
-    pub(crate) connection_name: String,
-    pub(crate) username: String,
-}
-
-impl CredentialAutofillTarget {
-    pub(crate) fn enabled(&self) -> bool {
-        match self {
-            Self::Vault(credential) => credential.enabled,
-            Self::ConnectionPassword(_) => true,
-        }
-    }
-
-    pub(crate) fn username(&self) -> &str {
-        match self {
-            Self::Vault(credential) => &credential.username,
-            Self::ConnectionPassword(candidate) => &candidate.username,
-        }
-    }
-
-    pub(crate) fn is_connection_password(&self) -> bool {
-        matches!(self, Self::ConnectionPassword(_))
-    }
-
-    /// Panel/status label. Not persisted and never a credential id.
-    pub(crate) fn display_name(&self) -> String {
-        match self {
-            Self::Vault(credential) => credential.name.clone(),
-            Self::ConnectionPassword(candidate) => format!(
-                "{} ({})",
-                candidate.connection_name,
-                t!("credentialAutofill.connectionPasswordLabel")
-            ),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PendingCredentialAutofill {
-    pub(crate) session_id: String,
-    pub(crate) credential_id: String,
-    pub(crate) expires_at_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CredentialAutofillMatchRequestKey {
-    pub(crate) request_id: u64,
-    pub(crate) session_id: String,
-    pub(crate) prompt_text: String,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CredentialAutofillMatchRequest {
-    pub(crate) key: CredentialAutofillMatchRequestKey,
-    pub(crate) current_line: String,
-    pub(crate) prompt_kind: CredentialPromptKind,
-    pub(crate) credentials: Vec<CredentialAutofillTarget>,
-    pub(crate) pending: Option<PendingCredentialAutofill>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CredentialAutofillMatchEvent {
-    pub(crate) key: CredentialAutofillMatchRequestKey,
-    pub(crate) outcome: CredentialAutofillMatchOutcome,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum CredentialAutofillMatchOutcome {
-    Suggest {
-        kind: CredentialPromptKind,
-        matches: Vec<CredentialAutofillTarget>,
-        clear_pending: bool,
-        /// True when the prompt pattern selected these credentials. False for
-        /// the "every enabled credential" fallback, which is a list to pick
-        /// from rather than a match worth defaulting to.
-        precise: bool,
-    },
-    AutoFill {
-        credential: CredentialAutofillTarget,
-        kind: CredentialPromptKind,
-    },
-    NoMatch {
-        clear_pending: bool,
-    },
-}
-
-/// What the app does with a match reply.
-///
-/// `Send` always stands on a prior user step. The only path to it is the
-/// pending vault-credential flow, which the user enters by selecting a
-/// username suggestion; a connection password can never reach it, so
-/// remote-controlled terminal output stays an offer rather than an
-/// authorization to disclose a secret.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CredentialAutofillAction {
-    Send {
-        target: CredentialAutofillTarget,
-        kind: CredentialPromptKind,
-    },
-    Suggest {
-        kind: CredentialPromptKind,
-        matches: Vec<CredentialAutofillTarget>,
-        clear_pending: bool,
-        precise: bool,
-    },
-    None {
-        clear_pending: bool,
-    },
-}
-
-pub(crate) fn credential_autofill_action(
-    outcome: &CredentialAutofillMatchOutcome,
-) -> CredentialAutofillAction {
-    match outcome {
-        CredentialAutofillMatchOutcome::NoMatch { clear_pending } => {
-            CredentialAutofillAction::None {
-                clear_pending: *clear_pending,
-            }
-        }
-        CredentialAutofillMatchOutcome::Suggest {
-            kind,
-            matches,
-            clear_pending,
-            precise,
-        } => CredentialAutofillAction::Suggest {
-            kind: *kind,
-            matches: matches.clone(),
-            clear_pending: *clear_pending,
-            precise: *precise,
-        },
-        CredentialAutofillMatchOutcome::AutoFill { credential, kind }
-            if !credential.is_connection_password() =>
-        {
-            CredentialAutofillAction::Send {
-                target: credential.clone(),
-                kind: *kind,
-            }
-        }
-        // A connection password is decrypted and sent only from an explicit
-        // selection in the suggestion panel. Terminal output is remote input, so
-        // a prompt a remote process can print -- `[sudo] password for root:` --
-        // must never authorize sending the saved secret on its own. Downgrade
-        // any such reply to a suggestion the user has to pick.
-        CredentialAutofillMatchOutcome::AutoFill { credential, kind } => {
-            CredentialAutofillAction::Suggest {
-                kind: *kind,
-                matches: vec![credential.clone()],
-                clear_pending: true,
-                precise: true,
-            }
-        }
+pub(crate) fn credential_autofill_target_display_name(target: &CredentialAutofillTarget) -> String {
+    match target {
+        CredentialAutofillTarget::Vault(credential) => credential.name.clone(),
+        CredentialAutofillTarget::ConnectionPassword(candidate) => format!(
+            "{} ({})",
+            candidate.connection_name,
+            t!("credentialAutofill.connectionPasswordLabel")
+        ),
     }
 }
 
@@ -909,285 +884,26 @@ fn run_credential_autofill_matcher(
     command_rx: mpsc::Receiver<CredentialAutofillMatchRequest>,
     event_queue: CredentialAutofillMatchEventQueue,
 ) {
-    let mut regex_cache = HashMap::new();
+    let mut matcher = CredentialAutofillMatcher::default();
     while let Ok(request) = command_rx.recv() {
         let event = CredentialAutofillMatchEvent {
             key: request.key.clone(),
-            outcome: credential_autofill_match_outcome(request, &mut regex_cache),
+            outcome: matcher.evaluate(request),
         };
         event_queue.push(event);
     }
-}
-
-fn credential_autofill_match_outcome(
-    request: CredentialAutofillMatchRequest,
-    regex_cache: &mut HashMap<String, regex::Regex>,
-) -> CredentialAutofillMatchOutcome {
-    if let Some(pending) = request.pending.as_ref()
-        && pending.session_id == request.key.session_id
-    {
-        let pending_credential = request.credentials.iter().find_map(|target| match target {
-            CredentialAutofillTarget::Vault(credential)
-                if credential.id == pending.credential_id =>
-            {
-                Some(credential)
-            }
-            _ => None,
-        });
-        if let Some(credential) = pending_credential
-            && (credential_matches_prompt_cached(
-                credential,
-                CredentialPromptKind::Password,
-                &request.current_line,
-                regex_cache,
-            ) || credential_matches_prompt_cached(
-                credential,
-                CredentialPromptKind::Password,
-                &request.key.prompt_text,
-                regex_cache,
-            ))
-        {
-            return CredentialAutofillMatchOutcome::AutoFill {
-                credential: CredentialAutofillTarget::Vault(credential.clone()),
-                kind: CredentialPromptKind::Password,
-            };
-        }
-        if credential_autofill_detect_prompt_kind(&request.current_line)
-            != Some(CredentialPromptKind::Password)
-        {
-            return CredentialAutofillMatchOutcome::NoMatch {
-                clear_pending: false,
-            };
-        }
-    }
-
-    match request.prompt_kind {
-        CredentialPromptKind::Password => {
-            let matches = find_matching_credential_targets_cached(
-                &request.credentials,
-                CredentialPromptKind::Password,
-                &request.key.prompt_text,
-                regex_cache,
-            );
-            if !matches.is_empty() {
-                return CredentialAutofillMatchOutcome::Suggest {
-                    kind: CredentialPromptKind::Password,
-                    matches,
-                    clear_pending: true,
-                    precise: true,
-                };
-            }
-            let fallback = find_password_only_fallback_targets(&request.credentials);
-            if !fallback.is_empty() {
-                return CredentialAutofillMatchOutcome::Suggest {
-                    kind: CredentialPromptKind::Password,
-                    matches: fallback,
-                    clear_pending: true,
-                    precise: false,
-                };
-            }
-            CredentialAutofillMatchOutcome::NoMatch {
-                clear_pending: true,
-            }
-        }
-        CredentialPromptKind::Username => {
-            let matches = find_matching_credential_targets_cached(
-                &request.credentials,
-                CredentialPromptKind::Username,
-                &request.key.prompt_text,
-                regex_cache,
-            );
-            if matches.is_empty() {
-                CredentialAutofillMatchOutcome::NoMatch {
-                    clear_pending: false,
-                }
-            } else {
-                CredentialAutofillMatchOutcome::Suggest {
-                    kind: CredentialPromptKind::Username,
-                    matches,
-                    clear_pending: false,
-                    precise: true,
-                }
-            }
-        }
-    }
-}
-
-/// Regex-matched credential suggestions come from vault candidates only; the
-/// connection-password candidate has no prompt pattern of its own.
-fn find_matching_credential_targets_cached(
-    credentials: &[CredentialAutofillTarget],
-    kind: CredentialPromptKind,
-    output: &str,
-    regex_cache: &mut HashMap<String, regex::Regex>,
-) -> Vec<CredentialAutofillTarget> {
-    credentials
-        .iter()
-        .filter_map(|target| match target {
-            CredentialAutofillTarget::Vault(credential)
-                if credential_matches_prompt_cached(credential, kind, output, regex_cache) =>
-            {
-                Some(target.clone())
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-/// Default password-prompt fallback (Tauri parity): every enabled target,
-/// preserving order so the connection-password candidate stays first.
-fn find_password_only_fallback_targets(
-    credentials: &[CredentialAutofillTarget],
-) -> Vec<CredentialAutofillTarget> {
-    credentials
-        .iter()
-        .filter(|target| target.enabled())
-        .cloned()
-        .collect()
-}
-
-fn credential_matches_prompt_cached(
-    credential: &SavedCredential,
-    kind: CredentialPromptKind,
-    output: &str,
-    regex_cache: &mut HashMap<String, regex::Regex>,
-) -> bool {
-    if !credential.enabled {
-        return false;
-    }
-    if kind == CredentialPromptKind::Username && credential.username.trim().is_empty() {
-        return false;
-    }
-    if kind == CredentialPromptKind::Password && !credential.has_password {
-        return false;
-    }
-
-    let pattern = get_credential_prompt_pattern(credential, kind);
-    if pattern.is_empty() {
-        return false;
-    }
-    let cache_key = format!("{}:{kind:?}:{pattern}", credential.id);
-    if !regex_cache.contains_key(&cache_key) {
-        if regex_cache.len() >= CREDENTIAL_AUTOFILL_MATCH_REGEX_CACHE_LIMIT {
-            regex_cache.clear();
-        }
-        let Some(regex) = compile_prompt_regex(&pattern) else {
-            return false;
-        };
-        regex_cache.insert(cache_key.clone(), regex);
-    }
-    regex_cache
-        .get(&cache_key)
-        .is_some_and(|regex| regex.is_match(output))
-}
-
-fn credential_autofill_detect_prompt_kind(prompt: &str) -> Option<CredentialPromptKind> {
-    let trimmed = prompt.trim();
-    if trimmed.is_empty()
-        || !trimmed
-            .chars()
-            .last()
-            .is_some_and(|ch| ch == ':' || ch == '：')
-    {
-        return None;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.contains("password")
-        || lower.contains("passphrase")
-        || lower.contains("passcode")
-        || lower.contains("pin")
-        || lower.contains("otp")
-        || lower.contains("verification code")
-        || lower.contains("authentication code")
-        || lower.contains("auth code")
-        || lower.contains("2fa")
-        || lower.contains("mfa")
-        || trimmed.contains("密码")
-        || trimmed.contains("口令")
-        || trimmed.contains("验证码")
-        || trimmed.contains("动态码")
-        || trimmed.contains("动态口令")
-    {
-        return Some(CredentialPromptKind::Password);
-    }
-    if lower.contains("username")
-        || lower.contains("user name")
-        || lower.contains("login as")
-        || lower.contains("login")
-        || lower.contains("account")
-        || lower.contains("user")
-        || trimmed.contains("用户名")
-        || trimmed.contains("用户")
-        || trimmed.contains("账号")
-        || trimmed.contains("账户")
-        || trimmed.contains("登录名")
-    {
-        return Some(CredentialPromptKind::Username);
-    }
-    None
 }
 
 const CREDENTIAL_AUTOFILL_MATCH_EVENT_CAP: usize = 128;
 
 #[cfg(test)]
 mod credential_autofill_match_tests {
-    use std::collections::HashMap;
-
     use super::{
         CredentialAutofillMatchEvent, CredentialAutofillMatchEventQueue,
-        CredentialAutofillMatchOutcome, CredentialAutofillMatchRequest,
-        CredentialAutofillMatchRequestKey, CredentialAutofillTarget, CredentialPromptKind,
-        PendingCredentialAutofill, SavedCredential, credential_autofill_action,
-        credential_autofill_match_outcome,
+        CredentialAutofillMatchRequestKey,
     };
     use crate::models::event_wake::EventWake;
-
-    fn credential(
-        id: &str,
-        username: &str,
-        username_prompt_regex: Option<&str>,
-        password_prompt_regex: Option<&str>,
-        has_password: bool,
-    ) -> SavedCredential {
-        SavedCredential {
-            id: id.to_string(),
-            sort_order: 0,
-            name: id.to_string(),
-            username: username.to_string(),
-            password: None,
-            username_prompt_regex: username_prompt_regex.map(str::to_string),
-            password_prompt_regex: password_prompt_regex.map(str::to_string),
-            enabled: true,
-            has_password,
-        }
-    }
-
-    fn vault_credentials(credentials: Vec<SavedCredential>) -> Vec<CredentialAutofillTarget> {
-        credentials
-            .into_iter()
-            .map(CredentialAutofillTarget::Vault)
-            .collect()
-    }
-
-    fn request(
-        prompt_text: &str,
-        prompt_kind: CredentialPromptKind,
-        credentials: Vec<CredentialAutofillTarget>,
-        pending: Option<PendingCredentialAutofill>,
-    ) -> CredentialAutofillMatchRequest {
-        CredentialAutofillMatchRequest {
-            key: CredentialAutofillMatchRequestKey {
-                request_id: 1,
-                session_id: "s1".to_string(),
-                prompt_text: prompt_text.to_string(),
-            },
-            current_line: prompt_text.to_string(),
-            prompt_kind,
-            credentials,
-            pending,
-        }
-    }
-
+    use zzclawterm_core::credential_autofill::matching::CredentialAutofillMatchOutcome;
     fn event(request_id: u64, session_id: &str, prompt_text: &str) -> CredentialAutofillMatchEvent {
         CredentialAutofillMatchEvent {
             key: CredentialAutofillMatchRequestKey {
@@ -1261,286 +977,6 @@ mod credential_autofill_match_tests {
         ));
         assert!(queue.try_recv().is_none());
     }
-
-    #[test]
-    fn credential_autofill_worker_suggests_matching_username() {
-        let mut regex_cache = HashMap::new();
-        let output = credential_autofill_match_outcome(
-            request(
-                "login as:",
-                CredentialPromptKind::Username,
-                vault_credentials(vec![credential(
-                    "c1",
-                    "root",
-                    Some("login as:"),
-                    None,
-                    true,
-                )]),
-                None,
-            ),
-            &mut regex_cache,
-        );
-
-        match output {
-            CredentialAutofillMatchOutcome::Suggest {
-                kind,
-                matches,
-                clear_pending,
-                precise,
-            } => {
-                assert_eq!(kind, CredentialPromptKind::Username);
-                assert_eq!(matches.len(), 1);
-                assert!(matches!(
-                    &matches[0],
-                    CredentialAutofillTarget::Vault(credential) if credential.id == "c1"
-                ));
-                assert!(!clear_pending);
-                assert!(precise, "a username prompt match must be a precise match");
-            }
-            other => panic!("unexpected outcome: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn credential_autofill_worker_falls_back_to_password_only_credentials() {
-        let mut regex_cache = HashMap::new();
-        let output = credential_autofill_match_outcome(
-            request(
-                "Password:",
-                CredentialPromptKind::Password,
-                vault_credentials(vec![credential("c1", "", None, None, true)]),
-                None,
-            ),
-            &mut regex_cache,
-        );
-
-        match output {
-            CredentialAutofillMatchOutcome::Suggest {
-                kind,
-                matches,
-                clear_pending,
-                precise,
-            } => {
-                assert_eq!(kind, CredentialPromptKind::Password);
-                assert_eq!(matches.len(), 1);
-                assert!(matches!(
-                    &matches[0],
-                    CredentialAutofillTarget::Vault(credential) if credential.id == "c1"
-                ));
-                assert!(clear_pending);
-                assert!(
-                    !precise,
-                    "the every-credential fallback is not a precise match"
-                );
-            }
-            other => panic!("unexpected outcome: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn credential_autofill_worker_autofills_pending_password() {
-        let mut regex_cache = HashMap::new();
-        let output = credential_autofill_match_outcome(
-            request(
-                "Password:",
-                CredentialPromptKind::Password,
-                vault_credentials(vec![credential(
-                    "c1",
-                    "root",
-                    Some("login as:"),
-                    Some("Password:"),
-                    true,
-                )]),
-                Some(PendingCredentialAutofill {
-                    session_id: "s1".to_string(),
-                    credential_id: "c1".to_string(),
-                    expires_at_ms: u64::MAX,
-                }),
-            ),
-            &mut regex_cache,
-        );
-
-        match output {
-            CredentialAutofillMatchOutcome::AutoFill { credential, kind } => {
-                assert!(matches!(
-                    credential,
-                    CredentialAutofillTarget::Vault(saved) if saved.id == "c1"
-                ));
-                assert_eq!(kind, CredentialPromptKind::Password);
-            }
-            other => panic!("unexpected outcome: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn credential_autofill_worker_connects_password_variant_precedes_vault_fallback() {
-        let mut regex_cache = HashMap::new();
-        let candidate =
-            CredentialAutofillTarget::ConnectionPassword(super::ConnectionPasswordTarget {
-                connection_id: "conn-1".to_string(),
-                connection_name: "prod".to_string(),
-                username: "dev".to_string(),
-            });
-        let mut credentials = vec![candidate.clone()];
-        credentials.extend(vault_credentials(vec![credential(
-            "c1", "", None, None, true,
-        )]));
-        let output = credential_autofill_match_outcome(
-            request(
-                "Password:",
-                CredentialPromptKind::Password,
-                credentials,
-                None,
-            ),
-            &mut regex_cache,
-        );
-
-        match output {
-            CredentialAutofillMatchOutcome::Suggest {
-                kind,
-                matches,
-                clear_pending,
-                precise,
-            } => {
-                assert_eq!(kind, CredentialPromptKind::Password);
-                assert_eq!(matches.len(), 2);
-                assert_eq!(matches[0], candidate, "connection password stays first");
-                assert!(matches!(
-                    &matches[1],
-                    CredentialAutofillTarget::Vault(credential) if credential.id == "c1"
-                ));
-                assert!(clear_pending);
-                assert!(
-                    !precise,
-                    "a bare password prompt reaches the fallback list, not a precise match"
-                );
-            }
-            other => panic!("unexpected outcome: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn credential_autofill_worker_ignores_connection_password_as_username() {
-        let mut regex_cache = HashMap::new();
-        let candidate =
-            CredentialAutofillTarget::ConnectionPassword(super::ConnectionPasswordTarget {
-                connection_id: "conn-1".to_string(),
-                connection_name: "prod".to_string(),
-                username: "dev".to_string(),
-            });
-        let output = credential_autofill_match_outcome(
-            request(
-                "login as:",
-                CredentialPromptKind::Username,
-                vec![candidate],
-                None,
-            ),
-            &mut regex_cache,
-        );
-
-        assert!(matches!(
-            output,
-            CredentialAutofillMatchOutcome::NoMatch {
-                clear_pending: false
-            }
-        ));
-    }
-
-    fn connection_password_target(username: &str) -> CredentialAutofillTarget {
-        CredentialAutofillTarget::ConnectionPassword(super::ConnectionPasswordTarget {
-            connection_id: "conn-1".to_string(),
-            connection_name: "prod".to_string(),
-            username: username.to_string(),
-        })
-    }
-
-    #[test]
-    fn sudo_prompt_for_login_user_suggests_connection_password_without_sending_it() {
-        // A remote process can print this; it must not be able to authorize
-        // sending the saved connection password.
-        let mut regex_cache = HashMap::new();
-        let candidate = connection_password_target("root");
-        let outcome = credential_autofill_match_outcome(
-            request(
-                "[sudo] password for root:",
-                CredentialPromptKind::Password,
-                vec![candidate.clone()],
-                None,
-            ),
-            &mut regex_cache,
-        );
-
-        // The sole candidate does reach the user as a suggestion. It arrives
-        // through the every-credential fallback (the connection password has no
-        // vault prompt pattern), so it is not pre-selected...
-        assert_eq!(
-            credential_autofill_action(&outcome),
-            super::CredentialAutofillAction::Suggest {
-                kind: CredentialPromptKind::Password,
-                matches: vec![candidate],
-                clear_pending: true,
-                precise: false,
-            }
-        );
-        assert!(
-            !matches!(
-                credential_autofill_action(&outcome),
-                super::CredentialAutofillAction::Send { .. }
-            ),
-            "a matching sudo prompt must never resolve to a send"
-        );
-    }
-
-    #[test]
-    fn connection_password_autofill_reply_never_sends() {
-        // Defense in depth: even a reply that claims AutoFill is downgraded to
-        // a suggestion when it carries the connection password.
-        let candidate = connection_password_target("root");
-        let action = credential_autofill_action(&CredentialAutofillMatchOutcome::AutoFill {
-            credential: candidate.clone(),
-            kind: CredentialPromptKind::Password,
-        });
-
-        assert_eq!(
-            action,
-            super::CredentialAutofillAction::Suggest {
-                kind: CredentialPromptKind::Password,
-                matches: vec![candidate],
-                clear_pending: true,
-                precise: true,
-            }
-        );
-    }
-
-    #[test]
-    fn pending_vault_credential_still_autofills_after_user_selection() {
-        // The pending flow is entered by selecting a username suggestion, so
-        // its auto-fill keeps the vault path working.
-        let outcome = CredentialAutofillMatchOutcome::AutoFill {
-            credential: CredentialAutofillTarget::Vault(credential("c1", "root", None, None, true)),
-            kind: CredentialPromptKind::Password,
-        };
-
-        assert!(matches!(
-            credential_autofill_action(&outcome),
-            super::CredentialAutofillAction::Send {
-                kind: CredentialPromptKind::Password,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn no_match_reply_produces_no_action() {
-        assert_eq!(
-            credential_autofill_action(&CredentialAutofillMatchOutcome::NoMatch {
-                clear_pending: true
-            }),
-            super::CredentialAutofillAction::None {
-                clear_pending: true
-            }
-        );
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1581,5 +1017,167 @@ impl ConnectionSortMode {
             Self::NameAsc => Self::NameDesc,
             Self::NameDesc => Self::Default,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        SERIAL_PORT_ASK_AT_CONNECT, serial_connection_name, serial_connection_title,
+        serial_name_restates_device, serial_session_title,
+    };
+
+    #[test]
+    fn serial_settings_stay_in_basic_information_except_in_defaults() {
+        use super::{ConnectionEditorField, ConnectionEditorSection, ConnectionKindTab};
+        assert_eq!(
+            ConnectionEditorSection::for_kind(ConnectionKindTab::Serial, false),
+            &[
+                ConnectionEditorSection::Basic,
+                ConnectionEditorSection::Terminal
+            ]
+        );
+        assert_eq!(
+            ConnectionEditorSection::for_kind(ConnectionKindTab::Serial, true),
+            &[
+                ConnectionEditorSection::Serial,
+                ConnectionEditorSection::Terminal
+            ]
+        );
+        assert_eq!(
+            ConnectionEditorSection::initial_for_kind(ConnectionKindTab::Serial, false),
+            ConnectionEditorSection::Basic
+        );
+        assert_eq!(
+            ConnectionEditorSection::initial_for_kind(ConnectionKindTab::Serial, true),
+            ConnectionEditorSection::Serial
+        );
+        assert_eq!(
+            ConnectionEditorField::SerialPort.section(),
+            ConnectionEditorSection::Basic
+        );
+        assert_eq!(
+            ConnectionEditorField::BaudRate.section(),
+            ConnectionEditorSection::Basic
+        );
+    }
+
+    /// The title names the device, wherever the device name came from.
+    #[test]
+    fn a_device_names_the_connection_not_the_path_that_reaches_it() {
+        for (port_name, expected) in [
+            ("COM7", "COM7"),
+            ("  COM7  ", "COM7"),
+            // Windows needs the prefix to open COM10 and above.
+            (r"\\.\COM10", "COM10"),
+            ("/dev/ttyUSB0", "ttyUSB0"),
+            ("/dev/ttyACM0", "ttyACM0"),
+            (
+                "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A50285BI-if00-port0",
+                "usb-FTDI_FT232R_USB_UART_A50285BI-if00-port0",
+            ),
+        ] {
+            assert_eq!(
+                serial_connection_title(port_name).as_deref(),
+                Some(expected),
+                "{port_name}"
+            );
+        }
+    }
+
+    /// Without a device there is nothing to name the connection after.
+    #[test]
+    fn an_unpicked_device_has_no_title() {
+        assert_eq!(serial_connection_title(""), None);
+        assert_eq!(serial_connection_title("   "), None);
+        assert_eq!(serial_connection_title(SERIAL_PORT_ASK_AT_CONNECT), None);
+    }
+
+    /// The rate joins the device, which is how a quick serial link is titled.
+    #[test]
+    fn the_rate_joins_the_device_in_the_title() {
+        assert_eq!(
+            serial_connection_name("COM7", "115200").as_deref(),
+            Some("COM7 @ 115200")
+        );
+        assert_eq!(
+            serial_connection_name(r"\.\COM10", " 921600 ").as_deref(),
+            Some("COM10 @ 921600")
+        );
+        assert_eq!(
+            serial_connection_name("/dev/serial/by-id/usb-FTDI-if00-port0", "57600").as_deref(),
+            Some("usb-FTDI-if00-port0 @ 57600")
+        );
+        // A missing rate leaves the device on its own rather than a bare " @ ".
+        assert_eq!(
+            serial_connection_name("COM7", "  ").as_deref(),
+            Some("COM7")
+        );
+        // Without a device there is nothing to name, however precise the rate.
+        assert_eq!(serial_connection_name("", "115200"), None);
+        assert_eq!(
+            serial_connection_name(SERIAL_PORT_ASK_AT_CONNECT, "115200"),
+            None
+        );
+    }
+
+    /// Only the device's own wording follows the device; anything the user typed
+    /// is theirs to keep.
+    #[test]
+    fn a_name_tells_the_devices_wording_apart_from_the_users() {
+        assert!(serial_name_restates_device("COM7 @ 115200", "COM7", 115200));
+        // Named after the device alone, which older titles did.
+        assert!(serial_name_restates_device("COM7", "COM7", 115200));
+        // Nothing typed yet, and the bare "Serial" a device-less save leaves.
+        assert!(serial_name_restates_device("   ", "COM7", 115200));
+        assert!(serial_name_restates_device("Serial", "", 115200));
+        assert!(serial_name_restates_device("serial", "", 115200));
+        assert!(!serial_name_restates_device(
+            "Stepper bench",
+            "COM7",
+            115200
+        ));
+        // Anything else written over the device's wording is a choice of words.
+        assert!(!serial_name_restates_device("Serial bench", "", 115200));
+        // A rate the connection does not open at is not the device's wording.
+        assert!(!serial_name_restates_device("COM7 @ 9600", "COM7", 115200));
+        assert!(!serial_name_restates_device(
+            "COM7 @ 115200",
+            "COM9",
+            115200
+        ));
+    }
+
+    /// The tab names the device it really opened, unless the user chose words.
+    #[test]
+    fn a_serial_tab_follows_the_device_it_opened() {
+        assert_eq!(
+            serial_session_title("COM7 @ 115200", "COM7", 115200, "COM9", 57600),
+            "COM9 @ 57600"
+        );
+        assert_eq!(
+            serial_session_title("COM7", "COM7", 115200, "/dev/ttyACM0", 115200),
+            "ttyACM0 @ 115200"
+        );
+        assert_eq!(
+            serial_session_title("", "COM7", 115200, "COM9", 115200),
+            "COM9 @ 115200"
+        );
+        // The bare "Serial" of a connection saved without a device is the
+        // device's to name too, which is the connect prompt's job then.
+        assert_eq!(
+            serial_session_title("Serial", "", 115200, "COM9", 115200),
+            "COM9 @ 115200"
+        );
+        // A name of the user's own is not the tab's to rewrite.
+        assert_eq!(
+            serial_session_title("Stepper bench", "COM7", 115200, "COM9", 57600),
+            "Stepper bench"
+        );
+        // Without a device to name it after, the saved name is all there is.
+        assert_eq!(
+            serial_session_title("COM7 @ 115200", "COM7", 115200, "", 115200),
+            "COM7 @ 115200"
+        );
     }
 }

@@ -364,6 +364,25 @@ impl ZzClawTermApp {
         if !self.session.start.request_can_start(&options) {
             return;
         }
+        if let SessionLaunchConfig::Serial(config) = &launch_config
+            && self
+                .session
+                .serial_ports_in_use(
+                    options.reconnect_session_id.as_deref(),
+                    options.request_id.as_deref(),
+                )
+                .contains(config.port_name.trim())
+        {
+            let message = rust_i18n::t!("dialog.serialPortInUse").to_string();
+            self.fail_start_preparation(&options, message.clone(), cx);
+            self.complete_mcp_session_open_failure(
+                options.mcp_open_operation_id.as_deref().unwrap_or(""),
+                &message,
+            );
+            self.shell.set_status(message);
+            cx.notify();
+            return;
+        }
         let options = self.prepare_session_start_options(options);
         let SavedConnectionStartOptions {
             android_view: _,
@@ -379,6 +398,8 @@ impl ZzClawTermApp {
             reconnect_session_id,
             workspace_split,
             tab_placement,
+            serial_selection: _,
+            suppress_serial_prompt: _,
             request_id,
         } = options;
         let kind = session_kind_for_launch_config(&launch_config);
@@ -516,7 +537,6 @@ impl ZzClawTermApp {
         if !self.session.start.request_can_start(&options) {
             return;
         }
-        config.runtime_mode = config.effective_runtime_mode();
         if let Some(mode) = options.ssh_runtime_mode {
             config.runtime_mode = mode;
         }
@@ -547,6 +567,8 @@ impl ZzClawTermApp {
             reconnect_session_id,
             workspace_split,
             tab_placement,
+            serial_selection: _,
+            suppress_serial_prompt: _,
             request_id,
         } = options;
         config.deferred_pty = true;
@@ -662,7 +684,6 @@ impl ZzClawTermApp {
         if !self.session.start.request_can_start(&options) {
             return;
         }
-        config.runtime_mode = config.effective_runtime_mode();
         let mut options = options;
         if let Some(mode) = options.ssh_runtime_mode {
             config.runtime_mode = mode;
@@ -685,6 +706,8 @@ impl ZzClawTermApp {
             reconnect_session_id,
             workspace_split,
             tab_placement,
+            serial_selection: _,
+            suppress_serial_prompt: _,
             request_id,
         } = options;
         config.deferred_pty = true;
@@ -959,7 +982,7 @@ impl ZzClawTermApp {
                     .map(|pending| pending.ai_execution_profile)
                     .unwrap_or(AiExecutionProfile::SendOnly);
                 let ai_execution_profile = if ssh_config.as_ref().is_some_and(|config| {
-                    config.effective_runtime_mode()
+                    config.runtime_mode
                         == zzclawterm_core::models::ssh_runtime::SshRuntimeMode::Sftp
                 }) {
                     AiExecutionProfile::Disabled
@@ -967,13 +990,15 @@ impl ZzClawTermApp {
                     ai_execution_profile
                 };
                 if ssh_config.as_ref().is_some_and(|config| {
-                    config.effective_runtime_mode()
+                    config.runtime_mode
                         == zzclawterm_core::models::ssh_runtime::SshRuntimeMode::Sftp
                 }) && let Some(pending) = pending.as_mut()
                 {
                     pending.startup_command = None;
                 }
                 let metadata = SessionRuntimeMetadata {
+                    confirmed_ssh_runtime_mode: None,
+                    pending_ssh_startup_command: None,
                     ssh_config,
                     ssh_multiplex_key,
                     source_connection_id: source_connection_id.clone(),

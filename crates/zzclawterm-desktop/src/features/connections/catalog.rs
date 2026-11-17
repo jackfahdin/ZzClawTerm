@@ -4,11 +4,12 @@
 //! state only owns the validated values currently presented by the desktop.
 
 use zzclawterm_core::{Group, SavedConnection};
+use zzclawterm_transport::SerialPortInfo;
 
 pub(super) struct ConnectionCatalogState {
     connections: Vec<SavedConnection>,
     groups: Vec<Group>,
-    serial_ports: Vec<String>,
+    serial_ports: Vec<SerialPortInfo>,
     serial_ports_loading: bool,
     serial_ports_error: Option<String>,
     connections_revision: u64,
@@ -36,7 +37,7 @@ impl ConnectionCatalogState {
         &self.groups
     }
 
-    pub(super) fn serial_ports(&self) -> &[String] {
+    pub(super) fn serial_ports(&self) -> &[SerialPortInfo] {
         &self.serial_ports
     }
 
@@ -63,7 +64,7 @@ impl ConnectionCatalogState {
         self.groups_revision = self.groups_revision.wrapping_add(1);
     }
 
-    pub(super) fn replace_serial_ports(&mut self, serial_ports: Vec<String>) {
+    pub(super) fn replace_serial_ports(&mut self, serial_ports: Vec<SerialPortInfo>) {
         self.serial_ports = serial_ports;
         self.serial_ports_loading = false;
         self.serial_ports_error = None;
@@ -96,6 +97,7 @@ impl ConnectionCatalogState {
         true
     }
 
+    #[cfg(test)]
     pub(super) fn connections_reordered_into_group(
         &self,
         source_ids: &[String],
@@ -123,6 +125,7 @@ impl ConnectionCatalogState {
         staying
     }
 
+    #[cfg(test)]
     pub(super) fn group_is_descendant(&self, candidate_id: &str, ancestor_id: &str) -> bool {
         let mut current = Some(candidate_id);
         for _ in 0..=64 {
@@ -164,6 +167,7 @@ mod tests {
             },
             group_id: group_id.map(ToOwned::to_owned),
             description: None,
+            tree_order: None,
             sort_order,
             icon: None,
             icon_auto_detect: None,
@@ -238,8 +242,25 @@ mod tests {
         assert!(!catalog.serial_ports_loading());
         assert_eq!(catalog.serial_ports_error(), Some("enumeration failed"));
 
-        catalog.replace_serial_ports(vec!["COM3".to_string()]);
-        assert_eq!(catalog.serial_ports(), ["COM3"]);
+        catalog.replace_serial_ports(vec![
+            zzclawterm_transport::SerialPortInfo {
+                port_name: "COM3".to_string(),
+                product: Some("USB-SERIAL CH340".to_string()),
+                ..Default::default()
+            },
+            zzclawterm_transport::SerialPortInfo {
+                port_name: "COM4".to_string(),
+                ..Default::default()
+            },
+        ]);
+        assert_eq!(
+            catalog
+                .serial_ports()
+                .iter()
+                .map(|port| port.port_name.as_str())
+                .collect::<Vec<_>>(),
+            ["COM3", "COM4"]
+        );
         assert_eq!(catalog.serial_ports_error(), None);
     }
 
@@ -252,6 +273,7 @@ mod tests {
                     id: "parent".to_string(),
                     name: "Parent".to_string(),
                     parent_id: None,
+                    tree_order: None,
                     sort_order: 0,
                     created_at_ms: None,
                     updated_at_ms: None,
@@ -260,6 +282,7 @@ mod tests {
                     id: "child".to_string(),
                     name: "Child".to_string(),
                     parent_id: Some("parent".to_string()),
+                    tree_order: None,
                     sort_order: 0,
                     created_at_ms: None,
                     updated_at_ms: None,
@@ -268,6 +291,7 @@ mod tests {
                     id: "cycle-a".to_string(),
                     name: "Cycle A".to_string(),
                     parent_id: Some("cycle-b".to_string()),
+                    tree_order: None,
                     sort_order: 0,
                     created_at_ms: None,
                     updated_at_ms: None,
@@ -276,6 +300,7 @@ mod tests {
                     id: "cycle-b".to_string(),
                     name: "Cycle B".to_string(),
                     parent_id: Some("cycle-a".to_string()),
+                    tree_order: None,
                     sort_order: 0,
                     created_at_ms: None,
                     updated_at_ms: None,

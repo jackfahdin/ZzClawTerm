@@ -13,7 +13,9 @@ use zzclawterm_core::McpTerminalDisplayMode;
 use zzclawterm_core::agent_capture::build_agent_capture_command;
 use zzclawterm_core::models::connection::AiExecutionProfile;
 use zzclawterm_core::raw_cli_capture::{RawCliCapture, RawCliEnd};
-use zzclawterm_mcp_protocol::{RpcError, TerminalExecuteArgs, TerminalExecuteResult};
+use zzclawterm_mcp_protocol::{
+    RpcError, TerminalBackend, TerminalExecuteArgs, TerminalExecuteResult,
+};
 use zzclawterm_remote_ops::remote_process::SshProcessService;
 use zzclawterm_terminal::agent_capture::{
     AgentCaptureProcessResult, AgentOutputCaptureProcessor, RetiredCaptureFilter,
@@ -34,6 +36,12 @@ enum BackgroundTerminalTarget {
 pub(in crate::features) struct TerminalExecutionPolicy {
     pub background: bool,
     pub max_lines: u16,
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::features) struct McpTerminalExecutionPlan {
+    pub backend: TerminalBackend,
+    pub policy: TerminalExecutionPolicy,
 }
 
 fn external_mcp_terminal_policy(
@@ -108,6 +116,7 @@ pub(in crate::features) struct TerminalExecutionState {
     retired: HashMap<String, Vec<RetiredCaptureFilter>>,
     recovery: HashMap<String, TerminalRecoveryGuard>,
     jobs: HashMap<String, jobs::TerminalJob>,
+    pending_inline_starts: HashMap<String, connection_inline::PendingInlineStart>,
     waiters: HashMap<String, Vec<TerminalExecutionWaiter>>,
     clock_armed: bool,
     background_closed: bool,
@@ -533,6 +542,44 @@ impl TerminalExecutionState {
 }
 
 impl ZzClawTermApp {
+    pub(super) fn resolve_public_mcp_terminal_plan(
+        &self,
+        request: &CapabilityRequest,
+    ) -> Option<McpTerminalExecutionPlan> {
+        if !matches!(request.caller, CapabilityCaller::Mcp)
+            || !self.mcp.is_external_generation(&request.generation)
+            || !matches!(
+                request.tool.as_str(),
+                zzclawterm_mcp_protocol::tool::TERMINAL_EXECUTE
+                    | zzclawterm_mcp_protocol::tool::TERMINAL_START
+            )
+        {
+            return None;
+        }
+        let settings = self.ai.settings_config();
+        let requested = request
+            .arguments
+            .get("backend")
+            .and_then(|value| serde_json::from_value(value.clone()).ok());
+        let saved = request
+            .arguments
+            .get("target")
+            .is_some_and(|target| target["type"] == "connection");
+        let backend = settings
+            .external_mcp
+            .terminal_execution_mode
+            .resolve_backend(requested, saved);
+        let mut policy = external_mcp_terminal_policy(
+            None,
+            settings.external_mcp.terminal_display_mode,
+            settings.terminal_output_lines,
+        );
+        policy.background = backend == TerminalBackend::SshExec;
+        Some(McpTerminalExecutionPlan { backend, policy })
+    }
+}
+
+impl ZzClawTermApp {
     pub(in crate::features) fn process_terminal_execution_output(
         &mut self,
         session_id: &str,
@@ -574,21 +621,24 @@ impl ZzClawTermApp {
     ) {
         let mut args: TerminalExecuteArgs = serde_json::from_value(request.arguments.clone())
             .expect("validated terminal arguments");
-        let policy = match &request.caller {
-            CapabilityCaller::Native { .. } => {
-                self.ai
-                    .native_terminal_policy()
-                    .unwrap_or(TerminalExecutionPolicy {
-                        background: self.ai.run_settings().agent_background_execution_enabled,
-                        max_lines: self.ai.run_settings().terminal_output_lines,
-                    })
-            }
-            CapabilityCaller::Mcp => external_mcp_terminal_policy(
-                self.mcp.terminal_policy(&request.generation),
-                self.ai.settings_config().external_mcp.terminal_display_mode,
-                self.ai.settings_config().terminal_output_lines,
-            ),
-        };
+        let policy = request
+            .terminal_plan
+            .map(|plan| plan.policy)
+            .unwrap_or_else(|| match &request.caller {
+                CapabilityCaller::Native { .. } => {
+                    self.ai
+                        .native_terminal_policy()
+                        .unwrap_or(TerminalExecutionPolicy {
+                            background: self.ai.run_settings().agent_background_execution_enabled,
+                            max_lines: self.ai.run_settings().terminal_output_lines,
+                        })
+                }
+                CapabilityCaller::Mcp => external_mcp_terminal_policy(
+                    self.mcp.terminal_policy(&request.generation),
+                    self.ai.settings_config().external_mcp.terminal_display_mode,
+                    self.ai.settings_config().terminal_output_lines,
+                ),
+            });
         let default_timeout = if matches!(&request.caller, CapabilityCaller::Native { .. }) {
             self.ai
                 .run_settings()
@@ -640,6 +690,25 @@ impl ZzClawTermApp {
                 return;
             }
         };
+        if request
+            .terminal_plan
+            .is_some_and(|plan| plan.policy.background)
+            && !self
+                .session
+                .session_info(&session_id)
+                .is_some_and(|session| session.kind == SessionKind::Ssh)
+        {
+            let result = Err(rpc_failure(
+                "invalid_argument",
+                "Public MCP background execution requires SSH.",
+            ));
+            self.mcp
+                .capabilities
+                .ledger
+                .finish(&operation_id, result.clone());
+            let _ = request.reply.send(result);
+            return;
+        }
         let native = matches!(request.caller, CapabilityCaller::Native { .. });
         let (reply, cancellation) = if native {
             (request.reply, request.cancellation)
@@ -1149,6 +1218,11 @@ impl ZzClawTermApp {
                     let running = !state.tasks.is_empty() || !state.draining.is_empty();
                     let running = running
                         || this.mcp.capabilities.session_opens.pending()
+                        || this
+                            .mcp
+                            .capabilities
+                            .terminal_executions
+                            .has_pending_inline_starts()
                         || this.mcp.capabilities.ledger.requires_cleanup()
                         || !this.mcp.capabilities.terminal_executions.jobs.is_empty();
                     this.mcp.capabilities.terminal_executions.clock_armed = running;
@@ -1168,6 +1242,7 @@ impl ZzClawTermApp {
         self.mcp.capabilities.terminal_executions.prune_waiters();
         self.poll_terminal_jobs(cx);
         self.poll_mcp_session_opens(cx);
+        self.poll_connection_inline_starts(cx);
         let now = Instant::now();
         let raw_ended = self
             .mcp
@@ -1269,3 +1344,4 @@ mod tests;
 mod jobs;
 
 mod background_jobs;
+mod connection_inline;

@@ -336,12 +336,20 @@ impl ZzClawTermApp {
             return None;
         }
         let id = options.reconnect_session_id.clone().unwrap_or_else(uuid);
+        let mut config = config;
+        if kind == AndroidViewKind::Screen
+            && let Some(screen) = self.android.screens.get(&id)
+        {
+            config.screen = screen.settings;
+        }
         let launch = match kind {
             AndroidViewKind::Files => SessionLaunchConfig::AdbFiles(config.clone()),
             AndroidViewKind::Screen => SessionLaunchConfig::AdbScreen(config.clone()),
             AndroidViewKind::Shell => unreachable!(),
         };
         let metadata = SessionRuntimeMetadata {
+            confirmed_ssh_runtime_mode: None,
+            pending_ssh_startup_command: None,
             ssh_config: None,
             ssh_multiplex_key: None,
             source_connection_id: Some(config.device_key.clone()),
@@ -407,7 +415,7 @@ impl ZzClawTermApp {
         cx.notify();
         Some(id)
     }
-    fn begin_android_screen(
+    pub(super) fn begin_android_screen(
         &mut self,
         id: String,
         config: AndroidSessionConfig,
@@ -440,6 +448,9 @@ impl ZzClawTermApp {
             id.clone(),
             ScreenState::new(cx.focus_handle(), attempt, start_control.clone()),
         );
+        if let Some(screen) = self.android.screens.get_mut(&id) {
+            screen.settings = config.screen;
+        }
         let generation = config.binding.generation;
         let task = self
             .blocking_jobs
@@ -544,11 +555,15 @@ impl ZzClawTermApp {
         match &self.session.metadata(id)?.launch_config {
             SessionLaunchConfig::AdbShell(c)
             | SessionLaunchConfig::AdbFiles(c)
-            | SessionLaunchConfig::AdbScreen(c) => self
-                .android
-                .devices
-                .get(&c.device_key)
-                .map(|d| d.config.clone()),
+            | SessionLaunchConfig::AdbScreen(c) => {
+                self.android.devices.get(&c.device_key).map(|d| {
+                    let mut config = d.config.clone();
+                    if let Some(screen) = self.android.screens.get(id) {
+                        config.screen = screen.settings;
+                    }
+                    config
+                })
+            }
             _ => None,
         }
     }

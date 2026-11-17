@@ -81,6 +81,41 @@ pub(super) fn set_connection_editor_icon_auto_detect(
     true
 }
 
+/// Identify a device-derived name when switching away from the serial kind.
+fn name_restates_device(name: &str, port: &str, baud_rate: &str) -> bool {
+    crate::models::serial_name_restates_device(name, port, baud_rate.parse().unwrap_or_default())
+}
+
+/// Forget a title that only restated the device, unless the user typed it.
+///
+/// Switching kind would otherwise carry `COM7 @ 115200` into an SSH draft as if
+/// it were the name the user chose there.
+pub(in crate::features) fn drop_device_name(
+    editor: &mut ConnectionEditorState,
+    previous_port: &str,
+    previous_baud_rate: &str,
+) {
+    if name_restates_device(&editor.name, previous_port, previous_baud_rate) {
+        editor.name.clear();
+    }
+}
+
+/// Title a brand-new serial draft shows before any device is picked for it.
+///
+/// The first device in the list counts as picked, so the title is there from the
+/// moment the serial tab opens rather than only after a manual change.
+pub(in crate::features) fn adopt_serial_device_name(editor: &mut ConnectionEditorState) {
+    if editor.defaults_mode
+        || editor.id.is_some()
+        || editor.kind != ConnectionKindTab::Serial
+        || !editor.name.trim().is_empty()
+    {
+        return;
+    }
+    editor.name = crate::models::serial_connection_name(&editor.serial_port, &editor.baud_rate)
+        .unwrap_or_default();
+}
+
 pub(super) fn set_connection_editor_select_value(
     draft: &mut Option<ConnectionEditorState>,
     select: ConnectionEditorSelect,
@@ -252,7 +287,19 @@ pub(super) fn set_connection_editor_select_value(
         ConnectionEditorSelect::Shell => {
             editor.shell_path = value.unwrap_or_else(|| "powershell.exe".to_string());
         }
-        ConnectionEditorSelect::SerialPort => editor.serial_port = value.unwrap_or_default(),
+        ConnectionEditorSelect::SerialPort => {
+            match value.as_deref() {
+                // The saved device stays as the connect-time default; the flag is
+                // what decides whether the user is asked at all.
+                Some(crate::models::SERIAL_PORT_ASK_AT_CONNECT) => {
+                    editor.serial_prompt_port = true;
+                }
+                port => {
+                    editor.serial_prompt_port = false;
+                    editor.serial_port = port.unwrap_or_default().to_string();
+                }
+            }
+        }
         ConnectionEditorSelect::BaudRate => {
             editor.baud_rate = value.unwrap_or_else(|| "115200".to_string());
         }
@@ -570,8 +617,18 @@ pub(super) fn set_connection_editor_kind(
         return false;
     };
     editor.kind = kind;
-    editor.section = crate::models::ConnectionEditorSection::Basic;
-    editor.focused_field = ConnectionEditorField::Name;
+    if editor.defaults_mode {
+        // The basic tab does not exist in defaults mode; land on its first
+        // replacement instead.
+        editor.section = crate::models::ConnectionEditorSection::for_kind(kind, true)
+            .first()
+            .copied()
+            .unwrap_or(crate::models::ConnectionEditorSection::Network);
+        editor.focused_field = ConnectionEditorField::Port;
+    } else {
+        editor.section = crate::models::ConnectionEditorSection::Basic;
+        editor.focused_field = ConnectionEditorField::Name;
+    }
     editor.port = match kind {
         ConnectionKindTab::Ssh => {
             if editor.port.trim().is_empty() || editor.port == "23" {
@@ -636,6 +693,20 @@ pub(super) fn commit_connection_editor_new_group(
     editor.focused_field = ConnectionEditorField::Name;
     editor.error = None;
     editor.field_errors.clear();
+    true
+}
+
+pub(super) fn set_connection_editor_serial_prompt_baud_rate(
+    draft: &mut Option<ConnectionEditorState>,
+    ask: bool,
+) -> bool {
+    let Some(editor) = draft.as_mut() else {
+        return false;
+    };
+    if editor.serial_prompt_baud_rate == ask {
+        return false;
+    }
+    editor.serial_prompt_baud_rate = ask;
     true
 }
 
@@ -906,9 +977,9 @@ pub(super) fn editor_field_seeds(
         ),
         (
             ConnectionEditorField::AndroidBitRate,
-            draft.android_screen.bit_rate.to_string(),
+            (f64::from(draft.android_screen.bit_rate) / 1_000_000.0).to_string(),
             false,
-            Literal("8000000"),
+            Literal("8"),
         ),
         (
             ConnectionEditorField::Name,
@@ -1285,7 +1356,12 @@ pub(super) fn set_connection_editor_field_text(
             draft.android_screen.max_fps = text.parse().unwrap_or(0)
         }
         ConnectionEditorField::AndroidBitRate => {
-            draft.android_screen.bit_rate = text.parse().unwrap_or(0)
+            draft.android_screen.bit_rate = text
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite() && *v >= 0.1 && *v <= 100.0)
+                .map(|v| (v * 1_000_000.0).round() as u32)
+                .unwrap_or(0)
         }
         ConnectionEditorField::SerialPort => draft.serial_port = text,
         ConnectionEditorField::BaudRate => draft.baud_rate = text,

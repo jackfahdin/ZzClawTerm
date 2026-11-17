@@ -7,8 +7,8 @@ use zzclawterm_core::terminal::editing::EditPhase;
 use zzclawterm_terminal::TerminalSnapshot;
 use zzclawterm_terminal::editing::resolve_input;
 
+use super::state::CommandSuggestionState;
 use crate::features::ZzClawTermApp;
-use crate::models::CommandSuggestionState;
 
 pub(in crate::features::terminal) struct SuggestionPasteContext {
     pub(in crate::features::terminal) session_id: String,

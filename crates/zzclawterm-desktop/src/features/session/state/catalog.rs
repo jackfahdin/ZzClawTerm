@@ -1,6 +1,7 @@
 //! session catalog state and transitions.
 
 use super::SessionFeatureState;
+use super::command_history::SessionCommandHistory;
 use super::start::SessionStartTabPlacement;
 use crate::app_shell::session_hub::ssh_connections::SshConnectionLease;
 use crate::features::session::notices::SessionNotices;
@@ -8,7 +9,7 @@ use crate::features::session::remote_files::RemoteFilesSession;
 use crate::features::session::trzsz_runtime::TrzszSessionState;
 use crate::features::session::zmodem_runtime::ZmodemSessionState;
 use crate::models::{SessionLaunchConfig, SessionRuntimeMetadata};
-use gpui::UniformListScrollHandle;
+use gpui::ListState;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use zzclawterm_core::AiExecutionProfile;
@@ -38,8 +39,7 @@ pub(super) struct SessionCatalogTransferEntry {
     pub(super) cwd: Option<String>,
     pub(super) tab_color: Option<u32>,
     pub(super) locked: bool,
-    pub(super) command_history: Option<Vec<String>>,
-    pub(super) directly_recorded_command_history: Option<usize>,
+    pub(super) command_history: Option<SessionCommandHistory>,
     pub(super) busy_action: Option<String>,
     pub(super) remote_file: Option<RemoteFilesSession>,
     pub(super) ssh_connection: Option<SshConnectionLease>,
@@ -140,7 +140,6 @@ pub(super) fn session_info_from_metadata(
     }
 }
 
-pub(super) const COMMAND_HISTORY_LIMIT: usize = 128;
 /// Safety net for the activation stack. Entries are deduplicated and pruned when
 /// their session leaves the catalog, so the stack normally stays at or below the
 /// live session count; this only bounds ids activated before registration.
@@ -219,9 +218,6 @@ impl SessionFeatureState {
                 tab_color: self.tab_colors.remove(session_id),
                 locked: self.locked_tabs.remove(session_id),
                 command_history: self.command_history.remove(session_id),
-                directly_recorded_command_history: self
-                    .directly_recorded_command_history
-                    .remove(session_id),
                 busy_action: self.busy_actions.remove(session_id),
                 remote_file: self.protocols.remote_files.remove(session_id),
                 ssh_connection: self.protocols.ssh_connections.remove(session_id),
@@ -254,6 +250,7 @@ impl SessionFeatureState {
                 | SessionEvent::CleanupFailed { session_id, .. }
                 | SessionEvent::TmuxState { session_id, .. }
                 | SessionEvent::Notice { session_id, .. }
+                | SessionEvent::SshRuntimeModeConfirmed { session_id, .. }
                 | SessionEvent::Error { session_id, .. } => session_id,
             };
             if selected.contains(session_id) {
@@ -306,10 +303,6 @@ impl SessionFeatureState {
             if let Some(value) = entry.command_history {
                 self.command_history.insert(session_id.clone(), value);
             }
-            if let Some(value) = entry.directly_recorded_command_history {
-                self.directly_recorded_command_history
-                    .insert(session_id.clone(), value);
-            }
             if let Some(value) = entry.busy_action {
                 self.busy_actions.insert(session_id.clone(), value);
             }
@@ -361,74 +354,15 @@ impl SessionFeatureState {
     pub(in crate::features) fn mark_restore_complete(&mut self) -> bool {
         self.restore.mark_complete()
     }
-    pub(in crate::features) fn command_history_for(&self, session_id: &str) -> Option<&[String]> {
-        self.command_history.get(session_id).map(Vec::as_slice)
-    }
-    pub(in crate::features) fn active_command_history_snapshot(&self) -> Vec<String> {
-        self.active_id()
-            .and_then(|session_id| self.command_history_for(session_id))
-            .map(<[String]>::to_vec)
-            .unwrap_or_default()
-    }
-    pub(in crate::features) fn active_command_history_entry(&self, index: usize) -> Option<String> {
-        let session_id = self.active_id()?;
-        self.command_history_for(session_id)?.get(index).cloned()
-    }
-    pub(in crate::features) fn note_directly_recorded_command_history(
+    pub(in crate::features) fn sync_active_sessions_list(
         &mut self,
-        session_id: &str,
-        command_count: usize,
-    ) {
-        if command_count == 0 {
-            return;
+        session_ids: &[String],
+    ) -> ListState {
+        if self.active_list_ids.as_slice() != session_ids {
+            self.active_list_scroll.reset(session_ids.len());
+            self.active_list_ids = session_ids.to_vec();
         }
-        let pending = self
-            .directly_recorded_command_history
-            .entry(session_id.to_string())
-            .or_default();
-        *pending = pending.saturating_add(command_count);
-    }
-    pub(in crate::features) fn consume_directly_recorded_command_history(
-        &mut self,
-        session_id: &str,
-    ) -> bool {
-        let Some(pending) = self.directly_recorded_command_history.get_mut(session_id) else {
-            return false;
-        };
-        *pending -= 1;
-        if *pending == 0 {
-            self.directly_recorded_command_history.remove(session_id);
-        }
-        true
-    }
-    pub(in crate::features) fn record_command_history(&mut self, session_id: &str, command: &str) {
-        let command = command.trim();
-        if command.is_empty() {
-            return;
-        }
-        let history = self
-            .command_history
-            .entry(session_id.to_string())
-            .or_default();
-        history.insert(0, command.to_string());
-        history.truncate(COMMAND_HISTORY_LIMIT);
-    }
-    pub(in crate::features) fn migrate_command_history(&mut self, old_id: &str, new_id: &str) {
-        if let Some(history) = self.command_history.remove(old_id) {
-            self.command_history.insert(new_id.to_string(), history);
-        }
-        if let Some(pending) = self.directly_recorded_command_history.remove(old_id) {
-            self.directly_recorded_command_history
-                .insert(new_id.to_string(), pending);
-        }
-    }
-    pub(in crate::features) fn remove_command_from_all_history(&mut self, command: &str) {
-        for history in self.command_history.values_mut() {
-            history.retain(|entry| entry != command);
-        }
-    }
-    pub(in crate::features) fn active_list_scroll(&self) -> &UniformListScrollHandle {
-        &self.active_list_scroll
+        self.active_list_scroll.clone()
     }
     pub(in crate::features) fn active_search_draft(&self) -> &str {
         &self.active_search_draft
@@ -492,8 +426,16 @@ impl SessionFeatureState {
     pub(in crate::features) fn active_remote_probes_enabled(&self) -> bool {
         self.active_is_local_pty()
             || self
-                .active_ssh_config()
-                .is_some_and(|config| config.remote_stats_enabled())
+                .active_id()
+                .and_then(|id| self.metadata(id))
+                .is_some_and(|metadata| {
+                    metadata.ssh_runtime_mode()
+                        != Some(zzclawterm_core::models::ssh_runtime::SshRuntimeMode::Sftp)
+                        && metadata
+                            .ssh_config
+                            .as_ref()
+                            .is_some_and(|config| config.remote_stats_enabled())
+                })
     }
     pub(in crate::features) fn active_is_local_pty(&self) -> bool {
         self.active
@@ -638,6 +580,32 @@ impl SessionFeatureState {
             .iter()
             .map(|(session_id, metadata)| (session_id.as_str(), metadata))
     }
+    /// Occupancy is derived from the session owners, never cached with device
+    /// discovery. A reconnect may reuse its own live port; a retry may replace
+    /// its own pending request, but neither may bypass another pending start.
+    pub(in crate::features) fn serial_ports_in_use(
+        &self,
+        excluded_session: Option<&str>,
+        excluded_request: Option<&str>,
+    ) -> std::collections::HashSet<String> {
+        self.metadata_entries()
+            .filter(|(id, metadata)| Some(*id) != excluded_session && !metadata.disconnected)
+            .map(|(_, metadata)| &metadata.launch_config)
+            .chain(
+                self.start
+                    .pending_entries()
+                    .filter(|(id, _)| Some(id.as_str()) != excluded_request)
+                    .filter_map(|(_, pending)| pending.launch_config.as_ref()),
+            )
+            .filter_map(|config| match config {
+                SessionLaunchConfig::Serial(config) => Some(config.port_name.trim()),
+                _ => None,
+            })
+            .filter(|port| !port.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
     pub(in crate::features) fn register_session_metadata(
         &mut self,
         session_id: &str,

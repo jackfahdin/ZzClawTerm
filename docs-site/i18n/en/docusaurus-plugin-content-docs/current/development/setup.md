@@ -245,7 +245,7 @@ The workflow is: commit to the fork branch, push, then bump the pinned revision 
 - Read the root `AGENTS.md` and `CONTRIBUTING.md` first.
 - UI state and views live in `zzclawterm-desktop`; shared controls live in `zzclawterm-ui`.
 - Transport, terminal, and core crates stay independent of GPUI.
-- New UI text updates both locale files under `crates/zzclawterm-desktop/src/i18n/locales/`.
+- New UI text updates both locale files under `crates/zzclawterm-i18n/locales/`.
 - Never use real credentials in tests, logs, or diagnostic data.
 
 ## GPUI main-branch cutover

@@ -4,10 +4,4 @@ pub(crate) use zzclawterm_terminal::selection::{
     TerminalBufferCellPos, TerminalCellPos, TerminalSelection,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TerminalSelectionTextError {
-    MissingSession,
-    StaleHistory,
-    InvalidRange,
-    WorkerUnavailable,
-}
+pub(crate) use zzclawterm_terminal_runtime::frame::TerminalSelectionTextError;

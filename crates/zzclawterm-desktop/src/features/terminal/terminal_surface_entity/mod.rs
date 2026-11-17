@@ -7,6 +7,10 @@ pub(in crate::features) use zzclawterm_terminal_gpui::geometry::{
     TerminalVisualScrollGeometry, terminal_effective_visual_scroll_offset_px,
     terminal_snapshot_anchor_row_for_display_offset, terminal_snapshot_covers_display_offset,
 };
+use zzclawterm_terminal_gpui::keywords::{
+    precompute_terminal_keyword_highlights_for_ranges_with_stats_and_cancel,
+    terminal_keyword_highlight_expanded_ranges,
+};
 use zzclawterm_terminal_gpui::stripes::{TerminalStripeMode, terminal_row_stripe_color};
 
 use crate::features::ZzClawTermApp;
@@ -37,9 +41,8 @@ use crate::models::{
 use crate::terminal::{
     TerminalGridSelection, TerminalKeywordHighlightConfig, TerminalKeywordHighlightSnapshot,
     TerminalKeywordHighlighter, TerminalLineDecorations, ZzClawTerminalElement,
-    ZzClawTerminalLayoutCache, compile_terminal_keyword_highlighter,
-    precompute_terminal_keyword_highlights_for_rows_with_stats_and_cancel, terminal_font_features,
-    terminal_keyword_highlight_config_key, terminal_keyword_highlight_expanded_rows,
+    ZzClawTerminalLayoutCache, compile_terminal_keyword_highlighter, terminal_font_features,
+    terminal_keyword_highlight_config_key,
 };
 use crate::theme::ThemePalette;
 use std::collections::hash_map::DefaultHasher;
@@ -109,10 +112,13 @@ fn terminal_keyword_highlight_request_key(
     rules_key: u64,
     rows: Range<usize>,
 ) -> TerminalKeywordHighlightRequestKey {
-    let rows = terminal_keyword_highlight_expanded_rows(snapshot, rows);
+    let ranges = terminal_keyword_highlight_expanded_ranges(snapshot, &[rows]);
+    let rows =
+        ranges.first().map_or(0, |range| range.start)..ranges.last().map_or(0, |range| range.end);
     let row_start = rows.start.min(snapshot.row_count());
     let row_end = rows.end.min(snapshot.row_count()).max(row_start);
     let mut hasher = DefaultHasher::new();
+    ranges.hash(&mut hasher);
     snapshot.history.alternate_screen.hash(&mut hasher);
     if rows.contains(&snapshot.cursor.row) {
         snapshot.cursor.row.hash(&mut hasher);
@@ -124,9 +130,10 @@ fn terminal_keyword_highlight_request_key(
             .cast::<()>()
             .hash(&mut hasher);
     } else {
-        let rows = snapshot.rows().get(row_start..row_end).unwrap_or_default();
-        rows.len().hash(&mut hasher);
-        for row in rows {
+        for row in ranges
+            .iter()
+            .flat_map(|range| &snapshot.rows()[range.clone()])
+        {
             (
                 row.signature,
                 row.wrapped,
@@ -1629,6 +1636,7 @@ impl TerminalSurface {
                     .unwrap_or_default(),
                 display_rows: self.snapshot.as_ref().and_then(|s| s.display_rows.clone()),
                 history: self.history,
+                file_context: None,
                 shell_input_anchor: None,
                 command_navigation_target: None,
                 command_navigation_revision: 0,
@@ -1680,6 +1688,7 @@ impl TerminalSurface {
                     .unwrap_or_default(),
                 display_rows: self.snapshot.as_ref().and_then(|s| s.display_rows.clone()),
                 history: self.history,
+                file_context: None,
                 shell_input_anchor: None,
                 command_navigation_target: None,
                 command_navigation_revision: 0,
@@ -2014,18 +2023,20 @@ impl TerminalSurface {
             self.viewport_rows,
             self.scrollback_len,
         );
-        let visible_rows =
-            terminal_keyword_highlight_expanded_rows(snapshot.as_ref(), visible_rows);
+        let visible_ranges = terminal_keyword_highlight_expanded_ranges(
+            snapshot.as_ref(),
+            std::slice::from_ref(&visible_rows),
+        );
 
         let rules = self.keyword_rules.clone();
         let config = self.keyword_highlight_config();
         let rules_key = terminal_keyword_highlight_config_key(rules.as_slice(), config);
         let visible_ready = self.keyword_highlights.as_ref().is_some_and(|highlights| {
             highlights.rules_key() == rules_key
-                && highlights.matches_snapshot_rows(
+                && highlights.matches_snapshot_ranges(
                     snapshot.as_ref(),
                     self.palette,
-                    visible_rows.clone(),
+                    &visible_ranges,
                 )
         });
         if visible_ready && output_pressure {
@@ -2047,12 +2058,16 @@ impl TerminalSurface {
         } else {
             visible_rows
         };
+        let requested_ranges = terminal_keyword_highlight_expanded_ranges(
+            snapshot.as_ref(),
+            std::slice::from_ref(&requested_rows),
+        );
         if visible_ready
             && self.keyword_highlights.as_ref().is_some_and(|highlights| {
-                highlights.matches_snapshot_rows(
+                highlights.matches_snapshot_ranges(
                     snapshot.as_ref(),
                     self.palette,
-                    requested_rows.clone(),
+                    &requested_ranges,
                 )
             })
         {
@@ -2060,9 +2075,7 @@ impl TerminalSurface {
             return;
         }
         let requested_row_count = requested_rows.len();
-        let requested_rows =
-            terminal_keyword_highlight_expanded_rows(snapshot.as_ref(), requested_rows);
-        let expanded_requested_row_count = requested_rows.len();
+        let expanded_requested_row_count: usize = requested_ranges.iter().map(Range::len).sum();
         let request_key = terminal_keyword_highlight_request_key(
             snapshot.as_ref(),
             rules_key,
@@ -2098,7 +2111,6 @@ impl TerminalSurface {
         // Keep the last published snapshot drawable while the replacement is parsed in the
         // background, matching the editor's stale-until-reparsed behavior.
         let highlighter = self.cached_keyword_highlighter_for_rules(&rules);
-        let palette = self.palette;
         let previous_highlights = self.keyword_highlights.clone();
         self.keyword_highlight_task = Some(cx.spawn(async move |this, cx| {
             let (rules, highlighter, result, highlight_duration) = cx
@@ -2108,12 +2120,11 @@ impl TerminalSurface {
                     });
                     let highlight_started_at = Instant::now();
                     let result =
-                        precompute_terminal_keyword_highlights_for_rows_with_stats_and_cancel(
+                        precompute_terminal_keyword_highlights_for_ranges_with_stats_and_cancel(
                             snapshot.as_ref(),
                             highlighter.as_ref(),
-                            palette,
                             previous_highlights.as_deref(),
-                            requested_rows,
+                            &requested_ranges,
                             || cancel_epoch.load(Ordering::Acquire) != request_cancel_epoch,
                         );
                     let highlight_duration = highlight_started_at.elapsed();
@@ -2978,6 +2989,11 @@ fn terminal_keyword_highlight_visible_rows(
     viewport_rows: usize,
     scrollback_len: usize,
 ) -> Range<usize> {
+    if let Some(rows) =
+        terminal_projected_highlight_rows(snapshot, display_offset, viewport_rows, 0)
+    {
+        return rows;
+    }
     if let Some(rows) = terminal_logical_highlight_rows(snapshot, display_offset, viewport_rows, 0)
     {
         return rows;
@@ -2997,6 +3013,34 @@ fn terminal_keyword_highlight_visible_rows(
     start..end
 }
 
+/// Highlight rows for a folded viewport. Painting walks the fold projection,
+/// so the scheduled window must cover the source rows it actually paints; the
+/// unfolded index misses the rows a collapse pulls into the viewport (#1259).
+fn terminal_projected_highlight_rows(
+    snapshot: &TerminalSnapshot,
+    display_offset: usize,
+    viewport_rows: usize,
+    prefetch_viewports: usize,
+) -> Option<Range<usize>> {
+    let projection = snapshot.display_rows.as_ref()?;
+    let viewport_rows = viewport_rows.max(1);
+    let extra_rows = viewport_rows.saturating_mul(prefetch_viewports);
+    let top = projection.top(display_offset, viewport_rows);
+    let start_display = top.saturating_sub(extra_rows);
+    let end_display = (top + viewport_rows + extra_rows).min(projection.rows());
+    let (source_start, _) = terminal_snapshot_absolute_window(snapshot)?;
+    let start = projection
+        .source_row(start_display)
+        .saturating_sub(source_start)
+        .min(snapshot.row_count());
+    let end = projection
+        .source_row(end_display)
+        .saturating_sub(source_start)
+        .min(snapshot.row_count())
+        .max(start);
+    Some(start..end)
+}
+
 fn terminal_keyword_highlight_prefetch_rows(
     snapshot: &TerminalSnapshot,
     display_offset: usize,
@@ -3004,6 +3048,14 @@ fn terminal_keyword_highlight_prefetch_rows(
     scrollback_len: usize,
     prefetch_viewports: usize,
 ) -> Range<usize> {
+    if let Some(rows) = terminal_projected_highlight_rows(
+        snapshot,
+        display_offset,
+        viewport_rows,
+        prefetch_viewports,
+    ) {
+        return rows;
+    }
     if let Some(rows) =
         terminal_logical_highlight_rows(snapshot, display_offset, viewport_rows, prefetch_viewports)
     {

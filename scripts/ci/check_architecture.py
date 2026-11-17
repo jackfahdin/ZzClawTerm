@@ -84,12 +84,15 @@ def dependency_errors() -> list[str]:
         "zzclawterm-preview",
         "zzclawterm-translation-client",
         "zzclawterm-core",
+        "zzclawterm-i18n",
+        "zzclawterm-completion-runtime",
         "zzclawterm-android",
         "zzclawterm-transport",
         "zzclawterm-files",
         "zzclawterm-recording",
         "zzclawterm-remote-ops",
         "zzclawterm-terminal",
+        "zzclawterm-terminal-runtime",
         "zzclawterm-store",
         "zzclawterm-sync",
         "zzclawterm-remote-desktop",
@@ -108,6 +111,8 @@ def dependency_errors() -> list[str]:
     workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
     workspace_dependencies = workspace["workspace"]["dependencies"]
     for crate, forbidden in (
+        ("zzclawterm-i18n", set()),
+        ("zzclawterm-completion-runtime", set()),
         ("zzclawterm-android", set()),
         ("zzclawterm-ai-client", set()),
         ("zzclawterm-agent-client", set()),
@@ -116,11 +121,13 @@ def dependency_errors() -> list[str]:
         ("zzclawterm-updater", set()),
         ("zzclawterm-preview", set()),
         ("zzclawterm-translation-client", set()),
-        ("zzclawterm-core", {"zzclawterm-sync", "zzclawterm-store", "zzclawterm-desktop", "zzclawterm-files", "zzclawterm-recording", "zzclawterm-remote-ops", "zzclawterm-transport"}),
-        ("zzclawterm-transport", {"zzclawterm-files", "zzclawterm-recording", "zzclawterm-remote-ops", "zzclawterm-desktop", "zzclawterm-store", "zzclawterm-ui"}),
-        ("zzclawterm-files", {"zzclawterm-recording", "zzclawterm-remote-ops", "zzclawterm-desktop", "zzclawterm-store", "zzclawterm-ui"}),
-        ("zzclawterm-remote-ops", {"zzclawterm-files", "zzclawterm-recording", "zzclawterm-desktop", "zzclawterm-store", "zzclawterm-ui"}),
-        ("zzclawterm-recording", {"zzclawterm-files", "zzclawterm-remote-ops", "zzclawterm-transport", "zzclawterm-desktop", "zzclawterm-store", "zzclawterm-ui"}),
+        ("zzclawterm-terminal-runtime", set()),
+        ("zzclawterm-terminal", {"zzclawterm-terminal-runtime"}),
+        ("zzclawterm-core", {"zzclawterm-completion-runtime", "zzclawterm-terminal-runtime", "zzclawterm-sync", "zzclawterm-store", "zzclawterm-desktop", "zzclawterm-files", "zzclawterm-recording", "zzclawterm-remote-ops", "zzclawterm-transport"}),
+        ("zzclawterm-transport", {"zzclawterm-terminal-runtime", "zzclawterm-files", "zzclawterm-recording", "zzclawterm-remote-ops", "zzclawterm-desktop", "zzclawterm-store", "zzclawterm-ui"}),
+        ("zzclawterm-files", {"zzclawterm-terminal-runtime", "zzclawterm-recording", "zzclawterm-remote-ops", "zzclawterm-desktop", "zzclawterm-store", "zzclawterm-ui"}),
+        ("zzclawterm-remote-ops", {"zzclawterm-terminal-runtime", "zzclawterm-files", "zzclawterm-recording", "zzclawterm-desktop", "zzclawterm-store", "zzclawterm-ui"}),
+        ("zzclawterm-recording", {"zzclawterm-terminal-runtime", "zzclawterm-files", "zzclawterm-remote-ops", "zzclawterm-transport", "zzclawterm-desktop", "zzclawterm-store", "zzclawterm-ui"}),
         ("zzclawterm-sync", {
             "zzclawterm-store", "zzclawterm-desktop", "zzclawterm-transport", "zzclawterm-ui",
             "reqwest", "zed-reqwest", "hyper", "ureq", "isahc", "surf",
@@ -141,7 +148,7 @@ def dependency_errors() -> list[str]:
                 and package != "zzclawterm-core"
             )
             wrong_adapter_direction = (
-                crate in {"zzclawterm-android", "zzclawterm-agent-client", "zzclawterm-ai-client", "zzclawterm-cloud-storage", "zzclawterm-updater", "zzclawterm-preview", "zzclawterm-translation-client"}
+                crate in {"zzclawterm-completion-runtime", "zzclawterm-android", "zzclawterm-agent-client", "zzclawterm-ai-client", "zzclawterm-cloud-storage", "zzclawterm-updater", "zzclawterm-preview", "zzclawterm-translation-client"}
                 and package.startswith("zzclawterm-")
                 and package != "zzclawterm-core"
             )
@@ -150,7 +157,13 @@ def dependency_errors() -> list[str]:
                 and package.startswith("zzclawterm-")
                 and package not in {"zzclawterm-core", "zzclawterm-mcp-protocol"}
             )
-            if wrong_mcp_direction or wrong_sync_direction or wrong_adapter_direction or package in forbidden or package == "gpui" or package.startswith("gpui-"):
+            wrong_terminal_runtime_direction = (
+                crate == "zzclawterm-terminal-runtime"
+                and package.startswith("zzclawterm-")
+                and package not in {"zzclawterm-core", "zzclawterm-terminal", "zzclawterm-transport", "zzclawterm-recording"}
+            )
+            wrong_i18n_direction = crate == "zzclawterm-i18n" and package.startswith("zzclawterm-")
+            if wrong_i18n_direction or wrong_terminal_runtime_direction or wrong_mcp_direction or wrong_sync_direction or wrong_adapter_direction or package in forbidden or package == "gpui" or package.startswith("gpui-"):
                 errors.append(f"crate_boundary: {crate} must not depend on {package}")
     terminal_presentation = tomllib.loads(
         (ROOT / "crates/zzclawterm-terminal-gpui/Cargo.toml").read_text(encoding="utf-8")
@@ -246,6 +259,15 @@ def main() -> int:
         re.compile(r"\b(?:std::)?thread::Builder::new\s*\(\s*\)"), desktop_files
     )
     errors.extend(check_budget("desktop_thread_builder", thread_builders, allowlist))
+
+    runtime_files = tuple(
+        path for path in RUST_FILES
+        if relative(path).startswith("crates/zzclawterm-terminal-runtime/src/")
+    )
+    runtime_thread_builders = matching_counts(
+        re.compile(r"\b(?:std::)?thread::Builder::new\s*\(\s*\)"), runtime_files
+    )
+    errors.extend(check_budget("terminal_runtime_thread_builder", runtime_thread_builders, allowlist))
 
     raw_scrolls = matching_counts(
         re.compile(r"\.overflow_(?:x_|y_)?scroll\s*\(\s*\)"), RUST_FILES

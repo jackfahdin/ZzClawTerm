@@ -39,6 +39,9 @@ pub struct SavedConnection {
     pub description: Option<String>,
     pub tags: Vec<String>,
     pub sort_order: i32,
+    /// Mixed sibling rank. None retains the released folder-first ordering;
+    /// a tree move assigns ranks without repurposing legacy `sort_order`.
+    pub tree_order: Option<i64>,
     pub icon: Option<String>,
     /// Whether `icon` may be replaced by one detected from the remote system.
     ///
@@ -84,6 +87,8 @@ struct SavedConnectionKnown {
     pub tags: Vec<String>,
     #[serde(default)]
     pub sort_order: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_order: Option<i64>,
     #[serde(default)]
     pub icon: Option<String>,
     /// Whether `icon` may be replaced by one detected from the remote system.
@@ -184,7 +189,15 @@ impl SavedConnection {
                 port_name,
                 baud_rate,
                 ..
-            } => format!("{port_name} @ {baud_rate}"),
+            } => {
+                // A deferred-port connection names its device only at connect
+                // time; the framing is the only stable part to show here.
+                if port_name.is_empty() {
+                    format!("@{baud_rate}")
+                } else {
+                    format!("{port_name} @ {baud_rate}")
+                }
+            }
             ConnectionType::Rdp {
                 host,
                 port,
@@ -214,6 +227,9 @@ pub struct Group {
     pub parent_id: Option<String>,
     #[serde(default)]
     pub sort_order: i32,
+    /// Shares the parent's ordering domain with saved connections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_order: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -265,6 +281,35 @@ impl std::fmt::Debug for ConnectionExtensions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("[CONNECTION EXTENSIONS]")
     }
+}
+
+impl SavedConnection {
+    /// Preserve opaque properties when applying edits from an older editor.
+    /// Clearing a container with unknown fields is rejected instead of losing them.
+    pub fn retain_extensions_from(&mut self, previous: &Self) -> Result<(), &'static str> {
+        merge_extensions(&mut self.extensions.0, &previous.extensions.0);
+        for (key, value) in &previous.sftp.extra {
+            self.sftp
+                .extra
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        let output = serde_json::to_value(&*self).map_err(|_| "invalid connection settings")?;
+        if !contains_extension_keys(&output, &previous.extensions.0) {
+            return Err("cannot clear a settings container containing unsupported fields");
+        }
+        Ok(())
+    }
+}
+
+fn contains_extension_keys(output: &serde_json::Value, extensions: &serde_json::Value) -> bool {
+    extensions.as_object().is_none_or(|fields| {
+        fields.iter().all(|(key, value)| {
+            output
+                .get(key)
+                .is_some_and(|output| contains_extension_keys(output, value))
+        })
+    })
 }
 
 impl Serialize for SavedConnection {
@@ -334,6 +379,7 @@ impl<'de> Deserialize<'de> for SavedConnection {
 fn omitted_fields(path: &str) -> &'static [&'static str] {
     match path {
         "" => &[
+            "tree_order",
             "tags",
             "icon_auto_detect",
             "recording",

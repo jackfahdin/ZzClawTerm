@@ -1,4 +1,5 @@
 use rust_i18n::t;
+use zzclawterm_ui::icons::{SEARCH_ENGINE_ICON_IDS, search_engine_icon};
 
 use gpui::{
     App, ClickEvent, Context, FontWeight, IntoElement, SharedString, Window, div, prelude::*, px,
@@ -8,9 +9,7 @@ use zzclawterm_core::truncate_preview;
 
 use crate::features::pages::settings::panel::SettingsPanel;
 use crate::features::settings::SearchEngineMenu;
-use crate::features::{
-    icons::SEARCH_ENGINE_ICON_IDS, icons::search_engine_icon, view_widgets::mono_icon,
-};
+use crate::features::view_widgets::mono_icon;
 use crate::theme::ThemePalette;
 use zzclawterm_ui::{ZzClawDropdownMenu, ZzClawMenuAnchor, ZzClawMenuItem, ZzClawTooltip};
 

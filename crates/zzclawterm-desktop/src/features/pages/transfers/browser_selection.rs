@@ -2,6 +2,7 @@ use super::{TransferPathPart, transfer_path_part_value};
 use crate::features::ZzClawTermApp;
 use crate::models::{TransferBrowserContextTarget, TransferBrowserDragSelectionState};
 use gpui::{ClickEvent, Context, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Window};
+use rust_i18n::t;
 use std::collections::HashSet;
 use zzclawterm_core::truncate_preview;
 use zzclawterm_files::sftp::SftpFileEntry;
@@ -523,7 +524,13 @@ impl ZzClawTermApp {
             cx.notify();
             return;
         }
-        if self.send_terminal_input(value.clone().into_bytes(), cx) {
+        let Some(quoted) = self.quoted_transfer_terminal_path(&value, part) else {
+            self.shell
+                .set_status(t!("fileExplorer.directoryTerminalInvalidPath").to_string());
+            cx.notify();
+            return;
+        };
+        if self.send_terminal_input(quoted.into_bytes(), cx) {
             self.shell
                 .set_status(format!("sent remote {} to terminal", part.label()));
             self.transfer

@@ -1,4 +1,5 @@
 use rust_i18n::t;
+use zzclawterm_ui::icons::QUICK_COMMAND_ICON_OPTIONS;
 
 use gpui::{
     AnyElement, App, ClickEvent, Context, FontWeight, IntoElement, KeyDownEvent, Rgba,
@@ -16,8 +17,7 @@ use super::{
 };
 use crate::features::{
     ZzClawTermApp, commands::QUICK_COMMAND_COLOR_OPTIONS,
-    commands::state::QuickCommandCategoryChoice, icons::QUICK_COMMAND_ICON_OPTIONS,
-    text_inputs::TextInputSetup,
+    commands::state::QuickCommandCategoryChoice, text_inputs::TextInputSetup,
 };
 use crate::models::{QuickCommandEditorField, QuickCommandEditorState};
 

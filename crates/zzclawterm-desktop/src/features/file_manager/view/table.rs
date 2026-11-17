@@ -10,7 +10,6 @@ use crate::features::pages::transfers::{format_browser_file_size, format_sftp_mo
 use crate::features::transfers::file_open::FileOpenMode;
 use crate::features::transfers::file_operations::FileTransferOperation;
 use crate::features::view_widgets::transfer_entry_icon;
-use crate::models::TransferBrowserSortColumn;
 use crate::theme::ThemePalette;
 use gpui::{
     AnyElement, Context, CursorStyle, DragMoveEvent, IntoElement, MouseButton, MouseDownEvent,
@@ -20,6 +19,7 @@ use rust_i18n::t;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+use zzclawterm_files::file_browser::listing::FileBrowserSortColumn;
 use zzclawterm_files::sftp::SftpFileEntry;
 use zzclawterm_ui::{
     ZzClawContextMenu, ZzClawHorizontalScrollbar, ZzClawMenuItem, ZzClawTooltip,
@@ -255,7 +255,7 @@ impl FileManagerWorkspace {
         &self,
         palette: ThemePalette,
         pane: PaneId,
-        columns: &[(TransferBrowserSortColumn, gpui::Pixels)],
+        columns: &[(FileBrowserSortColumn, gpui::Pixels)],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut header = div()
@@ -268,7 +268,9 @@ impl FileManagerWorkspace {
         for &(column, width) in columns {
             let label_key = format!("fileManager.columns.{}", column_key(column));
             let marker = if self.pane(pane).sort_column == column {
-                self.pane(pane).sort_direction.marker()
+                crate::models::transfer_ui::browser_sort_direction_marker(
+                    self.pane(pane).sort_direction,
+                )
             } else {
                 ""
             };
@@ -342,7 +344,7 @@ impl FileManagerWorkspace {
                             .iter()
                             .any(|visible| visible == key),
                     )
-                    .disabled(column == TransferBrowserSortColumn::Name)
+                    .disabled(column == FileBrowserSortColumn::Name)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let visible = &mut this.pane_mut(pane).visible_columns;
                         if visible.iter().any(|visible| visible == key) {
@@ -376,7 +378,7 @@ impl FileManagerWorkspace {
         pane: PaneId,
         entry: SftpFileEntry,
         visible: &Arc<[SftpFileEntry]>,
-        columns: &[(TransferBrowserSortColumn, gpui::Pixels)],
+        columns: &[(FileBrowserSortColumn, gpui::Pixels)],
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let state = self.pane(pane);
@@ -459,21 +461,21 @@ impl FileManagerWorkspace {
             });
         for &(column, width) in columns {
             let text = match column {
-                TransferBrowserSortColumn::Name => entry.name.clone(),
-                TransferBrowserSortColumn::Size => {
+                FileBrowserSortColumn::Name => entry.name.clone(),
+                FileBrowserSortColumn::Size => {
                     if entry.is_directory() {
                         "—".into()
                     } else {
                         format_browser_file_size(entry.size)
                     }
                 }
-                TransferBrowserSortColumn::Modified => format_sftp_modified(entry.modified_at),
-                TransferBrowserSortColumn::Permissions => entry
+                FileBrowserSortColumn::Modified => format_sftp_modified(entry.modified_at),
+                FileBrowserSortColumn::Permissions => entry
                     .permissions
                     .map(format_permissions_octal)
                     .unwrap_or_else(|| "—".into()),
-                TransferBrowserSortColumn::Owner => entry.owner.clone(),
-                TransferBrowserSortColumn::Group => entry.group.clone(),
+                FileBrowserSortColumn::Owner => entry.owner.clone(),
+                FileBrowserSortColumn::Group => entry.group.clone(),
             };
             let mut cell = div()
                 .w(width)
@@ -485,7 +487,7 @@ impl FileManagerWorkspace {
                 .px_2()
                 .text_xs()
                 .overflow_hidden();
-            if column == TransferBrowserSortColumn::Name {
+            if column == FileBrowserSortColumn::Name {
                 let tooltip = entry.name.clone();
                 cell = cell
                     .gap_2()
@@ -511,7 +513,7 @@ impl FileManagerWorkspace {
                             }),
                     );
             } else {
-                if column == TransferBrowserSortColumn::Size {
+                if column == FileBrowserSortColumn::Size {
                     cell = cell.justify_end();
                 }
                 cell = cell.child(div().min_w_0().truncate().child(text));

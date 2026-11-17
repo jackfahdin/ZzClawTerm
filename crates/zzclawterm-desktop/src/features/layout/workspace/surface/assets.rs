@@ -23,9 +23,9 @@ use crate::features::assets::{
     ASSET_TABLE_ROW_HEIGHT, AssetColumn,
 };
 use crate::features::formatting::format_last_used_ms;
-use crate::features::icons::resolve_connection_icon;
 use crate::features::shell::WorkspaceTabDragPayload;
 use crate::features::view_widgets::connection_type_icon;
+use zzclawterm_ui::icons::resolve_connection_icon;
 
 const ASSET_CARD_MIN_WIDTH: f32 = 300.;
 const ASSET_CARD_GAP: f32 = 8.;
@@ -547,7 +547,8 @@ impl ZzClawTermApp {
                     else {
                         return Vec::new();
                     };
-                    this.connection_target_menu_items(id.clone(), vec![id], cx)
+                    let target_ids = this.start_workspace.asset_menu_target_ids(&id);
+                    this.connection_target_menu_items(id, target_ids, cx)
                 })
             },
         )

@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use rand::RngExt;
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, TableHandle as _};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -30,6 +30,8 @@ mod cloud_sync_v4;
 mod command_history;
 mod completion_history;
 mod config_backup;
+mod connection_tree;
+mod history_retention;
 mod keyword_highlights;
 mod known_hosts;
 pub mod maintenance;
@@ -192,6 +194,8 @@ pub enum StorageError {
     },
     #[error("invalid data: {0}")]
     InvalidData(String),
+    #[error("history safety backup I/O failed: {0}")]
+    HistoryBackupIo(#[from] std::io::Error),
     #[error("local configuration changed during cloud sync")]
     CloudSyncLocalChanged,
 }
@@ -202,6 +206,7 @@ pub struct ConnectionStore {
     db_path: PathBuf,
     portable_key_path: Option<PathBuf>,
     completion_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    history_retention: std::sync::Mutex<history_retention::RetentionState>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -234,11 +239,20 @@ impl ConnectionStore {
             path: db_path.clone(),
             source,
         })?;
+        Self::from_database(db, db_path, portable_key_path)
+    }
+
+    pub(crate) fn from_database(
+        db: Database,
+        db_path: PathBuf,
+        portable_key_path: Option<PathBuf>,
+    ) -> Result<Self, StorageError> {
         let store = Self {
             db,
             db_path,
             portable_key_path,
             completion_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            history_retention: std::sync::Mutex::new(history_retention::RetentionState::default()),
         };
         store.ensure_tables()?;
         store.initialize_completion_history()?;
@@ -247,6 +261,144 @@ impl ConnectionStore {
         store.migrate_legacy_rdp_known_hosts()?;
         store.import_legacy_known_hosts_if_needed()?;
         Ok(store)
+    }
+
+    /// Opens only existing user data. Never initializes a missing/empty file.
+    pub fn open_existing(config_dir: &Path) -> Result<Self, StorageError> {
+        let path = config_dir.join(DATABASE_FILE);
+        let db = Self::validate_existing_file(&path)?;
+        Self::from_database(db, path, None)
+    }
+
+    pub(crate) fn validate_existing_file(path: &Path) -> Result<Database, StorageError> {
+        if !std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0) {
+            return Err(StorageError::InvalidData(
+                "existing database is missing or not a regular file".into(),
+            ));
+        }
+        let mut db = Database::open(path).map_err(|source| StorageError::Open {
+            path: path.into(),
+            source,
+        })?;
+        if !db.check_integrity().map_err(|source| StorageError::Open {
+            path: path.into(),
+            source,
+        })? {
+            return Err(StorageError::InvalidData(
+                "database integrity check required repair".into(),
+            ));
+        }
+        let txn = db.begin_read()?;
+        let tables = txn
+            .list_tables()?
+            .map(|table| table.name().to_string())
+            .collect::<Vec<_>>();
+        if !tables
+            .iter()
+            .any(|name| matches!(name.as_str(), "settings" | "connections" | "text_docs"))
+        {
+            return Err(StorageError::InvalidData(
+                "unsupported ZzClawTerm database layout".into(),
+            ));
+        }
+        for definition in [
+            GROUPS_TABLE,
+            CONNECTIONS_TABLE,
+            SETTINGS_TABLE,
+            CREDENTIALS_TABLE,
+            TUNNELS_TABLE,
+            PROXIES_TABLE,
+            OTP_ACCOUNTS_TABLE,
+            KNOWN_HOSTS_TABLE,
+            VNC_KNOWN_HOSTS_TABLE,
+            RDP_KNOWN_HOSTS_TABLE,
+            COMMAND_HISTORY_TABLE,
+            NOTE_FOLDERS_TABLE,
+            NOTES_TABLE,
+            NOTE_SUMMARIES_TABLE,
+        ] {
+            if tables.iter().any(|name| name == definition.name()) {
+                let table = txn.open_table(definition)?;
+                for entry in table.iter()? {
+                    let (key, bytes) = entry?;
+                    let value: serde_json::Value = serde_json::from_slice(bytes.value())?;
+                    if definition.name() == "connections"
+                        && key.value().starts_with(CONNECTION_PREFIX)
+                    {
+                        serde_json::from_value::<SavedConnection>(value)?;
+                    }
+                }
+            }
+        }
+        drop(txn);
+        Ok(db)
+    }
+
+    /// Content identity excludes redb's mutable allocator/header bookkeeping.
+    pub(crate) fn database_fingerprint(db: &Database) -> Result<String, StorageError> {
+        let txn = db.begin_read()?;
+        Self::transaction_fingerprint(&txn)
+    }
+
+    pub(super) fn transaction_fingerprint(
+        txn: &redb::ReadTransaction,
+    ) -> Result<String, StorageError> {
+        if txn.list_multimap_tables()?.next().is_some() {
+            return Err(StorageError::InvalidData(
+                "unsupported multimap database layout".into(),
+            ));
+        }
+        let mut names = txn
+            .list_tables()?
+            .map(|table| table.name().to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        let mut hash = Sha256::new();
+        fn add(hash: &mut Sha256, value: &[u8]) {
+            hash.update((value.len() as u64).to_le_bytes());
+            hash.update(value);
+        }
+        for name in names {
+            add(&mut hash, name.as_bytes());
+            match txn.open_table(TableDefinition::<&str, &str>::new(&name)) {
+                Ok(table) => {
+                    add(&mut hash, b"str");
+                    for row in table.iter()? {
+                        let (key, value) = row?;
+                        add(&mut hash, key.value().as_bytes());
+                        add(&mut hash, value.value().as_bytes());
+                    }
+                    continue;
+                }
+                Err(redb::TableError::TableTypeMismatch { .. }) => {}
+                Err(e) => return Err(e.into()),
+            }
+            match txn.open_table(TableDefinition::<&str, &[u8]>::new(&name)) {
+                Ok(table) => {
+                    add(&mut hash, b"bytes");
+                    for row in table.iter()? {
+                        let (key, value) = row?;
+                        add(&mut hash, key.value().as_bytes());
+                        add(&mut hash, value.value());
+                    }
+                    continue;
+                }
+                Err(redb::TableError::TableTypeMismatch { .. }) => {}
+                Err(e) => return Err(e.into()),
+            }
+            let table = txn.open_table(TableDefinition::<&str, u64>::new(&name))?;
+            add(&mut hash, b"u64");
+            for row in table.iter()? {
+                let (key, value) = row?;
+                add(&mut hash, key.value().as_bytes());
+                add(&mut hash, &value.value().to_le_bytes());
+            }
+        }
+        Ok(hex::encode(hash.finalize()))
+    }
+
+    pub(crate) fn content_fingerprint(&self) -> Result<String, StorageError> {
+        Self::database_fingerprint(&self.db)
     }
 
     pub fn db_path(&self) -> &Path {
@@ -538,14 +690,17 @@ impl ConnectionStore {
         }
 
         let txn = self.db.begin_write()?;
-        for connection in connections.iter().filter(|connection| {
-            connection
-                .group_id
-                .as_ref()
-                .is_some_and(|id| group_ids.contains(id))
-        }) {
-            delete_connection_in_txn(&txn, &connection.id)?;
-        }
+        let connection_ids = connections
+            .iter()
+            .filter(|connection| {
+                connection
+                    .group_id
+                    .as_ref()
+                    .is_some_and(|id| group_ids.contains(id))
+            })
+            .map(|connection| connection.id.as_str())
+            .collect();
+        delete_connections_in_txn(&txn, &connection_ids)?;
         for id in group_ids {
             cloud_sync_v4::record_remove(&txn, GROUPS_TABLE, &entity_key(GROUP_PREFIX, &id))?;
             txn.open_table(GROUPS_TABLE)?
@@ -768,7 +923,20 @@ impl ConnectionStore {
 
     pub fn delete_connection(&self, connection_id: &str) -> Result<(), StorageError> {
         let txn = self.db.begin_write()?;
-        delete_connection_in_txn(&txn, connection_id)?;
+        delete_connections_in_txn(&txn, &std::collections::BTreeSet::from([connection_id]))?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Delete records, their passwords, indexes and sync edits in one transaction.
+    /// Missing IDs are harmless; duplicate IDs are processed once.
+    pub fn delete_connections(&self, connection_ids: &[String]) -> Result<(), StorageError> {
+        if connection_ids.is_empty() {
+            return Ok(());
+        }
+        let ids = connection_ids.iter().map(String::as_str).collect();
+        let txn = self.db.begin_write()?;
+        delete_connections_in_txn(&txn, &ids)?;
         txn.commit()?;
         Ok(())
     }
@@ -1093,6 +1261,38 @@ impl ConnectionStore {
     }
 
     fn ensure_tables(&self) -> Result<(), StorageError> {
+        let read = self.db.begin_read()?;
+        let existing = read
+            .list_tables()?
+            .map(|table| table.name().to_string())
+            .collect::<std::collections::HashSet<_>>();
+        let expected = [
+            META_TABLE.name(),
+            TEXT_DOCS_TABLE.name(),
+            GROUPS_TABLE.name(),
+            CONNECTIONS_TABLE.name(),
+            TUNNELS_TABLE.name(),
+            PROXIES_TABLE.name(),
+            CREDENTIALS_TABLE.name(),
+            OTP_ACCOUNTS_TABLE.name(),
+            KNOWN_HOSTS_TABLE.name(),
+            RDP_KNOWN_HOSTS_TABLE.name(),
+            VNC_KNOWN_HOSTS_TABLE.name(),
+            PORTABLE_OPAQUE_ENTITIES_TABLE.name(),
+            COMMAND_HISTORY_TABLE.name(),
+            completion_history::COMPLETION_HISTORY_TABLE.name(),
+            NOTE_FOLDERS_TABLE.name(),
+            NOTES_TABLE.name(),
+            NOTE_SUMMARIES_TABLE.name(),
+            SETTINGS_TABLE.name(),
+            IDX_CONNECTIONS_BY_GROUP_TABLE.name(),
+            IDX_CONNECTIONS_BY_LAST_USED_TABLE.name(),
+            IDX_CONNECTIONS_BY_PROTOCOL_TABLE.name(),
+        ];
+        if expected.iter().all(|name| existing.contains(*name)) {
+            return Ok(());
+        }
+        drop(read);
         let txn = self.db.begin_write()?;
         txn.open_table(META_TABLE)?;
         txn.open_table(TEXT_DOCS_TABLE)?;
@@ -1527,24 +1727,6 @@ impl ConnectionStore {
             .map(|(_, value)| serde_json::from_slice(&value).map_err(StorageError::from))
             .collect()
     }
-
-    fn list_keyed_json_by_prefix<T>(
-        &self,
-        definition: TableDefinition<&str, &[u8]>,
-        prefix: &str,
-    ) -> Result<Vec<(String, T)>, StorageError>
-    where
-        T: DeserializeOwned,
-    {
-        self.list_raw_by_prefix(definition, prefix)?
-            .into_iter()
-            .map(|(key, value)| {
-                serde_json::from_slice(&value)
-                    .map(|value| (key, value))
-                    .map_err(StorageError::from)
-            })
-            .collect()
-    }
 }
 
 fn encrypt_ai_settings_secrets(
@@ -1755,6 +1937,13 @@ fn save_group_in_txn(txn: &redb::WriteTransaction, group: &Group) -> Result<(), 
         .get(key.as_str())?
         .map(|raw| serde_json::from_slice::<serde_json::Value>(raw.value()))
         .transpose()?;
+    let reparented = current.as_ref().is_some_and(|old| {
+        old.get("parent_id").and_then(serde_json::Value::as_str) != group.parent_id.as_deref()
+    });
+    if reparented || (current.is_none() && group.tree_order.is_none()) {
+        group.tree_order =
+            connection_tree::append_tree_order_in_txn(txn, group.parent_id.as_deref())?;
+    }
     let mut next = serde_json::to_value(&group)?;
     if let (Some(current), Some(next)) = (
         current.as_ref().and_then(serde_json::Value::as_object),
@@ -1765,7 +1954,12 @@ fn save_group_in_txn(txn: &redb::WriteTransaction, group: &Group) -> Result<(), 
         for (field, value) in current {
             if !matches!(
                 field.as_str(),
-                "id" | "name" | "parent_id" | "sort_order" | "created_at_ms" | "updated_at_ms"
+                "id" | "name"
+                    | "parent_id"
+                    | "sort_order"
+                    | "tree_order"
+                    | "created_at_ms"
+                    | "updated_at_ms"
             ) {
                 next.insert(field.clone(), value.clone());
             }
@@ -1831,6 +2025,20 @@ fn save_connection_with_clean_indexes_checked_in_txn(
     }
     let now = current_time_ms();
     let connection_key = entity_key(CONNECTION_PREFIX, &connection.id);
+    let previous: Option<SavedConnection> = txn
+        .open_table(CONNECTIONS_TABLE)?
+        .get(connection_key.as_str())?
+        .map(|raw| deserialize_json(raw.value()))
+        .transpose()?;
+    if previous
+        .as_ref()
+        .is_some_and(|old| old.group_id != connection.group_id)
+        || (previous.is_none() && connection.tree_order.is_none())
+    {
+        connection.tree_order =
+            connection_tree::append_tree_order_in_txn(txn, connection.group_id.as_deref())?;
+    }
+
     if connection.created_at_ms.is_none() {
         connection.created_at_ms =
             existing_connection_created_at(txn, &connection_key)?.or(Some(now));
@@ -1880,19 +2088,18 @@ fn existing_connection_created_at(
     Ok(connection.created_at_ms)
 }
 
-fn delete_connection_in_txn(
+fn delete_connections_in_txn(
     txn: &redb::WriteTransaction,
-    connection_id: &str,
+    connection_ids: &std::collections::BTreeSet<&str>,
 ) -> Result<(), StorageError> {
-    cloud_sync_v4::record_remove(
-        txn,
-        CONNECTIONS_TABLE,
-        &entity_key(CONNECTION_PREFIX, connection_id),
-    )?;
-    txn.open_table(CONNECTIONS_TABLE)?
-        .remove(entity_key(CONNECTION_PREFIX, connection_id).as_str())?;
-    delete_connection_password_in_txn(txn, connection_id)?;
-    remove_connection_index_entries(txn, connection_id)
+    for connection_id in connection_ids {
+        let key = entity_key(CONNECTION_PREFIX, connection_id);
+        cloud_sync_v4::record_remove(txn, CONNECTIONS_TABLE, &key)?;
+        txn.open_table(CONNECTIONS_TABLE)?.remove(key.as_str())?;
+        delete_connection_password_in_txn(txn, connection_id)?;
+    }
+    // Scan each index once for the entire batch, including stale legacy rows.
+    remove_connection_indexes_for_ids(txn, connection_ids)
 }
 
 fn delete_connection_password_in_txn(
@@ -2300,5 +2507,7 @@ fn current_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+#[cfg(test)]
+mod connection_delete_tests;
 #[cfg(test)]
 mod tests;

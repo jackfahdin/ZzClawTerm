@@ -201,6 +201,21 @@ impl McpHostFeatureState {
         self.runtime.is_some() && self.generation.as_deref() == Some(generation)
     }
 
+    #[cfg(test)]
+    pub(in crate::features) fn enable_public_for_test(&mut self) -> String {
+        let runtime = McpHostRuntime::start(
+            zzclawterm_core::AiPermissionMode::FullAccess,
+            CapabilityScope::AllSessions,
+            self.request_sender.clone(),
+            None,
+        )
+        .expect("test public MCP host");
+        let generation = runtime.endpoint().generation.clone();
+        self.generation = Some(generation.clone());
+        self.runtime = Some(runtime);
+        generation
+    }
+
     pub(in crate::features) fn generation_matches(&self, generation: &str) -> bool {
         (self.generation.as_deref() == Some(generation) && self.runtime.is_some())
             || self
@@ -563,6 +578,7 @@ mod tests {
             id: "root".into(),
             name: "Production".into(),
             parent_id: None,
+            tree_order: None,
             sort_order: 0,
             created_at_ms: None,
             updated_at_ms: None,
@@ -571,6 +587,7 @@ mod tests {
             id: "child".into(),
             name: "Linux".into(),
             parent_id: Some("root".into()),
+            tree_order: None,
             sort_order: 0,
             created_at_ms: None,
             updated_at_ms: None,
@@ -620,6 +637,7 @@ mod tests {
         let (reply, receiver) = tokio::sync::oneshot::channel();
         (
             McpHostRequest {
+                terminal_plan: None,
                 extended_results: true,
                 resolved_session_id: None,
                 caller: crate::features::capability_runtime::CapabilityCaller::Mcp,

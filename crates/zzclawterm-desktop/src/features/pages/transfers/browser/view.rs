@@ -13,13 +13,13 @@ use super::helpers::{
     compact_transfer_toolbar_button_enabled, compact_transfer_upload_menu_button,
     transfer_toolbar_divider,
 };
-use crate::models::TransferBrowserSortColumn;
 use gpui::{
     AnyElement, Context, IntoElement, KeyDownEvent, ListHorizontalSizingBehavior, MouseButton,
     MouseDownEvent, SharedString, div, prelude::*, px, rgb, rgba, svg, uniform_list,
 };
 use rust_i18n::t;
 use zzclawterm_core::truncate_preview;
+use zzclawterm_files::file_browser::listing::FileBrowserSortColumn;
 use zzclawterm_ui::{
     ZzClawContextMenu, ZzClawHorizontalScrollbar, ZzClawSearchInput, ZzClawUniformListScrollbar,
 };
@@ -619,7 +619,7 @@ pub(in crate::features::pages::transfers) fn transfer_browser_view(
                                             .gap_0()
                                             .child(sort_header_cell(
                                                 palette,
-                                                TransferBrowserSortColumn::Name,
+                                                FileBrowserSortColumn::Name,
                                                 t!("fileExplorer.name"),
                                                 column_widths.name,
                                                 sort_header_state,
@@ -627,7 +627,7 @@ pub(in crate::features::pages::transfers) fn transfer_browser_view(
                                             ))
                                             .child(sort_header_cell(
                                                 palette,
-                                                TransferBrowserSortColumn::Modified,
+                                                FileBrowserSortColumn::Modified,
                                                 t!("fileExplorer.mtime"),
                                                 column_widths.modified,
                                                 sort_header_state,
@@ -635,7 +635,7 @@ pub(in crate::features::pages::transfers) fn transfer_browser_view(
                                             ))
                                             .child(sort_header_cell(
                                                 palette,
-                                                TransferBrowserSortColumn::Size,
+                                                FileBrowserSortColumn::Size,
                                                 t!("fileExplorer.size"),
                                                 column_widths.size,
                                                 sort_header_state,
@@ -643,7 +643,7 @@ pub(in crate::features::pages::transfers) fn transfer_browser_view(
                                             ))
                                             .child(sort_header_cell(
                                                 palette,
-                                                TransferBrowserSortColumn::Permissions,
+                                                FileBrowserSortColumn::Permissions,
                                                 t!("fileExplorer.permissions"),
                                                 column_widths.permissions,
                                                 sort_header_state,
@@ -651,7 +651,7 @@ pub(in crate::features::pages::transfers) fn transfer_browser_view(
                                             ))
                                             .child(sort_header_cell(
                                                 palette,
-                                                TransferBrowserSortColumn::Owner,
+                                                FileBrowserSortColumn::Owner,
                                                 t!("fileExplorer.owner"),
                                                 column_widths.owner,
                                                 sort_header_state,
@@ -659,7 +659,7 @@ pub(in crate::features::pages::transfers) fn transfer_browser_view(
                                             ))
                                             .child(sort_header_cell(
                                                 palette,
-                                                TransferBrowserSortColumn::Group,
+                                                FileBrowserSortColumn::Group,
                                                 t!("fileExplorer.group"),
                                                 column_widths.group,
                                                 sort_header_state,

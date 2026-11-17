@@ -3,6 +3,7 @@ use super::command_suggestions::{
     suggestion_overlay_desired_height,
 };
 use crate::features::ZzClawTermApp;
+use crate::models::credential_autofill_target_display_name;
 use crate::models::{
     ConnectionPasswordTarget, CredentialAutofillAction, CredentialAutofillMatchEvent,
     CredentialAutofillMatchRequest, CredentialAutofillMatchRequestKey, CredentialAutofillTarget,
@@ -15,6 +16,7 @@ use gpui::{
 };
 use rust_i18n::t;
 use std::time::{SystemTime, UNIX_EPOCH};
+use zzclawterm_core::credential_autofill::matching::detect_live_prompt_kind as credential_autofill_detect_prompt_kind;
 use zzclawterm_core::{
     ConnectionAuth, CredentialPromptKind, SavedConnection, SecretString, TerminalInputState,
     credential_password_prompt_targets_user, credential_prompt_requests_password, truncate_preview,
@@ -105,7 +107,6 @@ impl ZzClawTermApp {
         let Some(session_id) = self.session.active_id_owned() else {
             return;
         };
-        let (cursor_row, cursor_col) = self.active_terminal_cursor_cell();
         self.dismiss_command_suggestions(cx);
         let selected_index = (precise && matches.len() == 1).then_some(0);
         self.terminal.assist.credential_suggestions = Some(CredentialSuggestionState {
@@ -114,8 +115,6 @@ impl ZzClawTermApp {
             matches,
             prompt_text,
             selected_index,
-            cursor_row,
-            cursor_col,
         });
         cx.notify();
     }
@@ -284,7 +283,7 @@ impl ZzClawTermApp {
             self.terminal.assist.credential_prompt_input_until_ms =
                 Self::now_unix_ms().saturating_add(CREDENTIAL_PROMPT_INPUT_TTL_MS);
             // Suppress command suggestions while a credential prompt is live.
-            if self.terminal.assist.command_suggestions.take().is_some() {
+            if self.terminal.assist.commands.popup.take().is_some() {
                 root_overlay_dirty = true;
             }
             *self.terminal.editing.input_mut() = TerminalInputState::new();
@@ -628,7 +627,7 @@ impl ZzClawTermApp {
             self.activate_session_id_with_surface_sync(session_id, cx);
         }
         let generation = self.terminal.assist.credential_autofill_generation;
-        let credential_name = target.display_name();
+        let credential_name = credential_autofill_target_display_name(target);
         match (kind, target) {
             (CredentialPromptKind::Username, CredentialAutofillTarget::Vault(credential)) => {
                 let mut payload = credential.username.clone();
@@ -931,12 +930,17 @@ impl ZzClawTermApp {
             return div().into_any_element();
         }
 
+        let Some((cursor_row, cursor_col)) =
+            self.suggestion_cursor_cell_for_session(&state.session_id, cx)
+        else {
+            return div().into_any_element();
+        };
         let menu_w = 340.0_f32;
         let menu_h = suggestion_overlay_desired_height(state.matches.len(), 36.0);
         let Some(placement) = self.suggestion_overlay_position_for_session(
             Some(&state.session_id),
-            state.cursor_row,
-            state.cursor_col,
+            cursor_row,
+            cursor_col,
             menu_w,
             menu_h,
         ) else {
@@ -1021,7 +1025,10 @@ impl ZzClawTermApp {
                                 div()
                                     .text_size(px(12.))
                                     .text_color(rgb(palette.text))
-                                    .child(truncate_preview(&credential.display_name(), 36)),
+                                    .child(truncate_preview(
+                                        &credential_autofill_target_display_name(credential),
+                                        36,
+                                    )),
                             )
                             .child(
                                 div()
@@ -1322,52 +1329,6 @@ fn credential_autofill_prompt_text_from_visible(output: &str) -> String {
     }
 }
 
-fn credential_autofill_detect_prompt_kind(prompt: &str) -> Option<CredentialPromptKind> {
-    let trimmed = prompt.trim();
-    if trimmed.is_empty()
-        || !trimmed
-            .chars()
-            .last()
-            .is_some_and(|ch| ch == ':' || ch == '：')
-    {
-        return None;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.contains("password")
-        || lower.contains("passphrase")
-        || lower.contains("passcode")
-        || lower.contains("pin")
-        || lower.contains("otp")
-        || lower.contains("verification code")
-        || lower.contains("authentication code")
-        || lower.contains("auth code")
-        || lower.contains("2fa")
-        || lower.contains("mfa")
-        || trimmed.contains("密码")
-        || trimmed.contains("口令")
-        || trimmed.contains("验证码")
-        || trimmed.contains("动态码")
-        || trimmed.contains("动态口令")
-    {
-        return Some(CredentialPromptKind::Password);
-    }
-    if lower.contains("username")
-        || lower.contains("user name")
-        || lower.contains("login as")
-        || lower.contains("login")
-        || lower.contains("account")
-        || lower.contains("user")
-        || trimmed.contains("用户名")
-        || trimmed.contains("用户")
-        || trimmed.contains("账号")
-        || trimmed.contains("账户")
-        || trimmed.contains("登录名")
-    {
-        return Some(CredentialPromptKind::Username);
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1383,6 +1344,7 @@ mod tests {
     };
     use crate::features::ZzClawTermApp;
     use crate::features::test_support::app_with_visible_local_session;
+    use crate::models::credential_autofill_target_display_name;
     use crate::models::{ConnectionPasswordTarget, CredentialAutofillTarget, SessionLaunchConfig};
     use crate::test_support::TestConfigDir;
     use gpui::{AppContext as _, TestAppContext};
@@ -1674,7 +1636,7 @@ mod tests {
 
     #[test]
     fn connection_auth_inline_password_accepts_only_hydrated_plaintext() {
-        use zzclawterm_core::SecretString;
+        use zzclawterm_core::{ConnectionAuth, SecretString};
         let inline = ConnectionAuth {
             mode: "password".into(),
             password: Some(SecretString::from("secret")),
@@ -1703,7 +1665,7 @@ mod tests {
 
     #[test]
     fn connection_has_resolvable_password_reads_catalog_shape() {
-        use zzclawterm_core::SecretString;
+        use zzclawterm_core::{ConnectionAuth, SecretString};
         // Catalog (unhydrated): ciphertext inline with has_password = true.
         let catalog_inline = ConnectionAuth {
             mode: "password".into(),
@@ -1744,7 +1706,7 @@ mod tests {
 
     #[test]
     fn connection_has_resolvable_password_follows_password_source() {
-        use zzclawterm_core::SecretString;
+        use zzclawterm_core::{ConnectionAuth, ConnectionPasswordSource, SecretString};
         // The account is only the password when the source says so, so a
         // connection that owns its password must not be offered a candidate
         // that resolves to MissingPassword at fill time.
@@ -1785,7 +1747,7 @@ mod tests {
     /// carriage return.
     #[test]
     fn connection_password_resolves_from_store_to_the_terminal_payload() {
-        use zzclawterm_core::SecretString;
+        use zzclawterm_core::{ConnectionAuth, ConnectionPasswordSource, SecretString};
         use zzclawterm_store::ConnectionStore;
 
         let root = crate::test_support::TestConfigDir::new("zzclawterm-connection-password-fill");
@@ -1870,6 +1832,7 @@ mod tests {
     fn connection_source_never_uses_saved_account_password() {
         use zzclawterm_core::SecretString;
         use zzclawterm_store::ConnectionStore;
+
         let root = TestConfigDir::new("zzclawterm-connection-source-with-account");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
         save_test_account(&store, Some("account-secret"));
@@ -1910,6 +1873,7 @@ mod tests {
     fn non_password_auth_never_resolves_connection_password() {
         use zzclawterm_core::SecretString;
         use zzclawterm_store::ConnectionStore;
+
         let root = TestConfigDir::new("zzclawterm-non-password-auth");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
         let auth = ConnectionAuth {
@@ -1935,6 +1899,7 @@ mod tests {
     fn legacy_password_source_follows_hydrated_auth_rule() {
         use zzclawterm_core::SecretString;
         use zzclawterm_store::ConnectionStore;
+
         let root = TestConfigDir::new("zzclawterm-legacy-password-source");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
         save_test_account(&store, Some("account-secret"));
@@ -1969,6 +1934,7 @@ mod tests {
     fn account_source_does_not_fall_back_to_stale_connection_password() {
         use zzclawterm_core::SecretString;
         use zzclawterm_store::ConnectionStore;
+
         let root = TestConfigDir::new("zzclawterm-account-source-unavailable");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
         let mut auth = account_password_auth();
@@ -2041,10 +2007,10 @@ mod tests {
 
     #[test]
     fn account_source_locked_vault_does_not_use_stale_connection_password() {
-        use redb::Database;
-        use redb::TableDefinition;
+        use redb::{Database, TableDefinition};
         use zzclawterm_core::SecretString;
         use zzclawterm_store::ConnectionStore;
+
         let root = TestConfigDir::new("zzclawterm-account-source-locked");
         let store = ConnectionStore::open(root.path().join("config")).expect("test store");
         save_test_account(&store, Some("account-secret"));
@@ -2106,6 +2072,7 @@ mod tests {
             },
             group_id: None,
             description: None,
+            tree_order: None,
             sort_order: 0,
             icon: None,
             icon_auto_detect: None,
@@ -2411,9 +2378,10 @@ mod tests {
     #[test]
     fn disabled_autofill_rejects_pending_detection_and_late_match_events() {
         use crate::models::{
-            CredentialAutofillMatchEvent, CredentialAutofillMatchOutcome,
-            CredentialAutofillMatchRequestKey, PendingCredentialAutofill,
+            CredentialAutofillMatchEvent, CredentialAutofillMatchRequestKey,
+            PendingCredentialAutofill,
         };
+        use zzclawterm_core::credential_autofill::matching::CredentialAutofillMatchOutcome;
         let root = TestConfigDir::new("zzclawterm-credential-disabled");
         let mut cx = TestAppContext::single();
         let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
@@ -2481,13 +2449,11 @@ mod tests {
         use std::net::TcpListener;
         use std::time::{Duration, Instant};
         use zzclawterm_core::SecretString;
-        use zzclawterm_store::ConnectionStore;
-
         use zzclawterm_recording::recording::{
             ExistingFileBehavior, RecordingContext, RecordingMode, RecordingProfile,
             RecordingRotationPolicy,
         };
-
+        use zzclawterm_store::ConnectionStore;
         use zzclawterm_transport::TelnetSessionConfig;
 
         let root = TestConfigDir::new("zzclawterm-credential-sensitive-wire");
@@ -2600,7 +2566,7 @@ mod tests {
                 } else {
                     "password"
                 },
-                target.display_name()
+                credential_autofill_target_display_name(target)
             );
             cx.update_entity(&app, |app, cx| {
                 assert_eq!(app.sync_peer_session_ids(&ids[0]), vec![ids[1].clone()]);
@@ -2644,7 +2610,7 @@ mod tests {
                 app.write_session_protocol_response(id, b"END").unwrap();
             }
             assert!(app.commands.command_history().is_empty());
-            assert!(app.terminal.assist.pending_command_history_entry.is_none());
+            assert!(app.terminal.assist.commands.pending_history_entry.is_none());
         });
         let store_client = cx.update_entity(&app, |app, _| app.store_blocking_client());
         assert!(
@@ -2665,5 +2631,35 @@ mod tests {
         for id in ids {
             manager.close(&id).unwrap();
         }
+    }
+
+    #[test]
+    fn open_credential_popup_anchor_tracks_folded_frames_without_resetting_selection() {
+        let dir = TestConfigDir::new("zzclawterm-credential-fold-anchor");
+        let mut cx = TestAppContext::single();
+        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+        cx.update_entity(&app, |app, cx| {
+            let view = app.terminal.view.views.get_mut("s1").unwrap();
+            view.screen.resize(80, 24);
+            view.screen.advance(b"$ \x1b]133;B\x07run\r\n\x1b]133;C\x07one\r\ntwo\r\n\x1b]133;D;0\x07\x1b]133;A\x07Password: ");
+            view.frame_snapshot = Some(std::sync::Arc::new(view.screen.snapshot()));
+            let id = view.screen.snapshot().command_blocks[0].id;
+            app.terminal.assist.credential_suggestions = Some(crate::models::CredentialSuggestionState {
+                session_id: "s1".into(), kind: CredentialPromptKind::Password,
+                matches: vec![test_credential_target("fold")], prompt_text: "Password: ".into(), selected_index: Some(0),
+            });
+            let original = app.terminal.assist.credential_suggestions.clone();
+            let before = app.suggestion_cursor_cell_for_session("s1", cx).unwrap();
+            for collapsed in [true, false] {
+                let view = app.terminal.view.views.get_mut("s1").unwrap();
+                view.screen.set_collapsed_commands(if collapsed { [id].into() } else { Default::default() });
+                view.frame_snapshot = Some(std::sync::Arc::new(view.screen.snapshot()));
+                let after = app.suggestion_cursor_cell_for_session("s1", cx).unwrap();
+                assert_eq!(after, (before.0 - usize::from(collapsed), before.1));
+                assert_eq!(app.terminal.assist.credential_suggestions, original);
+            }
+            assert!(app.suggestion_cursor_cell_for_session("other", cx).is_none());
+        });
     }
 }

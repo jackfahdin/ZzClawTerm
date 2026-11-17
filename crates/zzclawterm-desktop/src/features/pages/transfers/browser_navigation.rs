@@ -1,9 +1,9 @@
 use super::{normalized_transfer_browser_path, remote_file_name, remote_parent_path};
 use crate::features::ZzClawTermApp;
-use crate::features::transfers::browser_paths::remote_ancestor_selection;
 use crate::models::{TransferBrowserNavigationSnapshot, TransferBrowserSessionCacheState};
 use gpui::{Context, Window};
 use std::collections::VecDeque;
+use zzclawterm_files::file_browser::navigation::remote_ancestor_selection;
 use zzclawterm_files::sftp::{RemoteFilePath, SftpFileEntry};
 
 #[cfg(test)]
@@ -84,10 +84,10 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn cache_transfer_browser_session(&mut self, session_id: &str) {
         if session_id.trim().is_empty()
-            || self
+            || !self
                 .session
                 .file_browser_backend_support_for_session(session_id)
-                .is_none()
+                .is_some()
         {
             return;
         }

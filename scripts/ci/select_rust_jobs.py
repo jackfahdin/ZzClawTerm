@@ -16,6 +16,7 @@ OUTPUTS = ("run_rust", "run_tmux", "run_plugin_sdk", "run_python", "run_workflow
 
 # Explicit registration makes a new crate fail closed until its CI impact is reviewed.
 KNOWN_CRATES = frozenset({
+    "zzclawterm-i18n", "zzclawterm-completion-runtime",
     "zzclawterm-ai-client", "zzclawterm-cloud-storage", "zzclawterm-updater", "zzclawterm-preview", "zzclawterm-translation-client",
     "zzclawterm-agent-client", "zzclawterm-app", "zzclawterm-core",
     "zzclawterm-android", "zzclawterm-desktop", "zzclawterm-mcp",
@@ -23,7 +24,7 @@ KNOWN_CRATES = frozenset({
     "zzclawterm-mcp-host", "zzclawterm-mcp-protocol", "zzclawterm-otp", "zzclawterm-plugin-api",
     "zzclawterm-plugin-host", "zzclawterm-rdp-helper", "zzclawterm-windows-rdp",
     "zzclawterm-remote-desktop", "zzclawterm-store", "zzclawterm-sync", "zzclawterm-terminal",
-    "zzclawterm-terminal-gpui", "zzclawterm-transport", "zzclawterm-ui", "zzclawterm-vnc-helper",
+    "zzclawterm-terminal-gpui", "zzclawterm-terminal-runtime", "zzclawterm-transport", "zzclawterm-ui", "zzclawterm-vnc-helper",
     "zzclawterm-android-helper",
 })
 

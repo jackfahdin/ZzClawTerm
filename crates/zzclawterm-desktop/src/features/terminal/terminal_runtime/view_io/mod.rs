@@ -69,6 +69,17 @@ fn terminal_paint_snapshot_for_view(
         .or(retained_surface_snapshot)
 }
 
+/// Cached and retained scroll snapshots may only be reused while their shared
+/// rows still match the live frame; in-place output keeps history coordinates unchanged.
+pub(super) fn terminal_cached_snapshot_is_current(
+    view: &TerminalViewState,
+    snapshot: &TerminalSnapshot,
+) -> bool {
+    view.frame_snapshot.as_ref().is_none_or(|live| {
+        std::ptr::eq(live.as_ref(), snapshot) || snapshot.content_agrees_with(live)
+    })
+}
+
 fn terminal_cached_scrollback_snapshot_covering_display_offset(
     view: &TerminalViewState,
     display_offset: usize,
@@ -81,6 +92,7 @@ fn terminal_cached_scrollback_snapshot_covering_display_offset(
         && view
             .history_state()
             .preserves_coordinates_from(snapshot.history)
+        && terminal_cached_snapshot_is_current(view, snapshot)
     {
         return Some(snapshot.clone());
     }
@@ -90,6 +102,7 @@ fn terminal_cached_scrollback_snapshot_covering_display_offset(
         .filter(|snapshot| {
             view.history_state()
                 .preserves_coordinates_from(snapshot.history)
+                && terminal_cached_snapshot_is_current(view, snapshot)
                 && terminal_snapshot_covers_display_offset(
                     snapshot.as_ref(),
                     display_offset,
@@ -110,6 +123,7 @@ fn terminal_retained_snapshot_matches_view(
     let scrollback_len = view.scrollback_len_for_ui();
     view.history_state()
         .preserves_coordinates_from(snapshot.history)
+        && terminal_cached_snapshot_is_current(view, snapshot)
         // Folding changes presentation without changing VT history or row text.
         // Once the worker publishes the new layout, a retained surface frame
         // must not take precedence over its replacement scroll snapshot.
@@ -278,6 +292,7 @@ fn terminal_snapshot_with_newer_edge_row(
             command_blocks: base.command_blocks.clone(),
             display_rows: base.display_rows.clone(),
             history: base.history,
+            file_context: base.file_context.clone(),
             shell_input_anchor: base.shell_input_anchor,
             command_navigation_target: None,
             command_navigation_revision: 0,
@@ -345,6 +360,7 @@ fn terminal_snapshot_with_retained_scroll_window(
             command_blocks: base.command_blocks.clone(),
             display_rows: base.display_rows.clone(),
             history: base.history,
+            file_context: base.file_context.clone(),
             shell_input_anchor: base.shell_input_anchor,
             command_navigation_target: None,
             command_navigation_revision: 0,
@@ -641,7 +657,9 @@ impl ZzClawTermApp {
                     .clone()
                     .unwrap_or_else(|| view.live_snapshot_with_scroll_window());
             }
-            if let Some(snapshot) = view.scrollback_snapshots.get(&offset).cloned() {
+            if let Some(snapshot) = view.scrollback_snapshots.get(&offset).cloned()
+                && terminal_cached_snapshot_is_current(view, &snapshot)
+            {
                 return snapshot;
             }
             if let Some(snapshot) = view.frame_snapshot.as_ref()
@@ -724,6 +742,35 @@ impl ZzClawTermApp {
             surface.set_app(app, line_roles);
             surface
         });
+        // Surface-only scrolling and frame publication must also reposition app-owned
+        // popups. Unchanged anchors must not turn terminal output into full app redraws.
+        let popup_session_id = session_id.to_owned();
+        let mut previous_anchor = None;
+        cx.observe(&surface, move |app, surface, cx| {
+            let popup_open = app
+                .terminal
+                .assist
+                .commands
+                .popup
+                .as_ref()
+                .is_some_and(|state| state.session_id == popup_session_id)
+                || app
+                    .terminal
+                    .assist
+                    .credential_suggestions
+                    .as_ref()
+                    .is_some_and(|state| state.session_id == popup_session_id);
+            if popup_open {
+                let anchor = surface.read(cx).suggestion_cursor_cell();
+                if previous_anchor != anchor {
+                    previous_anchor = anchor;
+                    cx.notify();
+                }
+            } else {
+                previous_anchor = None;
+            }
+        })
+        .detach();
         self.terminal
             .view
             .surfaces

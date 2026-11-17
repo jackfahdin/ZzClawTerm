@@ -1,3 +1,5 @@
+pub mod basis;
+
 use crate::SecretString;
 
 use super::{
@@ -511,11 +513,15 @@ pub fn apply_connection_batch_edit(
     let rdp_security_ok = rdp_reason.is_none();
 
     if !edit.group_id.is_unchanged() {
+        let previous_parent = connection.group_id.clone();
         connection.group_id = match &edit.group_id {
             BatchField::Set(value) => Some(value.clone()),
             BatchField::Clear => None,
             BatchField::Unchanged => unreachable!(),
         };
+        if connection.group_id != previous_parent {
+            connection.tree_order = None;
+        }
         apply(true, true, &mut report);
     }
     if !edit.description.is_unchanged() {
@@ -1204,13 +1210,18 @@ pub fn apply_connection_batch_edit(
             parity,
             flow_control,
             stop_bits,
+            connect_prompt,
             ..
         } = &mut connection.config
     {
         if !edit.serial_port_name.is_unchanged() {
             *port_name = plain_string_value(&edit.serial_port_name);
+            // Clearing the device must not leave a record that cannot be opened:
+            // the port is now chosen when the session connects.
+            connect_prompt.port = port_name.is_empty();
         }
         if !edit.serial_baud_rate.is_unchanged() {
+            connect_prompt.baud_rate = false;
             *baud_rate = match edit.serial_baud_rate {
                 BatchField::Set(value) => value,
                 BatchField::Clear => super::default_baud_rate(),

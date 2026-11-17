@@ -6,7 +6,7 @@ use zzclawterm_core::sync_schema::SyncScope;
 use zzclawterm_core::test_support::TestTempDir;
 use zzclawterm_sync::engine::{SyncReplica, prepare};
 
-use crate::sync_v4::PreparedApply;
+use crate::sync_v4::{LocalReplica, PreparedApply};
 use crate::{ConnectionStore, StorageError};
 
 pub(super) fn connection() -> SavedConnection {
@@ -522,7 +522,7 @@ fn old_scope_settings_round_trip_but_cannot_authorize_a_vault_apply() {
 }
 
 #[test]
-fn fixed_snapshot_keeps_proxy_ciphertext_and_defers_credential_redirection() {
+fn fixed_snapshot_keeps_a_password_backed_proxy_on_its_local_address() {
     let dir = TestTempDir::new("zzclawterm-fixed-proxy-auth");
     let store = ConnectionStore::open(dir.path()).unwrap();
     store.save_master_password(Some("password")).unwrap();
@@ -560,14 +560,17 @@ fn fixed_snapshot_keeps_proxy_ciphertext_and_defers_credential_redirection() {
             .list_raw_json_values_by_prefix(super::PROXIES_TABLE, super::PROXY_PREFIX)
             .unwrap()
             .remove(0);
-        assert_eq!(raw["password"], before);
         assert_eq!(raw["name"], "Remote rename");
-        assert_eq!(raw["host"], "proxy.example");
+        assert_eq!(
+            raw["host"], "proxy.example",
+            "a password bound to the local address never follows a remote rename"
+        );
+        assert_eq!(raw["password"], before);
     }
 }
 
 #[test]
-fn fixed_snapshot_defers_redirecting_a_connection_with_local_authentication() {
+fn fixed_snapshot_keeps_the_local_address_of_a_password_backed_connection() {
     let dir = TestTempDir::new("zzclawterm-fixed-snapshot-redirect");
     let store = ConnectionStore::open(dir.path()).unwrap();
     store.save_master_password(Some("password")).unwrap();
@@ -594,7 +597,14 @@ fn fixed_snapshot_defers_redirecting_a_connection_with_local_authentication() {
         .unwrap();
     let actual = store.get_connection("server").unwrap().unwrap();
     assert_eq!(actual.name, "Renamed");
-    assert_eq!(actual.config, saved.config);
+    assert_eq!(
+        serde_json::to_value(&actual.config).unwrap()["host"],
+        "server.example"
+    );
+    assert!(
+        actual.auth.and_then(|auth| auth.password).is_some(),
+        "the password stays bound to the address this device still uses"
+    );
 }
 
 fn prepared_scope(store: &ConnectionStore, scope: SyncScope) -> PreparedApply {
@@ -813,15 +823,113 @@ fn a_saved_edit_during_password_rotation_prevents_switching_and_keeps_the_old_sp
     );
 }
 
+/// Local credentials cannot authorize a causal overwrite of another device's address.
 #[test]
-fn excluded_inline_password_prevents_remote_parent_deletion_or_secret_redirection() {
+fn a_vault_backed_connection_password_defers_endpoint_without_reasserting() {
     use zzclawterm_core::sync_schema::{SyncFieldId, SyncResourceId, SyncValue};
-    let dir = TestTempDir::new("zzclawterm-v4-excluded-inline-parent");
+    let dir = TestTempDir::new("zzclawterm-v4-vault-password-redirect");
     let store = ConnectionStore::open(dir.path()).unwrap();
     enable(&store);
     let mut server = connection();
     server.auth = Some(
-        serde_json::from_value(json!({"mode":"password","password":"fixture-inline"})).unwrap(),
+        serde_json::from_value(json!({
+            "mode":"password", "password_source":"connection",
+            "password":"fixture-vault-password", "has_password":true
+        }))
+        .unwrap(),
+    );
+    store.save_connection(&server).unwrap();
+    let stored = store.get_connection("server").unwrap().unwrap();
+    assert!(
+        stored.auth.and_then(|auth| auth.password).is_some(),
+        "the ordinary writer moves the password into the vault it hydrates from"
+    );
+
+    let before = store
+        .load_v4_view("destination", "password", &Default::default())
+        .unwrap();
+    let local_endpoint = before.projection.values
+        [&SyncFieldId::new(SyncResourceId::new("connection", "server"), "endpoint").key()]
+        .clone();
+    let mut proposal = prepared(&store);
+    let mut next = before.projection.clone();
+    let resource = SyncResourceId::new("connection", "server");
+    let endpoint = SyncFieldId::new(resource, "endpoint");
+    let mut target = next.values[&endpoint.key()].decode().unwrap();
+    target["host"] = json!("moved.example");
+    next.values.insert(endpoint.key(), SyncValue::new(&target));
+    replace_projection(&mut proposal, next);
+
+    let applied = store.apply_v4_plan(proposal, "password").unwrap();
+    assert!(applied.deferred.contains(&endpoint));
+    assert!(applied.kept.is_empty());
+    assert_eq!(
+        serde_json::to_value(store.get_connection("server").unwrap().unwrap()).unwrap()["host"],
+        "server.example",
+        "the address a saved password is bound to stays local"
+    );
+    {
+        let txn = store.db.begin_read().unwrap();
+        let table = txn.open_table(crate::storage::CREDENTIALS_TABLE).unwrap();
+        let key = crate::storage::entity_key(crate::storage::CONNECTION_PASSWORD_PREFIX, "server");
+        assert!(
+            table.get(key.as_str()).unwrap().is_some(),
+            "the device-local password is never destroyed by a remote address move"
+        );
+    }
+    // Refusing a local binding change must not rewrite the remote candidate.
+    let replica = SyncReplica::load(applied.replica.as_ref().unwrap(), Uuid::nil()).unwrap();
+    let candidates = replica.candidates(&endpoint).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_ne!(
+        *replica.candidate_value(&candidates[0]).unwrap(),
+        local_endpoint
+    );
+    let again = store.apply_v4_plan(prepared(&store), "password").unwrap();
+    assert!(again.deferred.contains(&endpoint));
+    assert!(again.kept.is_empty());
+    assert_eq!(
+        again.replica.as_ref().unwrap().document,
+        applied.replica.as_ref().unwrap().document
+    );
+}
+
+/// The build that shipped before this change wrote `cleared` into the local
+/// replica. Refusing that key would make every existing device unable to load
+/// its own record, so it is accepted and discarded.
+#[test]
+fn a_replica_written_by_the_password_dropping_build_still_loads() {
+    let mut value = serde_json::to_value(LocalReplica::default()).unwrap();
+    value["cleared"] = json!(["UBT-22.04"]);
+    let record: LocalReplica = serde_json::from_value(value).unwrap();
+    assert!(record.kept.is_empty());
+    let reloaded: LocalReplica =
+        serde_json::from_value(serde_json::to_value(&record).unwrap()).unwrap();
+    assert!(
+        reloaded == record,
+        "the retired key never destabilizes the persisted record"
+    );
+    assert!(
+        serde_json::to_value(&record)
+            .unwrap()
+            .get("cleared")
+            .is_none(),
+        "the retired key never comes back"
+    );
+}
+
+#[test]
+fn an_inline_connection_password_keeps_its_endpoint() {
+    use zzclawterm_core::sync_schema::{SyncFieldId, SyncResourceId, SyncValue};
+    let dir = TestTempDir::new("zzclawterm-v4-inline-password-redirect");
+    let store = ConnectionStore::open(dir.path()).unwrap();
+    enable(&store);
+    let mut server = connection();
+    server.auth = Some(
+        serde_json::from_value(
+            json!({"mode":"password","password":"fixture-inline","has_password":true}),
+        )
+        .unwrap(),
     );
     store.save_connection(&server).unwrap();
     let before = store
@@ -835,32 +943,48 @@ fn excluded_inline_password_prevents_remote_parent_deletion_or_secret_redirectio
     target["host"] = json!("other.example");
     next.values.insert(endpoint.key(), SyncValue::new(&target));
     next.values.insert(
-        SyncFieldId::new(resource.clone(), "name").key(),
+        SyncFieldId::new(resource, "name").key(),
         SyncValue::new(&json!("Renamed")),
     );
     replace_projection(&mut proposal, next);
     let applied = store.apply_v4_plan(proposal, "password").unwrap();
     assert!(applied.deferred.contains(&endpoint));
+    assert!(applied.kept.is_empty());
+    let stored = store.get_connection("server").unwrap().unwrap();
+    assert_eq!(stored.name, "Renamed");
     assert_eq!(
-        store.get_connection("server").unwrap().unwrap().name,
-        "Renamed"
-    );
-    assert_eq!(
-        serde_json::to_value(store.get_connection("server").unwrap().unwrap()).unwrap()["host"],
+        serde_json::to_value(&stored).unwrap()["host"],
         "server.example"
     );
+    assert!(
+        stored.auth.and_then(|auth| auth.password).is_some(),
+        "the inline copy stays with the address this device still uses"
+    );
+}
+
+#[test]
+fn a_remote_deletion_never_destroys_a_local_connection_password() {
+    use zzclawterm_core::sync_schema::{SyncFieldId, SyncResourceId};
+    let dir = TestTempDir::new("zzclawterm-v4-excluded-inline-parent");
+    let store = ConnectionStore::open(dir.path()).unwrap();
+    enable(&store);
+    let mut server = connection();
+    server.auth = Some(
+        serde_json::from_value(
+            json!({"mode":"password","password":"fixture-inline","has_password":true}),
+        )
+        .unwrap(),
+    );
+    store.save_connection(&server).unwrap();
     let mut proposal = prepared(&store);
     let mut next = proposal.plan.expected_local.clone();
+    let resource = SyncResourceId::new("connection", "server");
     next.values
         .retain(|key, _| SyncFieldId::from_key(key).unwrap().resource != resource);
     replace_projection(&mut proposal, next);
-    assert!(
-        !store
-            .apply_v4_plan(proposal, "password")
-            .unwrap()
-            .deferred
-            .is_empty()
-    );
+    let applied = store.apply_v4_plan(proposal, "password").unwrap();
+    assert!(!applied.deferred.is_empty());
+    assert!(applied.kept.is_empty());
     assert!(store.get_connection("server").unwrap().is_some());
 }
 
@@ -2042,4 +2166,36 @@ fn unreadable_legacy_replica_aborts_migration_without_marker() {
         .unwrap()
         .unwrap();
     assert_eq!(serde_json::to_vec(&loaded).unwrap(), expected);
+}
+
+#[test]
+fn local_password_binding_defers_authentication_changes_but_applies_other_fields() {
+    use zzclawterm_core::sync_schema::{SyncFieldId, SyncResourceId, SyncValue};
+    let dir = TestTempDir::new("zzclawterm-v4-authentication-binding");
+    let store = ConnectionStore::open(dir.path()).unwrap();
+    enable(&store);
+    let mut server = connection();
+    server.auth = Some(serde_json::from_value(json!({"mode":"password", "password_source":"connection", "password":"synthetic-test-password"})).unwrap());
+    store.save_connection(&server).unwrap();
+    let before = store
+        .load_v4_view("destination", "password", &Default::default())
+        .unwrap();
+    let mut proposal = prepared(&store);
+    let mut next = before.projection.clone();
+    let resource = SyncResourceId::new("connection", "server");
+    let authentication = SyncFieldId::new(resource.clone(), "authentication");
+    let mut changed = next.values[&authentication.key()].decode().unwrap();
+    changed["mode"] = json!("none");
+    next.values
+        .insert(authentication.key(), SyncValue::new(&changed));
+    next.values.insert(
+        SyncFieldId::new(resource, "name").key(),
+        SyncValue::new(&json!("Renamed")),
+    );
+    replace_projection(&mut proposal, next);
+    let applied = store.apply_v4_plan(proposal, "password").unwrap();
+    assert!(applied.deferred.contains(&authentication));
+    let saved = store.get_connection("server").unwrap().unwrap();
+    assert_eq!(saved.name, "Renamed");
+    assert_eq!(saved.auth.unwrap().mode, "password");
 }

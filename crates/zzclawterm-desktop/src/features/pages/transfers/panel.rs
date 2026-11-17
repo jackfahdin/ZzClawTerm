@@ -1,8 +1,8 @@
 use super::TransferBrowserAvailability;
 use crate::features::ZzClawTermApp;
 use crate::models::{
-    TransferBrowserColumnResizeState, TransferBrowserColumnWidths, TransferBrowserSortColumn,
-    TransferBrowserSortDirection, TransferJobRowSnapshot, TransferRenameState,
+    TransferBrowserColumnResizeState, TransferBrowserColumnWidths, TransferJobRowSnapshot,
+    TransferRenameState,
 };
 use crate::theme::ThemePalette;
 use gpui::{
@@ -12,6 +12,7 @@ use gpui::{
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use zzclawterm_core::TransferBrowserViewMode;
+use zzclawterm_files::file_browser::listing::{FileBrowserSortColumn, FileBrowserSortDirection};
 use zzclawterm_files::sftp::SftpFileEntry;
 use zzclawterm_ui::ZzClawInputState;
 
@@ -58,8 +59,8 @@ pub(in crate::features) struct TransferBrowserPresentation {
     pub horizontal_scroll: ScrollHandle,
     pub visited_history: VecDeque<String>,
     pub favorites: VecDeque<String>,
-    pub sort_column: TransferBrowserSortColumn,
-    pub sort_direction: TransferBrowserSortDirection,
+    pub sort_column: FileBrowserSortColumn,
+    pub sort_direction: FileBrowserSortDirection,
     pub column_widths: TransferBrowserColumnWidths,
     pub column_resize: Option<TransferBrowserColumnResizeState>,
     pub selected_remote_path: Option<String>,
@@ -343,6 +344,8 @@ mod tests {
                 app.session.register_session_metadata(
                     "path-test",
                     crate::models::SessionRuntimeMetadata {
+                        confirmed_ssh_runtime_mode: None,
+                        pending_ssh_startup_command: None,
                         ssh_config: None,
                         ssh_multiplex_key: None,
                         source_connection_id: None,
@@ -394,6 +397,8 @@ mod tests {
                             app.session.register_session_metadata(
                                 "path-test",
                                 crate::models::SessionRuntimeMetadata {
+                                    confirmed_ssh_runtime_mode: None,
+                                    pending_ssh_startup_command: None,
                                     ssh_config: Some(config.clone()),
                                     ssh_multiplex_key: None,
                                     source_connection_id: None,
@@ -581,6 +586,8 @@ mod tests {
                         app.session.register_session_metadata(
                             "path-test",
                             crate::models::SessionRuntimeMetadata {
+                                confirmed_ssh_runtime_mode: None,
+                                pending_ssh_startup_command: None,
                                 ssh_config: Some(config.clone()),
                                 ssh_multiplex_key: None,
                                 source_connection_id: None,

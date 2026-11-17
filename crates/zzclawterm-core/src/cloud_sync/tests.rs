@@ -2875,6 +2875,7 @@ fn local_connection(id: &str, name: &str, shell: &str) -> SavedConnection {
         },
         group_id: None,
         description: None,
+        tree_order: None,
         sort_order: 0,
         icon: None,
         icon_auto_detect: None,

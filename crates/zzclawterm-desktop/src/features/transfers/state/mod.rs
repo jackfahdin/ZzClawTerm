@@ -17,11 +17,7 @@ mod browser_logic;
 mod tree;
 pub(in crate::features) use tree::TransferTreePresentation;
 
-#[cfg(test)]
-pub(in crate::features) use self::browser_logic::transfer_browser_entry_is_visible;
-pub(in crate::features) use self::browser_logic::{
-    BrowserFilterCache, BrowserFilterKey, natural_compare_ascii,
-};
+pub(in crate::features) use self::browser_logic::{BrowserFilterCache, BrowserFilterKey};
 mod editor;
 mod preview;
 pub(in crate::features) use self::preview::{PdfPageRequest, TransferPreviewCloseOutcome};
@@ -31,13 +27,12 @@ use crate::models::{
     TransferBrowserColumnResizeState, TransferBrowserColumnWidths, TransferBrowserContextTarget,
     TransferBrowserDragSelectionState, TransferBrowserFavoritesMenuState,
     TransferBrowserNavigationSnapshot, TransferBrowserPathMenuState,
-    TransferBrowserPendingRenameState, TransferBrowserSessionCacheState, TransferBrowserSortColumn,
-    TransferBrowserSortDirection, TransferBrowserUploadMenuState, TransferEditorWorkspaceState,
-    TransferExternalSyncPromptState, TransferHeightResizeState, TransferJobMenuState,
-    TransferJobResult, TransferJobState, TransferJobStatus, TransferMoveState,
-    TransferNewFileState, TransferNewFolderState, TransferNewSymlinkState, TransferPathPromptKind,
-    TransferPreviewWorkspaceState, TransferPropertiesState, TransferRenameState,
-    TransferUnknownFileState,
+    TransferBrowserPendingRenameState, TransferBrowserSessionCacheState,
+    TransferBrowserUploadMenuState, TransferEditorWorkspaceState, TransferExternalSyncPromptState,
+    TransferHeightResizeState, TransferJobMenuState, TransferJobResult, TransferJobState,
+    TransferJobStatus, TransferMoveState, TransferNewFileState, TransferNewFolderState,
+    TransferNewSymlinkState, TransferPathPromptKind, TransferPreviewWorkspaceState,
+    TransferPropertiesState, TransferRenameState, TransferUnknownFileState,
 };
 use crate::thread_owner::BackgroundCleanup;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
@@ -45,6 +40,7 @@ use gpui::{BackgroundExecutor, FocusHandle, Pixels, ScrollHandle, UniformListScr
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
+use zzclawterm_files::file_browser::listing::{FileBrowserSortColumn, FileBrowserSortDirection};
 use zzclawterm_files::sftp::{SftpFileEntry, SftpFileProperties, SftpTransferControl};
 use zzclawterm_files::sftp_transfer_types::{SftpDuplicatePolicy, SftpPathTransferOptions};
 use zzclawterm_ui::{ChildWindowSlot, ZzClawWindowHandle};
@@ -150,8 +146,8 @@ pub(in crate::features) struct TransferBrowserView<'a> {
     pub history_index: usize,
     pub visited_history: &'a VecDeque<String>,
     pub favorites: &'a VecDeque<String>,
-    pub sort_column: TransferBrowserSortColumn,
-    pub sort_direction: TransferBrowserSortDirection,
+    pub sort_column: FileBrowserSortColumn,
+    pub sort_direction: FileBrowserSortDirection,
     pub column_widths: TransferBrowserColumnWidths,
     pub column_resize: &'a Option<TransferBrowserColumnResizeState>,
     pub selected_remote_path: &'a Option<String>,
@@ -200,8 +196,8 @@ pub(super) struct TransferBrowserState {
     #[cfg(test)]
     pub(super) directory_requests: Option<Vec<(String, zzclawterm_files::sftp::RemoteFilePath)>>,
     pub(super) favorites: VecDeque<String>,
-    pub(super) sort_column: TransferBrowserSortColumn,
-    pub(super) sort_direction: TransferBrowserSortDirection,
+    pub(super) sort_column: FileBrowserSortColumn,
+    pub(super) sort_direction: FileBrowserSortDirection,
     pub(super) column_widths: TransferBrowserColumnWidths,
     pub(super) column_resize: Option<TransferBrowserColumnResizeState>,
     pub(super) selected_remote_path: Option<String>,
@@ -418,8 +414,8 @@ impl TransferFeatureState {
                 #[cfg(test)]
                 directory_requests: None,
                 favorites: VecDeque::new(),
-                sort_column: TransferBrowserSortColumn::Name,
-                sort_direction: TransferBrowserSortDirection::Ascending,
+                sort_column: FileBrowserSortColumn::Name,
+                sort_direction: FileBrowserSortDirection::Ascending,
                 column_widths: TransferBrowserColumnWidths::default(),
                 column_resize: None,
                 selected_remote_path: None,

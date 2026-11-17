@@ -1,4 +1,4 @@
-use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::collections::{BTreeMap, HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
@@ -72,6 +72,18 @@ pub struct TerminalKeywordHighlightPrecomputeStats {
 const MAX_KEYWORD_WRAPPED_GROUP_ROWS: usize = 512;
 const MAX_KEYWORD_WRAPPED_GROUP_BYTES: usize = 256 * 1024;
 
+#[cfg(test)]
+thread_local! {
+    static KEYWORD_GROUP_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn count_keyword_group_scans<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+    let before = KEYWORD_GROUP_SCANS.get();
+    let result = operation();
+    (result, KEYWORD_GROUP_SCANS.get() - before)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum TerminalKeywordRowReuseKey {
     Single { revision: u64, semantic_key: u64 },
@@ -86,15 +98,18 @@ pub struct TerminalKeywordHighlightSnapshot {
     alternate_screen: bool,
     display_offset: usize,
     scrollback_len: usize,
-    row_revisions: Vec<u64>,
-    wrapped_flags: Vec<bool>,
-    row_reuse_keys: Vec<Option<TerminalKeywordRowReuseKey>>,
-    known_rows: Vec<bool>,
-    known_prefix: Vec<usize>,
-    rows: Vec<Option<Arc<Vec<TerminalKeywordRange>>>>,
-    source_rows: Vec<Option<Arc<TerminalSnapshotRow>>>,
+    row_count: usize,
+    records: BTreeMap<usize, TerminalKeywordRowRecord>,
+    covered_ranges: Vec<Range<usize>>,
     source_buffer: Arc<[Arc<TerminalSnapshotRow>]>,
+    projection: Option<Arc<zzclawterm_terminal::display_rows::TerminalDisplayRows>>,
     rows_by_reuse_key: HashMap<TerminalKeywordRowReuseKey, Option<Arc<Vec<TerminalKeywordRange>>>>,
+}
+
+struct TerminalKeywordRowRecord {
+    source: Arc<TerminalSnapshotRow>,
+    reuse_key: Option<TerminalKeywordRowReuseKey>,
+    ranges: Option<Arc<Vec<TerminalKeywordRange>>>,
 }
 
 impl std::fmt::Debug for TerminalKeywordHighlightSnapshot {
@@ -191,13 +206,13 @@ impl TerminalKeywordHighlightSnapshot {
     }
 
     pub fn known_row_count(&self) -> usize {
-        self.known_rows.iter().filter(|known| **known).count()
+        self.records.len()
     }
 
     pub fn range_count(&self) -> usize {
-        self.rows
-            .iter()
-            .filter_map(|ranges| ranges.as_ref())
+        self.records
+            .values()
+            .filter_map(|record| record.ranges.as_ref())
             .map(|ranges| ranges.len())
             .sum()
     }
@@ -217,6 +232,17 @@ impl TerminalKeywordHighlightSnapshot {
         rows: Range<usize>,
     ) -> bool {
         self.matches_snapshot_rows_skipping(snapshot, palette, rows, None)
+    }
+
+    pub fn matches_snapshot_ranges(
+        &self,
+        snapshot: &TerminalSnapshot,
+        palette: zzclawterm_ui::ThemePalette,
+        ranges: &[Range<usize>],
+    ) -> bool {
+        ranges
+            .iter()
+            .all(|range| self.matches_snapshot_rows(snapshot, palette, range.clone()))
     }
 
     /// Like [`Self::matches_snapshot_rows`], but ignores one row.
@@ -242,7 +268,16 @@ impl TerminalKeywordHighlightSnapshot {
             // its immutable frame directly without rebuilding all group keys
             // on the UI thread.
             return Arc::ptr_eq(&self.source_buffer, &snapshot.row_data)
-                && self.known_prefix[end] - self.known_prefix[start] == end - start;
+                && match (&self.projection, &snapshot.display_rows) {
+                    (Some(old), Some(new)) => Arc::ptr_eq(old, new),
+                    (None, None) => true,
+                    _ => false,
+                }
+                && (start == end
+                    || self
+                        .covered_ranges
+                        .iter()
+                        .any(|range| range.start <= start && range.end >= end));
         }
         let reuse_keys = terminal_keyword_row_reuse_keys_for_rows(snapshot, start..end);
         (start..end).all(|row| {
@@ -274,14 +309,17 @@ impl TerminalKeywordHighlightSnapshot {
         reuse_key: Option<TerminalKeywordRowReuseKey>,
     ) -> Option<TerminalKeywordHighlightLookup<'_>> {
         snapshot.row(row)?;
-        let reuse_key = if snapshot.logical_lines.is_some() {
+        // Fold projections also use segment-based painting, which supplies no
+        // per-row key. Recover the worker's key for the exact projected frame,
+        // including ordinary wrapped snapshots without a logical-line index.
+        let reuse_key = if snapshot.logical_lines.is_some() || snapshot.display_rows.is_some() {
             self.frame_row_reuse_key(row, snapshot).or(reuse_key)
         } else {
             reuse_key
         };
         if self.has_row_at_with_reuse_key(row, snapshot, reuse_key) {
             return Some(TerminalKeywordHighlightLookup::Current(
-                self.rows.get(row)?.as_ref(),
+                self.records.get(&row)?.ranges.as_ref(),
             ));
         }
         let reuse_key = reuse_key?;
@@ -297,8 +335,13 @@ impl TerminalKeywordHighlightSnapshot {
     ) -> Option<TerminalKeywordRowReuseKey> {
         (self.cursor_row == snapshot.cursor.row
             && self.alternate_screen == snapshot.history.alternate_screen
-            && Arc::ptr_eq(&self.source_buffer, &snapshot.row_data))
-        .then(|| self.row_reuse_keys.get(row).copied().flatten())
+            && Arc::ptr_eq(&self.source_buffer, &snapshot.row_data)
+            && match (&self.projection, &snapshot.display_rows) {
+                (Some(old), Some(new)) => Arc::ptr_eq(old, new),
+                (None, None) => true,
+                _ => false,
+            })
+        .then(|| self.records.get(&row).and_then(|record| record.reuse_key))
         .flatten()
     }
 
@@ -318,18 +361,17 @@ impl TerminalKeywordHighlightSnapshot {
         snapshot: &TerminalSnapshot,
         reuse_key: Option<TerminalKeywordRowReuseKey>,
     ) -> Option<TerminalKeywordHighlightLookup<'_>> {
-        if self.display_offset != snapshot.display_offset
-            || self.row_revisions.len() != snapshot.row_count()
+        if self.display_offset != snapshot.display_offset || self.row_count != snapshot.row_count()
         {
             return None;
         }
         let snapshot_row = snapshot.row(row)?;
         if self.has_row_at_with_reuse_key(row, snapshot, reuse_key) {
             return Some(TerminalKeywordHighlightLookup::Current(
-                self.rows.get(row)?.as_ref(),
+                self.records.get(&row)?.ranges.as_ref(),
             ));
         }
-        let source = self.source_rows.get(row)?.as_ref()?;
+        let source = &self.records.get(&row)?.source;
         let (
             Some(TerminalKeywordRowReuseKey::Single {
                 semantic_key: old_context,
@@ -339,7 +381,10 @@ impl TerminalKeywordHighlightSnapshot {
                 semantic_key: new_context,
                 ..
             }),
-        ) = (self.row_reuse_keys.get(row).copied().flatten(), reuse_key)
+        ) = (
+            self.records.get(&row).and_then(|record| record.reuse_key),
+            reuse_key,
+        )
         else {
             return None;
         };
@@ -353,12 +398,15 @@ impl TerminalKeywordHighlightSnapshot {
             || row_semantic_key(source) != row_semantic_key(snapshot_row)
             || source.wrapped
             || snapshot_row.wrapped
-            || self.wrapped_flags.get(row + 1).copied().unwrap_or(false)
+            || self
+                .source_buffer
+                .get(row + 1)
+                .is_some_and(|row| row.wrapped)
             || snapshot.row(row + 1).is_some_and(|row| row.wrapped)
         {
             return None;
         }
-        let ranges = self.rows.get(row)?.as_ref()?;
+        let ranges = self.records.get(&row)?.ranges.as_ref()?;
         let end_col = ranges.last()?.end_col;
         let unchanged_cols = source
             .cells
@@ -386,10 +434,11 @@ impl TerminalKeywordHighlightSnapshot {
         let Some(snapshot_row) = snapshot.row(row) else {
             return false;
         };
-        self.known_rows.get(row).copied().unwrap_or(false)
-            && self.row_revisions.get(row).copied() == Some(snapshot_row.revision)
-            && self.wrapped_flags.get(row).copied() == Some(snapshot_row.wrapped)
-            && self.row_reuse_keys.get(row).and_then(|key| *key) == reuse_key
+        self.records.get(&row).is_some_and(|record| {
+            record.source.revision == snapshot_row.revision
+                && record.source.wrapped == snapshot_row.wrapped
+                && record.reuse_key == reuse_key
+        })
     }
 }
 
@@ -491,17 +540,79 @@ pub fn precompute_terminal_keyword_highlights_for_rows_with_stats_and_cancel(
         snapshot,
         highlighter,
         previous,
+        &[requested_rows],
+        false,
+        cancelled,
+    )
+}
+
+/// Prepare disjoint visible ranges in one worker and one bounded result.
+pub fn precompute_terminal_keyword_highlights_for_ranges_with_stats_and_cancel(
+    snapshot: &TerminalSnapshot,
+    highlighter: &TerminalKeywordHighlighter,
+    previous: Option<&TerminalKeywordHighlightSnapshot>,
+    requested_rows: &[Range<usize>],
+    cancelled: impl FnMut() -> bool,
+) -> Option<(
+    TerminalKeywordHighlightSnapshot,
+    TerminalKeywordHighlightPrecomputeStats,
+)> {
+    precompute_keyword_rows(
+        snapshot,
+        highlighter,
+        previous,
         requested_rows,
         false,
         cancelled,
     )
 }
 
+/// Expand soft lines, but never reconnect text across a folded output block.
+pub fn terminal_keyword_highlight_expanded_ranges(
+    snapshot: &TerminalSnapshot,
+    requested: &[Range<usize>],
+) -> Vec<Range<usize>> {
+    let source_start = snapshot
+        .total_rows
+        .saturating_sub(snapshot.display_offset)
+        .saturating_sub(snapshot.row_count());
+    let visible = |range: Range<usize>| -> Vec<Range<usize>> {
+        let start = range.start.min(snapshot.row_count());
+        let end = range.end.min(snapshot.row_count()).max(start);
+        if let Some(projection) = snapshot.display_rows.as_ref() {
+            projection
+                .visible_source_ranges(source_start + start..source_start + end)
+                .map(|range| range.start - source_start..range.end - source_start)
+                .collect()
+        } else if start < end {
+            std::iter::once(start..end).collect()
+        } else {
+            Vec::new()
+        }
+    };
+    let mut ranges: Vec<Range<usize>> = requested
+        .iter()
+        .cloned()
+        .flat_map(&visible)
+        .flat_map(|range| visible(terminal_keyword_highlight_expanded_rows(snapshot, range)))
+        .collect();
+    ranges.sort_unstable_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if let Some(last) = merged.last_mut().filter(|last| last.end >= range.start) {
+            last.end = last.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+    merged
+}
+
 fn precompute_keyword_rows(
     snapshot: &TerminalSnapshot,
     highlighter: &TerminalKeywordHighlighter,
     previous: Option<&TerminalKeywordHighlightSnapshot>,
-    requested_rows: Range<usize>,
+    requested_rows: &[Range<usize>],
     assume_input: bool,
     mut cancelled: impl FnMut() -> bool,
 ) -> Option<(
@@ -509,98 +620,94 @@ fn precompute_keyword_rows(
     TerminalKeywordHighlightPrecomputeStats,
 )> {
     let previous = previous.filter(|previous| previous.rules_key == highlighter.rules_key);
-    let requested_rows = terminal_keyword_highlight_expanded_rows(snapshot, requested_rows);
+    let requested_rows = terminal_keyword_highlight_expanded_ranges(snapshot, requested_rows);
     let mut stats = TerminalKeywordHighlightPrecomputeStats {
-        requested_rows: requested_rows.len(),
+        requested_rows: requested_rows.iter().map(Range::len).sum(),
         ..TerminalKeywordHighlightPrecomputeStats::default()
     };
-    let mut known_rows = vec![false; snapshot.row_count()];
-    let mut rows: Vec<Option<Arc<Vec<TerminalKeywordRange>>>> = vec![None; snapshot.row_count()];
-    let row_reuse_keys = terminal_keyword_row_reuse_keys(snapshot);
-
-    let mut row = 0;
-    while row < snapshot.row_count() {
-        if cancelled() {
-            return None;
-        }
-        // Soft-wrapped screen rows are one logical line; hard breaks must never
-        // join unrelated commands or log records. Only pathological lines degrade.
-        let group = terminal_keyword_wrapped_group_bounds(snapshot, row);
-        let group_range = group.start..group.end;
-        // One snapshot holds every row; the live input row is simply parsed with
-        // the input context instead of a separate overlay snapshot.
-        let group_is_input = group_range.contains(&snapshot.cursor.row)
-            && terminal_keyword_group_is_input(&snapshot.rows()[group_range.clone()]);
-        let requested = group.start < requested_rows.end && group.end > requested_rows.start;
-        let group_keys = row_reuse_keys
-            .get(group_range.clone())
-            .and_then(|keys| keys.iter().copied().collect::<Option<Vec<_>>>());
-        if let Some(keys) = group_keys.as_ref()
-            && let Some(previous) = previous
-            && keys
-                .iter()
-                .all(|key| previous.rows_by_reuse_key.contains_key(key))
-        {
-            for (idx, key) in group_range.clone().zip(keys.iter()) {
-                known_rows[idx] = true;
-                rows[idx] = previous.rows_by_reuse_key.get(key).cloned().flatten();
-                stats.reused_rows = stats.reused_rows.saturating_add(1);
+    let mut records = BTreeMap::new();
+    for requested in &requested_rows {
+        let mut row = requested.start;
+        while row < requested.end {
+            if cancelled() {
+                return None;
             }
-            row = group.end;
-            continue;
-        }
-        if !requested {
-            row = group.end;
-            continue;
-        }
-
-        let group_rows = if group.oversized {
-            stats.oversized_wrapped_groups = stats.oversized_wrapped_groups.saturating_add(1);
-            stats.degraded_rows = stats.degraded_rows.saturating_add(group_range.len());
-            group_range
-                .clone()
-                .map(|row| {
+            let group = terminal_keyword_wrapped_group_bounds(snapshot, row);
+            let group_range = row..group.end.min(requested.end);
+            let group_keys =
+                terminal_keyword_row_reuse_keys_for_rows(snapshot, group_range.clone());
+            let reused = previous.filter(|previous| {
+                group_keys
+                    .iter()
+                    .all(|key| key.is_some_and(|key| previous.rows_by_reuse_key.contains_key(&key)))
+            });
+            let group_rows = if let Some(previous) = reused {
+                stats.reused_rows += group_range.len();
+                group_keys
+                    .iter()
+                    .map(|key| {
+                        key.and_then(|key| previous.rows_by_reuse_key.get(&key).cloned())
+                            .flatten()
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                let group_is_input = group_range.contains(&snapshot.cursor.row)
+                    && terminal_keyword_group_is_input(&snapshot.rows()[group_range.clone()]);
+                let ranges = if group.oversized {
+                    stats.oversized_wrapped_groups += 1;
+                    stats.degraded_rows += group_range.len();
+                    group_range
+                        .clone()
+                        .map(|row| {
+                            terminal_keyword_ranges_for_wrapped_group(
+                                snapshot,
+                                row..row + 1,
+                                highlighter,
+                                Some(&mut stats),
+                                true,
+                                assume_input
+                                    || (row == snapshot.cursor.row
+                                        && terminal_keyword_group_is_input(
+                                            &snapshot.rows()[row..row + 1],
+                                        )),
+                            )
+                            .into_iter()
+                            .next()
+                            .unwrap_or_default()
+                        })
+                        .collect()
+                } else {
                     terminal_keyword_ranges_for_wrapped_group(
                         snapshot,
-                        row..row.saturating_add(1),
+                        group_range.clone(),
                         highlighter,
                         Some(&mut stats),
-                        true,
-                        assume_input
-                            || (row == snapshot.cursor.row
-                                && terminal_keyword_group_is_input(&snapshot.rows()[row..row + 1])),
+                        false,
+                        assume_input || group_is_input,
                     )
+                };
+                ranges
                     .into_iter()
-                    .next()
-                    .unwrap_or_default()
-                })
-                .collect()
-        } else {
-            terminal_keyword_ranges_for_wrapped_group(
-                snapshot,
-                group_range.clone(),
-                highlighter,
-                Some(&mut stats),
-                false,
-                assume_input || group_is_input,
-            )
-        };
-        for (idx, ranges) in group_range.zip(group_rows) {
-            known_rows[idx] = true;
-            rows[idx] = (!ranges.is_empty()).then(|| Arc::new(ranges));
+                    .map(|ranges| (!ranges.is_empty()).then(|| Arc::new(ranges)))
+                    .collect()
+            };
+            for ((idx, reuse_key), ranges) in group_range.clone().zip(group_keys).zip(group_rows) {
+                records.insert(
+                    idx,
+                    TerminalKeywordRowRecord {
+                        source: snapshot.rows()[idx].clone(),
+                        reuse_key,
+                        ranges,
+                    },
+                );
+            }
+            row = group_range.end;
         }
-        row = group.end;
     }
-
-    let rows_by_reuse_key = (0..snapshot.row_count())
-        .filter(|row| known_rows[*row])
-        .filter_map(|row| row_reuse_keys[row].map(|key| (key, rows[row].clone())))
+    let rows_by_reuse_key = records
+        .values()
+        .filter_map(|record| record.reuse_key.map(|key| (key, record.ranges.clone())))
         .collect();
-    let mut known_prefix = Vec::with_capacity(known_rows.len() + 1);
-    known_prefix.push(0);
-    for known in &known_rows {
-        known_prefix.push(known_prefix.last().copied().unwrap_or(0) + usize::from(*known));
-    }
     let snapshot = TerminalKeywordHighlightSnapshot {
         rules_key: highlighter.rules_key,
         cols: snapshot.cols,
@@ -608,18 +715,11 @@ fn precompute_keyword_rows(
         alternate_screen: snapshot.history.alternate_screen,
         display_offset: snapshot.display_offset,
         scrollback_len: snapshot.scrollback_len,
-        row_revisions: snapshot.rows().iter().map(|row| row.revision).collect(),
-        wrapped_flags: snapshot.rows().iter().map(|row| row.wrapped).collect(),
-        row_reuse_keys,
-        known_rows,
-        known_prefix,
-        source_rows: rows
-            .iter()
-            .zip(snapshot.rows())
-            .map(|(ranges, row)| ranges.as_ref().map(|_| row.clone()))
-            .collect(),
+        row_count: snapshot.row_count(),
+        records,
+        covered_ranges: requested_rows,
         source_buffer: snapshot.row_data.clone(),
-        rows,
+        projection: snapshot.display_rows.clone(),
         rows_by_reuse_key,
     };
     stats.known_rows = snapshot.known_row_count();
@@ -647,6 +747,18 @@ fn terminal_keyword_wrapped_group_bounds(
     snapshot: &TerminalSnapshot,
     row: usize,
 ) -> TerminalKeywordWrappedGroup {
+    #[cfg(test)]
+    KEYWORD_GROUP_SCANS.set(KEYWORD_GROUP_SCANS.get() + 1);
+    let source_start = snapshot
+        .total_rows
+        .saturating_sub(snapshot.display_offset)
+        .saturating_sub(snapshot.row_count());
+    let hidden = |row: usize| {
+        snapshot
+            .display_rows
+            .as_ref()
+            .is_some_and(|projection| projection.hidden(source_start + row))
+    };
     let mut start = row.min(snapshot.row_count());
     let mut rows = 1usize;
     let mut bytes = snapshot
@@ -654,6 +766,7 @@ fn terminal_keyword_wrapped_group_bounds(
         .map(terminal_keyword_row_bytes)
         .unwrap_or(0);
     while start > 0
+        && !hidden(start - 1)
         && snapshot.row(start).is_some_and(|row| row.wrapped)
         && rows < MAX_KEYWORD_WRAPPED_GROUP_ROWS
         && bytes < MAX_KEYWORD_WRAPPED_GROUP_BYTES
@@ -667,7 +780,8 @@ fn terminal_keyword_wrapped_group_bounds(
                 .unwrap_or(0),
         );
     }
-    let truncated_before = start > 0 && snapshot.row(start).is_some_and(|row| row.wrapped);
+    let truncated_before =
+        start > 0 && !hidden(start - 1) && snapshot.row(start).is_some_and(|row| row.wrapped);
     if truncated_before {
         start = row.min(snapshot.row_count());
         rows = 1;
@@ -678,6 +792,7 @@ fn terminal_keyword_wrapped_group_bounds(
     }
     let mut end = start.saturating_add(1).min(snapshot.row_count());
     while end < snapshot.row_count()
+        && !hidden(end)
         && snapshot.row(end).is_some_and(|row| row.wrapped)
         && rows < MAX_KEYWORD_WRAPPED_GROUP_ROWS
         && bytes < MAX_KEYWORD_WRAPPED_GROUP_BYTES
@@ -693,8 +808,9 @@ fn terminal_keyword_wrapped_group_bounds(
         rows = rows.saturating_add(1);
         end += 1;
     }
-    let truncated_after =
-        end < snapshot.row_count() && snapshot.row(end).is_some_and(|row| row.wrapped);
+    let truncated_after = end < snapshot.row_count()
+        && !hidden(end)
+        && snapshot.row(end).is_some_and(|row| row.wrapped);
     TerminalKeywordWrappedGroup {
         start,
         end,
@@ -750,6 +866,7 @@ pub(super) fn terminal_keyword_row_reuse_key(
     })
 }
 
+#[cfg(test)]
 pub(super) fn terminal_keyword_row_reuse_keys(
     snapshot: &TerminalSnapshot,
 ) -> Vec<Option<TerminalKeywordRowReuseKey>> {
@@ -2072,7 +2189,12 @@ mod tests {
         assert!(
             highlights.matches_snapshot(&snapshot, zzclawterm_ui::theme_palette("github-light"),)
         );
-        assert!(highlights.rows.iter().skip(1).all(Option::is_none));
+        assert!(
+            highlights
+                .records
+                .range(1..)
+                .all(|(_, record)| record.ranges.is_none())
+        );
     }
 
     #[test]
@@ -2410,7 +2532,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_keyword_snapshot_keeps_unparsed_rows_unknown_and_accumulates() {
+    fn partial_keyword_snapshot_keeps_only_requested_rows() {
         let mut snapshot = TerminalScreen::default().snapshot();
         for (row, signature) in [(0, 41), (1, 42)] {
             set_snapshot_row(&mut snapshot, row, format!("row {row} ERROR"), signature);
@@ -2450,9 +2572,10 @@ mod tests {
             Some(&first),
             1..2,
         );
-        assert!(second.lookup(0, &snapshot).is_some());
+        assert!(second.lookup(0, &snapshot).is_none());
         assert!(second.lookup(1, &snapshot).is_some());
-        assert!(second.matches_snapshot_rows(&snapshot, palette, 0..2));
+        assert!(second.matches_snapshot_rows(&snapshot, palette, 1..2));
+        assert!(!second.matches_snapshot_rows(&snapshot, palette, 0..2));
     }
 
     #[test]
@@ -2568,7 +2691,10 @@ mod tests {
         let palette = zzclawterm_ui::theme_palette("github-dark");
         let first_highlights =
             precompute_terminal_keyword_highlights(&first_snapshot, &highlighter, palette, None);
-        let first_ranges = first_highlights.rows[0].as_ref().expect("first ranges");
+        let first_ranges = first_highlights.records[&0]
+            .ranges
+            .as_ref()
+            .expect("first ranges");
 
         let second_highlights = precompute_terminal_keyword_highlights(
             &second_snapshot,
@@ -2576,7 +2702,10 @@ mod tests {
             palette,
             Some(&first_highlights),
         );
-        let second_ranges = second_highlights.rows[5].as_ref().expect("second ranges");
+        let second_ranges = second_highlights.records[&5]
+            .ranges
+            .as_ref()
+            .expect("second ranges");
 
         assert!(Arc::ptr_eq(first_ranges, second_ranges));
     }
@@ -2605,9 +2734,9 @@ mod tests {
             let highlights =
                 precompute_terminal_keyword_highlights(&snapshot, &highlighter, palette, None);
             let highlighted_cells: usize = highlights
-                .rows
-                .iter()
-                .flatten()
+                .records
+                .values()
+                .filter_map(|record| record.ranges.as_ref())
                 .flat_map(|ranges| ranges.iter())
                 .map(|range| range.end_col - range.start_col)
                 .sum();
@@ -2646,9 +2775,9 @@ mod tests {
                 previous.as_ref(),
             );
             let highlighted_cells: usize = highlights
-                .rows
-                .iter()
-                .flatten()
+                .records
+                .values()
+                .filter_map(|record| record.ranges.as_ref())
                 .flat_map(|ranges| ranges.iter())
                 .map(|range| range.end_col - range.start_col)
                 .sum();
@@ -3039,5 +3168,174 @@ mod configuration_tests {
                 );
             }
         }
+    }
+
+    fn folded_output_snapshot(
+        hidden_rows: usize,
+        logical: bool,
+    ) -> (zzclawterm_terminal::TerminalSnapshot, std::time::Duration) {
+        let mut screen = TerminalScreen::new(24, 8);
+        screen.set_scrollback_limit(hidden_rows + 100);
+        screen.set_logical_line_snapshots(logical);
+        screen.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07run\r\n\x1b]133;C\x07");
+        screen.advance("hidden ERROR\r\n".repeat(hidden_rows).as_bytes());
+        screen.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07ERROR");
+        let id = screen.snapshot().command_blocks[0].id;
+        screen.set_collapsed_commands([id].into());
+        let started = std::time::Instant::now();
+        let snapshot = screen.viewport_snapshot_with_window(0, hidden_rows + 10, 0);
+        (snapshot, started.elapsed())
+    }
+
+    #[test]
+    fn folded_paint_lookup_retains_highlights_without_a_caller_row_key() {
+        let rules = [zzclawterm_core::ResolvedKeywordHighlightRule {
+            id: "error".into(),
+            name: "error".into(),
+            patterns: vec!["ERROR".into()],
+            color: "#ff2244".into(),
+            enabled: true,
+        }];
+        let highlighter = compile_terminal_keyword_highlighter(&rules, Default::default());
+        let palette = zzclawterm_ui::theme_palette("github-dark");
+        for logical in [false, true] {
+            let mut screen = TerminalScreen::new(40, 12);
+            screen.set_logical_line_snapshots(logical);
+            screen.advance(b"visible ERROR\r\n\x1b]133;A\x07$ \x1b]133;B\x07run\r\n\x1b]133;C\x07hidden ERROR\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+            let id = screen.snapshot().command_blocks[0].id;
+            screen.set_collapsed_commands([id].into());
+            let snapshot = screen.snapshot();
+            assert!(snapshot.display_rows.is_some());
+            let row = snapshot
+                .rows()
+                .iter()
+                .position(|row| row.text.contains("visible ERROR"))
+                .unwrap();
+            let result =
+                precompute_terminal_keyword_highlights(&snapshot, &highlighter, palette, None);
+            // Segment-based painting omits the caller key in both wrap modes.
+            let lookup = result
+                .lookup_with_reuse_key(row, &snapshot, None)
+                .expect("folded paint must find the precomputed row");
+            assert!(lookup.ranges().is_some(), "logical={logical}");
+        }
+    }
+
+    #[test]
+    fn folded_highlight_work_and_storage_do_not_scale_with_hidden_output() {
+        let rules = [zzclawterm_core::ResolvedKeywordHighlightRule {
+            id: "error".into(),
+            name: "error".into(),
+            patterns: vec!["ERROR".into()],
+            color: "#ff2244".into(),
+            enabled: true,
+        }];
+        let highlighter = compile_terminal_keyword_highlighter(&rules, Default::default());
+        for logical in [false, true] {
+            let mut baseline = None;
+            for hidden in [1_000, 100_000] {
+                let (snapshot, build_elapsed) = folded_output_snapshot(hidden, logical);
+                let ranges = super::terminal_keyword_highlight_expanded_ranges(
+                    &snapshot,
+                    std::slice::from_ref(&(0..snapshot.row_count())),
+                );
+                let mut visited_groups = 0;
+                let started = std::time::Instant::now();
+                let (result, stats) =
+                    super::precompute_terminal_keyword_highlights_for_ranges_with_stats_and_cancel(
+                        &snapshot,
+                        &highlighter,
+                        None,
+                        &ranges,
+                        || {
+                            visited_groups += 1;
+                            false
+                        },
+                    )
+                    .unwrap();
+                eprintln!(
+                    "folded logical={logical} hidden={hidden} snapshot={build_elapsed:?} highlight={:?} rows={} bytes={}",
+                    started.elapsed(),
+                    stats.known_rows,
+                    stats.processed_bytes
+                );
+                assert!(result.has_row(snapshot.cursor.row, &snapshot));
+                assert!(
+                    result
+                        .lookup(snapshot.cursor.row, &snapshot)
+                        .unwrap()
+                        .ranges()
+                        .is_some()
+                );
+                assert!(stats.known_rows < 10);
+                let work = (
+                    visited_groups,
+                    stats.processed_bytes,
+                    stats.requested_rows,
+                    result.records.len(),
+                    result.rows_by_reuse_key.len(),
+                );
+                if let Some(baseline) = baseline {
+                    assert_eq!(work, baseline);
+                }
+                baseline = Some(work);
+                assert!(result.matches_snapshot_ranges(
+                    &snapshot,
+                    zzclawterm_ui::theme_palette("github-dark"),
+                    &ranges
+                ));
+                let (_, reused) =
+                    super::precompute_terminal_keyword_highlights_for_ranges_with_stats_and_cancel(
+                        &snapshot,
+                        &highlighter,
+                        Some(&result),
+                        &ranges,
+                        || false,
+                    )
+                    .unwrap();
+                assert_eq!(reused.reused_rows, stats.known_rows);
+                assert_eq!(reused.processed_bytes, 0);
+                assert!(
+                    super::precompute_terminal_keyword_highlights_for_ranges_with_stats_and_cancel(
+                        &snapshot,
+                        &highlighter,
+                        None,
+                        &ranges,
+                        || true,
+                    )
+                    .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_highlights_drop_unrequested_records_and_keep_known_empty_rows() {
+        let snapshot = TerminalScreen::new(20, 24).snapshot();
+        let highlighter = compile_terminal_keyword_highlighter(&[], Default::default());
+        let (first, _) =
+            super::precompute_terminal_keyword_highlights_for_ranges_with_stats_and_cancel(
+                &snapshot,
+                &highlighter,
+                None,
+                &[0..1, 20..21],
+                || false,
+            )
+            .unwrap();
+        assert_eq!(first.known_row_count(), 2);
+        assert!(first.has_row(0, &snapshot));
+        assert!(!first.has_row(1, &snapshot));
+        let (second, _) =
+            super::precompute_terminal_keyword_highlights_for_ranges_with_stats_and_cancel(
+                &snapshot,
+                &highlighter,
+                Some(&first),
+                std::slice::from_ref(&(20..21)),
+                || false,
+            )
+            .unwrap();
+        assert_eq!(second.known_row_count(), 1);
+        assert!(!second.has_row(0, &snapshot));
+        assert!(second.lookup(20, &snapshot).unwrap().is_known_empty());
     }
 }

@@ -27,10 +27,12 @@ mod kitty_payload;
 mod line_numbers;
 pub mod logical_lines;
 pub mod navigation;
+pub mod output;
 pub mod protocol;
 pub mod recording_sanitizer;
 mod reflow_timestamps;
 mod scroll_region;
+pub mod search;
 pub mod selection;
 mod signature;
 mod sixel;
@@ -327,6 +329,7 @@ pub struct TerminalSnapshotMeta {
     pub scrollback_len: usize,
     pub total_rows: usize,
     pub display_offset: usize,
+    pub file_context: Option<Arc<zzclawterm_core::terminal::file_context::ShellFileContext>>,
     pub shell_input_anchor: Option<ShellInputAnchor>,
     pub command_navigation_target: Option<TerminalLineId>,
     pub command_navigation_revision: u64,
@@ -369,6 +372,7 @@ pub struct TerminalSnapshot {
     pub total_rows: usize,
     /// Alacritty display offset represented by this snapshot.
     pub display_offset: usize,
+    pub file_context: Option<Arc<zzclawterm_core::terminal::file_context::ShellFileContext>>,
     pub shell_input_anchor: Option<ShellInputAnchor>,
     pub command_navigation_target: Option<TerminalLineId>,
     pub command_navigation_revision: u64,
@@ -426,6 +430,44 @@ impl TerminalSnapshot {
         Some(snapshot)
     }
 
+    /// Shared rows must describe the same content.
+    ///
+    /// History coordinates and absolute row keys do not move when output
+    /// repaints the live viewport in place: a cleared screen followed by a new
+    /// prompt keeps `scrollback_len`, `scroll_count` and `total_rows` intact.
+    /// A cached snapshot can therefore still look current while its rows
+    /// predate the latest output. Rows outside either window are not
+    /// comparable; rows both snapshots carry must match.
+    pub fn content_agrees_with(&self, live: &TerminalSnapshot) -> bool {
+        if self.cols != live.cols {
+            return false;
+        }
+        let Some((self_start, self_end)) = snapshot_window::terminal_snapshot_absolute_window(self)
+        else {
+            return true;
+        };
+        let Some((live_start, live_end)) = snapshot_window::terminal_snapshot_absolute_window(live)
+        else {
+            return true;
+        };
+        let start = self_start.max(live_start);
+        let end = self_end.min(live_end);
+        if start >= end {
+            return true;
+        }
+        (start..end).all(|absolute| {
+            match (
+                self.row(absolute - self_start),
+                live.row(absolute - live_start),
+            ) {
+                (Some(ours), Some(theirs)) => {
+                    ours.revision == theirs.revision && ours.signature == theirs.signature
+                }
+                _ => false,
+            }
+        })
+    }
+
     /// Presentation-only displacement; protocol and selection coordinates stay intact.
     pub fn leading_cleared_rows(&self, viewport_anchor_row: usize) -> usize {
         let count = self
@@ -460,6 +502,7 @@ impl TerminalSnapshot {
             scrollback_len: meta.scrollback_len,
             total_rows: meta.total_rows,
             display_offset: meta.display_offset,
+            file_context: meta.file_context,
             shell_input_anchor: meta.shell_input_anchor,
             command_navigation_target: meta.command_navigation_target,
             command_navigation_revision: meta.command_navigation_revision,
@@ -786,6 +829,7 @@ pub struct TerminalCore {
     #[cfg(feature = "benchmark")]
     benchmark_counts: (u64, u64),
     parser: ansi::Processor,
+    file_context_filter: zzclawterm_core::terminal::file_context::filter::FileContextFilter,
     scroll_region_tracker: scroll_region::ScrollRegionTracker,
     term: Term<ZzClawTermEventProxy>,
     term_config: Config,
@@ -974,6 +1018,7 @@ impl TerminalCore {
         let consumed_reset_generation = term.reset_generation();
         Self {
             parser: ansi::Processor::new(),
+            file_context_filter: Default::default(),
             #[cfg(feature = "benchmark")]
             benchmark_counts: (0, 0),
             scroll_region_tracker: scroll_region::ScrollRegionTracker::new(rows),
@@ -1772,6 +1817,9 @@ impl TerminalCore {
     /// Eviction counters retain wrap endings even when a batch exceeds history.
     /// Bound parser latency independently of the configured scrollback capacity.
     fn advance_parser_chunks(&mut self, data: &[u8]) {
+        // The sidecar has already consumed private evidence in wire order.
+        // Generic VTE logs unknown OSC payloads, so never pass it this metadata.
+        let data = self.file_context_filter.filter(data);
         for part in data.chunks(16 * 1024) {
             self.parser.advance(&mut self.term, part);
             self.drain_alacritty_events();
@@ -1831,6 +1879,7 @@ impl TerminalCore {
             self.shell_integration_enabled(),
             &self.snapshot_row_cache,
         );
+        snapshot.file_context = self.sidecar.file_context.clone();
         snapshot.images = self.graphics.viewport_images_for_screen(
             self.active_graphics_screen(),
             self.active_line_state().logical_origin,
@@ -1926,6 +1975,7 @@ impl TerminalCore {
             self.shell_integration_enabled(),
             &self.snapshot_row_cache,
         );
+        snapshot.file_context = self.sidecar.file_context.clone();
         snapshot.logical_lines = logical_lines;
         snapshot.display_rows = display_rows;
         snapshot.images = self
@@ -3076,6 +3126,7 @@ fn snapshot_window_from_term(
                 .saturating_add(viewport_rows)
                 .saturating_add(window.newer_rows),
             display_offset,
+            file_context: None,
             shell_input_anchor: line_state.input_anchor,
             command_navigation_revision: line_state.command_navigation.revision,
             shell_command_prompt: line_state.pending_command_prompt.map(|logical_line| {
@@ -3698,6 +3749,8 @@ struct ShellBoundary {
 #[derive(Default)]
 struct ZzClawTermSidecar {
     osc: Option<Vec<u8>>,
+    escaped: bool,
+    file_context: Option<Arc<zzclawterm_core::terminal::file_context::ShellFileContext>>,
     window_title: Option<String>,
     cwd: Option<String>,
     pending_cwd: Option<String>,
@@ -3710,46 +3763,52 @@ struct ZzClawTermSidecar {
 impl ZzClawTermSidecar {
     fn advance(&mut self, bytes: &[u8]) -> Vec<ShellBoundary> {
         let mut boundaries = Vec::new();
-        let mut i = 0;
-        while i < bytes.len() {
-            let byte = bytes[i];
-            if let Some(buffer) = self.osc.as_mut() {
-                if byte == 0x07 {
-                    let payload = std::mem::take(buffer);
-                    self.osc = None;
+        for (offset, &byte) in bytes.iter().enumerate() {
+            if self.osc.is_some() {
+                if byte == 0x07 || (self.escaped && byte == b'\\') {
+                    self.escaped = false;
+                    let payload = self.osc.take().unwrap();
                     if let Some(kind) = self.handle_osc(&payload) {
                         boundaries.push(ShellBoundary {
-                            offset: i.saturating_add(1),
+                            offset: offset + 1,
                             kind,
                         });
                     }
-                } else if byte == 0x1b && bytes.get(i + 1) == Some(&b'\\') {
-                    let payload = std::mem::take(buffer);
-                    self.osc = None;
-                    if let Some(kind) = self.handle_osc(&payload) {
-                        boundaries.push(ShellBoundary {
-                            offset: i.saturating_add(2),
-                            kind,
-                        });
-                    }
-                    i += 1;
+                } else if byte == 0x1b {
+                    self.escaped = true;
                 } else {
+                    let buffer = self.osc.as_mut().unwrap();
+                    if self.escaped {
+                        buffer.push(0x1b);
+                        self.escaped = false;
+                    }
                     buffer.push(byte);
                     if buffer.len() > 4096 {
                         self.osc = None;
+                        self.file_context = None;
                     }
                 }
-            } else if byte == 0x1b && bytes.get(i + 1) == Some(&b']') {
-                self.osc = Some(Vec::new());
-                i += 1;
+            } else {
+                if self.escaped && byte == b']' {
+                    self.osc = Some(Vec::new());
+                }
+                if self.escaped && byte == b'c' {
+                    self.file_context = None;
+                }
+                self.escaped = byte == 0x1b;
             }
-            i += 1;
         }
         boundaries
     }
 
     fn handle_osc(&mut self, payload: &[u8]) -> Option<ShellBoundaryKind> {
         let text = String::from_utf8_lossy(payload);
+        if text.starts_with("7777;ZzClawTermFileContext;") {
+            self.file_context =
+                zzclawterm_core::terminal::file_context::ShellFileContext::parse_osc(&text)
+                    .map(Arc::new);
+            return None;
+        }
         let mut parts = text.split(';');
         let code = parts.next().unwrap_or("").trim();
         match code {
@@ -3800,6 +3859,9 @@ impl ZzClawTermSidecar {
     ) -> Option<ShellBoundaryKind> {
         match mark {
             'A' | 'B' => {
+                if mark == 'A' {
+                    self.file_context = None;
+                }
                 self.shell_integration_enabled = true;
                 if mark == 'B' {
                     self.command_running = false;
@@ -3809,6 +3871,7 @@ impl ZzClawTermSidecar {
                 }
             }
             'C' => {
+                self.file_context = None;
                 self.shell_integration_enabled = true;
                 self.command_running = true;
                 self.pending_command_started = true;

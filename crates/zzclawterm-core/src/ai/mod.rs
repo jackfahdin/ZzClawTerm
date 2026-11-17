@@ -1,5 +1,6 @@
 pub mod completion;
 pub mod proxy;
+pub mod reasoning_text;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
@@ -14,6 +15,7 @@ mod claude_code;
 mod codex;
 mod diagnostics;
 pub mod harness;
+pub mod mcp_execution;
 pub mod ollama;
 mod prompts;
 pub mod provider_settings;
@@ -139,6 +141,8 @@ pub struct ExternalMcpSettings {
     pub session_scope: ExternalMcpSessionScope,
     #[serde(default)]
     pub terminal_display_mode: McpTerminalDisplayMode,
+    #[serde(default)]
+    pub terminal_execution_mode: mcp_execution::McpTerminalExecutionMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

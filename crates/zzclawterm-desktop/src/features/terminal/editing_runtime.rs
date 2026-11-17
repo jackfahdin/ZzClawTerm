@@ -12,12 +12,13 @@ use zzclawterm_core::terminal::editing::{
     EDIT_CONFIRMATION_TIMEOUT, EditCapability, EditPhase, ShellLineEditing,
 };
 use zzclawterm_core::terminal::input_tracker::{
-    MAX_TRACKED_INPUT_BYTES, TerminalInputState, get_tracked_submission_command,
-    strip_terminal_command_prompt,
+    MAX_TRACKED_INPUT_BYTES, TerminalInputState, can_learn_tab_completed_command,
+    get_tracked_submission_command, strip_terminal_command_prompt,
 };
 use zzclawterm_core::terminal::shell_prompt::{ShellPrompt, classify_shell_prompt};
 use zzclawterm_terminal::editing::{recover_marked_input, resolve_input};
 
+use super::command_suggestions::state::PendingCommandHistoryEntry;
 use super::editing_state::SnapshotEvidence;
 use crate::features::ZzClawTermApp;
 
@@ -43,6 +44,19 @@ impl ZzClawTermApp {
             return;
         };
         self.terminal.editing.activate(&id);
+        if self
+            .terminal
+            .editing
+            .state_mut()
+            .file_context
+            .note_input(bytes)
+        {
+            self.terminal
+                .assist
+                .commands
+                .path_completion
+                .cancel_session(&id);
+        }
         self.terminal.editing.state_mut().suggestion_fill = None;
         let fallback = candidate.as_ref().and_then(|evidence| {
             self.terminal
@@ -98,26 +112,49 @@ impl ZzClawTermApp {
             .state_mut()
             .command_navigation
             .note_input(text);
-        let was_suppressed = self
-            .terminal
-            .assist
-            .command_suggestion_suppression
-            .is_suppressed();
+        let was_suppressed = self.terminal.assist.commands.suppression.is_suppressed();
         if text == "\u{3}" || (was_suppressed && text == "q") {
-            self.terminal.assist.command_suggestion_suppression =
-                CommandSuggestionSuppression::None;
+            self.terminal.assist.commands.suppression = CommandSuggestionSuppression::None;
         }
         if !was_suppressed && text.contains(['\r', '\n']) {
-            let submitted = get_tracked_submission_command(self.terminal.editing.predicted_input());
+            let mut submitted =
+                get_tracked_submission_command(self.terminal.editing.predicted_input());
+            let mut source_session = None;
+            if submitted.is_empty() {
+                // Navigation can recognize recalled or unrelated prompt lines.
+                // History requires the prefix retained before Tab, and the
+                // recovered command belongs only to the terminal that echoed it.
+                submitted = candidate
+                    .as_ref()
+                    .filter(|evidence| {
+                        can_learn_tab_completed_command(
+                            self.terminal.editing.predicted_input(),
+                            &evidence.command,
+                        )
+                    })
+                    .map(|evidence| evidence.command.clone())
+                    .unwrap_or_default();
+                source_session = Some(id.clone());
+            }
             if !submitted.is_empty() {
                 if command_starts_suggestion_suppressing_program(&submitted) {
-                    self.terminal.assist.command_suggestion_suppression =
+                    self.terminal.assist.commands.suppression =
                         CommandSuggestionSuppression::InteractiveProgram;
                 }
                 // The outer `su` history entry may remain pending throughout
                 // the child shell. It must not disable pager suppression there.
-                if self.terminal.assist.pending_command_history_entry.is_none() {
-                    self.terminal.assist.pending_command_history_entry = Some(submitted);
+                if self
+                    .terminal
+                    .assist
+                    .commands
+                    .pending_history_entry
+                    .is_none()
+                {
+                    self.terminal.assist.commands.pending_history_entry =
+                        Some(PendingCommandHistoryEntry {
+                            command: submitted,
+                            source_session,
+                        });
                 }
             }
         }
@@ -216,6 +253,15 @@ impl ZzClawTermApp {
             return;
         }
         self.terminal.editing.activate(id);
+        if self.session.is_disconnected(id) {
+            // A reconnect starts a fresh shell on the session's own host.
+            self.terminal.editing.state_mut().file_context = Default::default();
+            self.terminal
+                .assist
+                .commands
+                .path_completion
+                .cancel_session(id);
+        }
         if self.session.is_disconnected(id)
             || self.active_terminal_uses_alternate_screen()
             || self.is_credential_prompt_input_mode()
@@ -225,6 +271,31 @@ impl ZzClawTermApp {
             return;
         }
         let snapshot = self.terminal_snapshot_for_session(Some(id), 0);
+        let previous_context = self
+            .terminal
+            .editing
+            .state()
+            .and_then(|state| state.file_context.current())
+            .map(|context| context.cache_key());
+        self.terminal.editing.state_mut().file_context.observe(
+            snapshot
+                .shell_input_anchor
+                .and(snapshot.file_context.as_deref()),
+        );
+        let next_context = self
+            .terminal
+            .editing
+            .state()
+            .and_then(|state| state.file_context.current())
+            .map(|context| context.cache_key());
+        if previous_context != next_context {
+            self.terminal
+                .assist
+                .commands
+                .path_completion
+                .cancel_session(id);
+        }
+
         self.terminal
             .editing
             .state_mut()
@@ -283,6 +354,7 @@ impl ZzClawTermApp {
         {
             let old_anchor = state.observed_anchor.flatten();
             let submitted = old_anchor.is_some() && old_anchor == state.submitted_anchor;
+
             state.invalidate();
             state.submitted_anchor = None;
             // OSC C may arrive after typing has already started in a child shell.
@@ -311,7 +383,14 @@ impl ZzClawTermApp {
         } else {
             None
         };
+        // A line that was just submitted stays on screen, still marked, until the
+        // shell reports the command started. Recovering from it would resurrect
+        // the executed command as the new input (`clear` wipes the screen right
+        // after, leaving every later keystroke appended to the dead text).
+        let marked_line_was_submitted = state.submitted_anchor.is_some()
+            && state.submitted_anchor == snapshot.shell_input_anchor;
         if mapping.is_none()
+            && !marked_line_was_submitted
             && state.model.phase != EditPhase::Pending
             && (state.model.input.desynced
                 || state.model.input.line_rewrite_required
@@ -431,7 +510,8 @@ impl ZzClawTermApp {
             && self
                 .terminal
                 .assist
-                .command_suggestion_suppression
+                .commands
+                .suppression
                 .release_at_shell_prompt()
         {
             self.schedule_command_suggestion_refresh(cx);
@@ -452,6 +532,14 @@ impl ZzClawTermApp {
             } else {
                 "Suggestion fill confirmed"
             });
+            // Accepting a directory leaves the cursor right after its `/`, so
+            // offer its entries at once instead of waiting for another key.
+            if !execute_requested
+                && self.terminal.editing.assist_input().value.ends_with('/')
+                && self.command_suggestions_allowed_for_session(id)
+            {
+                self.refresh_command_suggestions(cx);
+            }
             cx.notify();
         }
     }
@@ -476,6 +564,378 @@ mod tests {
     use crate::features::test_support::app_with_visible_local_session;
     use crate::models::{TerminalBufferCellPos, TerminalSelection};
     use crate::test_support::TestConfigDir;
+
+    fn assert_tab_submission_history(visible: &str, sessions: &[&str], expected: Option<&str>) {
+        use futures::StreamExt as _;
+        use zzclawterm_completion_runtime::runtime::{CompletionQuery, CompletionSearchOutcome};
+        use zzclawterm_core::completion::types::CompletionMode;
+        use zzclawterm_store::StoreDomain;
+
+        let dir = TestConfigDir::new("zzclawterm-tab-completion-history");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+        let (store, runtime, context, mut events) = cx.update_entity(&app, |app, cx| {
+            app.terminal
+                .seed_session_view("s1".into(), visible.into(), "UTF-8");
+            app.terminal
+                .seed_session_view("s2".into(), "$ git cherry-pick".into(), "UTF-8");
+            app.note_shell_editing_input(b"git ch", cx);
+            app.note_shell_editing_input(b"\t", cx);
+            app.note_shell_editing_input(b"\r", cx);
+            app.record_command_history_for_sessions(sessions, b"\r");
+            assert!(app.terminal.assist.commands.pending_history_entry.is_none());
+            let history = app.session.command_history_for("s1").unwrap_or_default();
+            assert_eq!(
+                history,
+                &expected.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            );
+            // Each remote shell completes independently. Echo from s1 cannot
+            // become either the command or the raw prefix in s2's history.
+            assert!(
+                app.session
+                    .command_history_for("s2")
+                    .unwrap_or_default()
+                    .is_empty()
+            );
+            (
+                app.store_blocking_client(),
+                app.commands.completion_runtime(),
+                app.command_suggestion_context("s1"),
+                app.commands.take_persistence_event_receiver().unwrap(),
+            )
+        });
+        if expected.is_some() {
+            let event = futures::executor::block_on(events.next()).expect("history persisted");
+            cx.update_entity(&app, |app, _| {
+                app.commands.note_persistence_event_delivered();
+                app.commands.apply_persistence_result(event).unwrap();
+            });
+        }
+        let history = store
+            .request_fn(StoreDomain::Commands, |db| db.list_command_history(64))
+            .unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .map(|entry| entry.command.as_str())
+                .collect::<Vec<_>>(),
+            expected.into_iter().collect::<Vec<_>>()
+        );
+        let result = futures::executor::block_on(runtime.search_outcome(CompletionQuery {
+            context,
+            fill_policy: None,
+            input: "git ch".into(),
+            mode: CompletionMode::History,
+            quick: std::sync::Arc::from([]),
+            min: 1,
+            max: 100,
+        }));
+        let CompletionSearchOutcome::Ready(result) = result else {
+            panic!("history query did not complete");
+        };
+        assert_eq!(
+            result
+                .candidates
+                .iter()
+                .any(|candidate| candidate.insert_text == "git checkout"),
+            expected.is_some()
+        );
+    }
+
+    #[test]
+    fn tab_completed_submission_is_persisted_and_available_to_history_suggestions() {
+        assert_tab_submission_history(
+            "root@embedded:~# git checkout",
+            &["s1"],
+            Some("git checkout"),
+        );
+    }
+
+    #[test]
+    fn tab_completed_submission_rejects_unrelated_lines_and_missing_prompts() {
+        for visible in [
+            "$ echo unrelated",
+            "$ echo git checkout",
+            "git checkout",
+            "Password: ",
+            "$ ",
+        ] {
+            assert_tab_submission_history(visible, &["s1"], None);
+        }
+    }
+
+    #[test]
+    fn tab_completed_submission_is_learned_only_for_the_session_that_echoed_it() {
+        assert_tab_submission_history("$ git checkout", &["s1", "s2"], Some("git checkout"));
+        assert_tab_submission_history("$ git checkout", &["s2"], None);
+        assert_tab_submission_history("$ git checkout", &[], None);
+    }
+
+    #[test]
+    fn ordinary_tracked_submission_still_records_each_successful_sync_session() {
+        let dir = TestConfigDir::new("zzclawterm-tracked-sync-history");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+        cx.update_entity(&app, |app, cx| {
+            app.note_shell_editing_input(b"git status", cx);
+            app.note_shell_editing_input(b"\r", cx);
+            app.record_command_history_for_sessions(&["s1", "s2"], b"\r");
+            for session in ["s1", "s2"] {
+                assert_eq!(
+                    app.session.command_history_for(session).unwrap(),
+                    &["git status"]
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn command_accepted_does_not_duplicate_a_freshly_recorded_submission() {
+        // A submission reaches history through the typed-input path first,
+        // then the shell integration reports the same command through OSC
+        // CommandAccepted. Whenever the marked-prompt observation lags the
+        // report (fresh session, awaiting snapshot), both paths record and
+        // the history panel lists every command twice (#1187).
+        let dir = TestConfigDir::new("zzclawterm-history-duplicate");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+        cx.update_entity(&app, |app, cx| {
+            app.note_shell_editing_input(b"ls", cx);
+            app.note_shell_editing_input(b"\r", cx);
+            app.record_command_history_for_sessions(&["s1"], b"ls\r");
+            app.session.extend_pending_events([
+                zzclawterm_transport::SessionEvent::CommandAccepted {
+                    session_id: "s1".to_string(),
+                    command: "ls".to_string(),
+                },
+            ]);
+            app.drain_session_events(cx);
+            assert_eq!(
+                app.session.command_history_for("s1"),
+                Some(&["ls".to_string()][..]),
+                "the accepted-command report must not duplicate the submission already recorded"
+            );
+        });
+    }
+
+    fn assert_command_history_trace(trace: &[(&str, bool)], expected: &[&str]) {
+        let dir = TestConfigDir::new("zzclawterm-history-reconciliation");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+        cx.update_entity(&app, |app, cx| {
+            for &(command, accepted) in trace {
+                if accepted {
+                    app.session.extend_pending_events([
+                        zzclawterm_transport::SessionEvent::CommandAccepted {
+                            session_id: "s1".into(),
+                            command: command.into(),
+                        },
+                    ]);
+                    app.drain_session_events(cx);
+                } else {
+                    app.note_shell_editing_input(command.as_bytes(), cx);
+                    app.note_shell_editing_input(b"\r", cx);
+                    app.record_command_history_for_sessions(&["s1"], b"\r");
+                }
+            }
+            assert_eq!(app.session.command_history_for("s1").unwrap(), expected);
+        });
+    }
+
+    #[test]
+    fn command_history_preserves_consecutive_executions_with_immediate_reports() {
+        assert_command_history_trace(
+            &[
+                ("ls", false),
+                ("ls", true),
+                ("ls", false),
+                ("ls", true),
+                ("pwd", false),
+                ("pwd", true),
+            ],
+            &["pwd", "ls", "ls"],
+        );
+    }
+
+    #[test]
+    fn command_history_reconciles_batched_reports_without_reordering_submissions() {
+        assert_command_history_trace(
+            &[("ls", false), ("pwd", false), ("ls", true), ("pwd", true)],
+            &["pwd", "ls"],
+        );
+    }
+
+    #[test]
+    fn command_history_osc_only_reports_leave_other_submissions_pending() {
+        assert_command_history_trace(
+            &[
+                ("ls", false),
+                ("pwd", false),
+                ("echo", true),
+                ("ls", true),
+                ("pwd", true),
+            ],
+            &["echo", "pwd", "ls"],
+        );
+    }
+
+    #[test]
+    fn command_history_preserves_repeated_executions_with_only_input() {
+        assert_command_history_trace(
+            &[("ls", false), ("ls", false), ("pwd", false)],
+            &["pwd", "ls", "ls"],
+        );
+    }
+
+    #[test]
+    fn command_history_preserves_repeated_executions_with_only_shell_reports() {
+        assert_command_history_trace(
+            &[("ls", true), ("ls", true), ("pwd", true)],
+            &["pwd", "ls", "ls"],
+        );
+    }
+
+    #[test]
+    fn command_history_delayed_report_does_not_consume_newer_sensitive_submission() {
+        let dir = TestConfigDir::new("zzclawterm-history-sensitive-report");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+        cx.update_entity(&app, |app, cx| {
+            app.record_submitted_command_history(&["s1"], vec!["ls".into()]);
+            app.commands.mark_completion_sensitive("s1");
+            app.commands.complete_completion_submission("s1");
+            app.session.extend_pending_events([
+                zzclawterm_transport::SessionEvent::CommandAccepted {
+                    session_id: "s1".into(),
+                    command: "ls".into(),
+                },
+                zzclawterm_transport::SessionEvent::CommandAccepted {
+                    session_id: "s1".into(),
+                    command: "synthetic-private-input".into(),
+                },
+            ]);
+            app.drain_session_events(cx);
+            assert_eq!(app.session.command_history_for("s1").unwrap(), &["ls"]);
+        });
+    }
+
+    #[test]
+    fn command_history_learns_each_execution_once_globally_and_in_its_shell_scope() {
+        use futures::StreamExt as _;
+        use zzclawterm_completion_runtime::runtime::CompletionQuery;
+        use zzclawterm_core::completion::types::{
+            CompletionMode, CompletionScope, ShellCommandContext, ShellDialect,
+        };
+        use zzclawterm_store::StoreDomain;
+
+        for input_has_scope in [false, true] {
+            let dir = TestConfigDir::new("zzclawterm-history-learning-once");
+            let mut cx = TestAppContext::single();
+            let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+            let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+            let context = ShellCommandContext {
+                scope: CompletionScope::new(&["history-learning-test"]),
+                dialect: ShellDialect::Bash,
+                command_events: true,
+            };
+            let (store, runtime, mut events) = cx.update_entity(&app, |app, _| {
+                if input_has_scope {
+                    app.commands
+                        .set_command_context("s1".into(), context.clone());
+                }
+                for _ in 0..2 {
+                    app.commands.mark_completion_confirmed("s1", true);
+                    app.record_submitted_command_history(&["s1"], vec!["ls".into()]);
+                }
+                (
+                    app.store_blocking_client(),
+                    app.commands.completion_runtime(),
+                    app.commands.take_persistence_event_receiver().unwrap(),
+                )
+            });
+            // Finish both input observations before checking what reports add.
+            for _ in 0..2 {
+                futures::executor::block_on(events.next()).expect("input history persisted");
+            }
+            cx.update_entity(&app, |app, cx| {
+                app.commands
+                    .set_command_context("s1".into(), context.clone());
+                for _ in 0..2 {
+                    app.session.extend_pending_events([
+                        zzclawterm_transport::SessionEvent::CommandAccepted {
+                            session_id: "s1".into(),
+                            command: "ls".into(),
+                        },
+                    ]);
+                }
+                app.drain_session_events(cx);
+                assert_eq!(
+                    app.session.command_history_for("s1").unwrap(),
+                    &["ls", "ls"]
+                );
+            });
+            // A search is ordered after all observations on the completion worker.
+            futures::executor::block_on(runtime.search_outcome(CompletionQuery {
+                context: context.clone(),
+                fill_policy: None,
+                input: "ls".into(),
+                mode: CompletionMode::History,
+                quick: std::sync::Arc::from([]),
+                min: 1,
+                max: 100,
+            }));
+            let snapshot = store
+                .request_fn(StoreDomain::Commands, |db| db.completion_history_snapshot())
+                .unwrap();
+            assert_eq!(snapshot.global_history.len(), 1);
+            assert_eq!(snapshot.global_history[0].use_count, 2);
+            assert_eq!(snapshot.scoped_history.len(), 1);
+            assert_eq!(snapshot.scoped_history[0].use_count, 2);
+            assert_eq!(snapshot.scoped_history[0].scope, context.scope);
+        }
+    }
+
+    #[test]
+    fn a_background_disconnect_allows_a_fresh_binding_on_reconnect() {
+        use zzclawterm_core::terminal::file_context::ShellFileContext;
+        let dir = TestConfigDir::new("zzclawterm-background-file-context");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "active");
+        cx.update_entity(&app, |app, cx| {
+            let mut context = ShellFileContext {
+                binding: "0123456789abcdef0123456789abcdef".into(),
+                instance: 123,
+                user: 1000,
+                sequence: 1,
+                home: "/home/test".into(),
+                cwd: "/tmp".into(),
+            };
+            app.terminal.editing.activate("background");
+            app.terminal
+                .editing
+                .state_mut()
+                .file_context
+                .observe(Some(&context));
+            app.terminal
+                .editing
+                .state_mut()
+                .file_context
+                .note_input(b"sudo -i\r");
+            app.terminal.editing.activate("active");
+            app.mark_session_disconnected("background", cx);
+            context.binding = "abcdef0123456789abcdef0123456789".into();
+            let state = app.terminal.editing.sessions.get_mut("background").unwrap();
+            assert!(state.file_context.current().is_none());
+            state.file_context.observe(Some(&context));
+            assert_eq!(state.file_context.current(), Some(&context));
+        });
+    }
     use zzclawterm_terminal::selection::{TerminalCellSide, TerminalSelectionEndpoint};
 
     struct InputHost;
@@ -611,6 +1071,54 @@ mod tests {
     }
 
     #[test]
+    fn input_is_confirmed_again_after_clear_wipes_the_screen() {
+        let dir = TestConfigDir::new("zzclawterm-shell-edit-clear");
+        let mut cx = TestAppContext::single();
+        let _test_app_cleanup = crate::test_support::TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, dir.path(), "s1");
+        cx.update_entity(&app, |app, cx| {
+            // The view is rebuilt from the whole byte stream each time, which
+            // is exactly what one persistent screen would have received.
+            let mut stream = String::new();
+            let mut feed = |app: &mut crate::features::ZzClawTermApp, text: &str| {
+                stream.push_str(text);
+                app.terminal
+                    .seed_session_view("s1".into(), stream.clone(), "UTF-8");
+            };
+            feed(app, "\x1b]133;A\x07$ \x1b]133;B\x07");
+            app.note_shell_editing_input(b"clear", cx);
+            feed(app, "clear");
+            app.reconcile_shell_editing("s1", cx);
+            assert!(app.command_suggestion_input_is_confirmed(), "before clear");
+            app.note_shell_editing_input(b"\r", cx);
+            // The shell has not reported the command start yet, so the marked
+            // line is still on screen. It must not come back as new input.
+            app.reconcile_shell_editing("s1", cx);
+            assert!(app.terminal.editing.predicted_input().value.is_empty());
+            feed(app, "\r\n\x1b]133;C\x07");
+            app.reconcile_shell_editing("s1", cx);
+            feed(
+                app,
+                "\x1b[H\x1b[2J\x1b[3J\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07",
+            );
+            app.reconcile_shell_editing("s1", cx);
+            app.note_shell_editing_input(b"cd /", cx);
+            feed(app, "cd /");
+            app.reconcile_shell_editing("s1", cx);
+            let state = app.terminal.editing.state().unwrap();
+            assert!(
+                app.command_suggestion_input_is_confirmed(),
+                "after clear: phase={:?} mapping={} desynced={} value={:?}",
+                state.model.phase,
+                state.mapping.is_some(),
+                state.model.input.desynced,
+                state.model.input.value,
+            );
+            assert_eq!(app.terminal.editing.predicted_input().value, "cd /");
+        });
+    }
+
+    #[test]
     fn docker_line_editor_supports_custom_prompt_but_loses_permission_on_cat() {
         let dir = TestConfigDir::new("zzclawterm-shell-edit-docker-context");
         let mut cx = TestAppContext::single();
@@ -742,8 +1250,7 @@ mod tests {
             let mut settings = app.settings.summary().clone();
             settings.interaction_command_suggestions_enabled = false;
             app.settings.replace_summary(settings);
-            app.terminal.assist.command_suggestion_suppression =
-                CommandSuggestionSuppression::CommandRunning;
+            app.terminal.assist.commands.suppression = CommandSuggestionSuppression::CommandRunning;
             app.note_shell_editing_input(b"echo abc", cx);
             app.terminal
                 .seed_session_view("s1".into(), "$ echo abc".into(), "UTF-8");
@@ -773,8 +1280,7 @@ mod tests {
             );
             app.reconcile_shell_editing("s1", cx);
             app.note_shell_editing_input(b"\r", cx);
-            app.terminal.assist.command_suggestion_suppression =
-                CommandSuggestionSuppression::CommandRunning;
+            app.terminal.assist.commands.suppression = CommandSuggestionSuppression::CommandRunning;
             // Child typing may precede delivery of the outer shell's OSC C.
             app.note_shell_editing_input(b"echo abc", cx);
             app.terminal
@@ -793,12 +1299,7 @@ mod tests {
             assert!(app.can_use_smart_cursor_selection());
             // The unmarked child shell never emits OSC 133; a confirmed prompt
             // echo releases the outer command's suppression instead.
-            assert!(
-                !app.terminal
-                    .assist
-                    .command_suggestion_suppression
-                    .is_suppressed()
-            );
+            assert!(!app.terminal.assist.commands.suppression.is_suppressed());
         });
     }
 

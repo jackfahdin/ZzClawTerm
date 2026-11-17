@@ -5,6 +5,7 @@ use super::{
 use crate::features::ZzClawTermApp;
 use crate::features::capability_runtime::{CapabilityRequest, idempotency::Lookup, to_value};
 use crate::features::mcp::server::rpc_failure;
+use crate::features::terminal::ai_execution::TerminalExecutionEvent;
 use crate::models::SessionLaunchConfig;
 use gpui::Context;
 use serde_json::Value;
@@ -51,6 +52,13 @@ pub(super) struct TerminalJob {
     sanitizer: RecordingSanitizer,
     stdout_tail: Vec<u8>,
     stderr_tail: Vec<u8>,
+    presentation: Option<BackgroundJobPresentation>,
+}
+
+struct BackgroundJobPresentation {
+    max_lines: u16,
+    step_index: u16,
+    started: bool,
 }
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -119,11 +127,72 @@ impl TerminalJob {
             sanitizer: RecordingSanitizer::default(),
             stdout_tail: Vec::new(),
             stderr_tail: Vec::new(),
+            presentation: None,
         }
     }
     fn append(&mut self, text: &str) {
         let text = self.sanitizer.feed(text);
         self.output.append(&text);
+    }
+
+    fn take_presentation_events(&mut self, id: &str) -> Vec<TerminalExecutionEvent> {
+        let Some(presentation) = self.presentation.as_mut() else {
+            return Vec::new();
+        };
+        let Some(session_id) = self.target.session_id() else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        if !presentation.started
+            && (self.process_state != TerminalProcessState::NotStarted || self.finished.is_some())
+        {
+            presentation.started = true;
+            events.push(TerminalExecutionEvent::Started {
+                id: id.into(),
+                session_id: session_id.into(),
+                source: self.client.clone(),
+                command: self.command.clone(),
+                step_index: presentation.step_index,
+                max_lines: presentation.max_lines,
+            });
+        }
+        if self.finished.is_some() {
+            let max_lines = presentation.max_lines;
+            let step_index = presentation.step_index;
+            // A summary is bounded independently of the retained MCP output.
+            let page = (max_lines > 0)
+                .then(|| self.output.read(0, 64 * 1024).ok())
+                .flatten();
+            let source_truncated = !self.output_complete
+                || page
+                    .as_ref()
+                    .is_some_and(|page| page.source_truncated || !page.eof);
+            let status = match self.status {
+                TerminalJobStatus::Completed => TerminalExecutionStatus::Completed,
+                TerminalJobStatus::Cancelled => TerminalExecutionStatus::Cancelled,
+                TerminalJobStatus::TimedOut => TerminalExecutionStatus::TimedOut,
+                TerminalJobStatus::Disconnected => TerminalExecutionStatus::Disconnected,
+                _ => TerminalExecutionStatus::Failed,
+            };
+            events.push(TerminalExecutionEvent::Finished {
+                id: id.into(),
+                session_id: session_id.into(),
+                source: self.client.clone(),
+                command: self.command.clone(),
+                step_index,
+                max_lines,
+                output: page.map_or_else(String::new, |page| page.data),
+                exit_code: self.exit_code,
+                duration_ms: self
+                    .ended_at_ms
+                    .unwrap_or_else(now_ms)
+                    .saturating_sub(self.started_at_ms),
+                source_truncated,
+                status,
+            });
+            self.presentation = None;
+        }
+        events
     }
     fn exited(&mut self, code: Option<i32>, interrupted: bool) {
         self.exit_code = code;
@@ -194,14 +263,17 @@ impl TerminalExecutionState {
             .map(str::to_string)
     }
     pub fn can_register_job(&self, owner: &str) -> bool {
-        self.jobs.len() < 512
-            && self.jobs.values().filter(|j| j.owner == owner).count() < 128
-            && self.jobs.values().filter(|j| j.finished.is_none()).count() < 32
+        let pending = self.pending_inline_start_count(None);
+        let owned_pending = self.pending_inline_start_count(Some(owner));
+        self.jobs.len() + pending < 512
+            && self.jobs.values().filter(|j| j.owner == owner).count() + owned_pending < 128
+            && self.jobs.values().filter(|j| j.finished.is_none()).count() + pending < 32
             && self
                 .jobs
                 .values()
                 .filter(|j| j.owner == owner && j.finished.is_none())
                 .count()
+                + owned_pending
                 < 8
     }
     pub fn note_manual_takeover(&mut self, session_id: &str) {
@@ -379,37 +451,10 @@ impl ZzClawTermApp {
     ) {
         let mut args: TerminalStartArgs =
             serde_json::from_value(request.arguments.clone()).expect("validated terminal start");
-        if args
-            .target
-            .as_ref()
-            .is_some_and(|target| target.connection_id().is_some())
-        {
-            self.dispatch_connection_start(request, args, cx);
-            return;
-        }
-        let scope = request.scope.resolve(&self.mcp_live_sessions());
-        let session_id = match scope.resolve_session(args.session_id.as_deref()) {
-            Ok(id) => id,
-            Err(_) => {
-                let _ = request
-                    .reply
-                    .send(Err(rpc_failure("scope_denied", "Target is outside scope.")));
-                return;
-            }
-        };
-        if !matches!(
-            self.ai_execution_profile_for_session(&session_id),
-            AiExecutionProfile::Posix | AiExecutionProfile::Powershell | AiExecutionProfile::Cmd
-        ) {
-            let _ = request.reply.send(Err(rpc_failure(
-                "permission_denied",
-                "Long jobs require a supported command-capture shell.",
-            )));
-            return;
-        }
-        args.session_id = Some(session_id.clone());
         args.timeout_ms = Some(args.timeout_ms.unwrap_or(300_000));
         args.backend = Some(args.backend());
+        // Fingerprint caller arguments before applying mutable application settings
+        // or resolving a saved connection to a newly created session.
         let canonical = serde_json::to_value(&args).expect("start arguments");
         let operation_id = match self.mcp.capabilities.ledger.begin(
             &request.connection_id,
@@ -418,13 +463,13 @@ impl ZzClawTermApp {
             &canonical,
         ) {
             Ok(Lookup::Complete(result)) => {
-                let result = result.and_then(|v| {
+                let result = result.and_then(|value| {
                     self.authorize_terminal_job(
                         &request.connection_id,
                         &request.scope,
-                        v["jobId"].as_str().unwrap_or_default(),
+                        value["jobId"].as_str().unwrap_or_default(),
                     )?;
-                    Ok(v)
+                    Ok(value)
                 });
                 let _ = request.reply.send(result);
                 return;
@@ -442,19 +487,57 @@ impl ZzClawTermApp {
                 return;
             }
         };
-        let result = self.start_terminal_job(&request, args, session_id, operation_id.clone(), cx);
+        let backend = request
+            .terminal_plan
+            .map_or_else(|| args.backend(), |plan| plan.backend);
+        args.backend = Some(backend);
+        if let Some(target) = args
+            .target
+            .clone()
+            .filter(|target| target.connection_id().is_some())
+        {
+            if backend == TerminalBackend::InlinePty {
+                self.start_connection_inline(request, args, operation_id, cx);
+                return;
+            }
+            let result = self
+                .authorize_saved_target(&request, target.connection_id().unwrap())
+                .and_then(|()| {
+                    self.register_connection_job(&request, args, target, operation_id.clone(), cx)
+                });
+            self.complete_terminal_start(request, &operation_id, result, cx);
+            return;
+        }
+        let result = (|| {
+            let scope = request.scope.resolve(&self.mcp_live_sessions());
+            let session_id = scope
+                .resolve_session(args.session_id.as_deref())
+                .map_err(|_| rpc_failure("scope_denied", "Target is outside scope."))?;
+            args.session_id = Some(session_id.clone());
+            self.start_terminal_job(&request, args, session_id, operation_id.clone(), cx)
+        })();
+        self.complete_terminal_start(request, &operation_id, result, cx);
+    }
+
+    pub(super) fn complete_terminal_start(
+        &mut self,
+        request: CapabilityRequest,
+        operation_id: &str,
+        result: Result<Value, zzclawterm_mcp_protocol::RpcError>,
+        cx: &mut Context<Self>,
+    ) {
         self.mcp
             .capabilities
             .ledger
-            .pin(&operation_id, result.is_ok());
+            .pin(operation_id, result.is_ok());
         self.mcp
             .capabilities
             .ledger
-            .finish(&operation_id, result.clone());
+            .finish(operation_id, result.clone());
         let _ = request.reply.send(result);
         self.ensure_terminal_execution_clock(cx);
     }
-    fn start_terminal_job(
+    pub(super) fn start_terminal_job(
         &mut self,
         request: &CapabilityRequest,
         args: TerminalStartArgs,
@@ -463,6 +546,15 @@ impl ZzClawTermApp {
         cx: &mut Context<Self>,
     ) -> Result<Value, zzclawterm_mcp_protocol::RpcError> {
         let backend = args.backend();
+        if !matches!(
+            self.ai_execution_profile_for_session(&session_id),
+            AiExecutionProfile::Posix | AiExecutionProfile::Powershell | AiExecutionProfile::Cmd
+        ) {
+            return Err(rpc_failure(
+                "permission_denied",
+                "Long jobs require a supported command-capture shell.",
+            ));
+        }
         if self.security.screen_locked() {
             return Err(rpc_failure("permission_denied", "Screen is locked."));
         }
@@ -496,15 +588,19 @@ impl ZzClawTermApp {
             command: args.command.clone(),
             timeout: Duration::from_millis(args.timeout_ms.unwrap_or(300_000)),
             cancellation: CancellationToken::new(),
-            policy: TerminalExecutionPolicy {
-                background: false,
-                max_lines: match self.ai.settings_config().external_mcp.terminal_display_mode {
-                    zzclawterm_core::McpTerminalDisplayMode::Inline => {
-                        self.ai.settings_config().terminal_output_lines
-                    }
-                    zzclawterm_core::McpTerminalDisplayMode::Silent => 0,
-                },
-            },
+            policy: request
+                .terminal_plan
+                .map(|plan| TerminalExecutionPolicy {
+                    background: false,
+                    ..plan.policy
+                })
+                .unwrap_or_else(|| {
+                    super::external_mcp_terminal_policy(
+                        None,
+                        self.ai.settings_config().external_mcp.terminal_display_mode,
+                        self.ai.settings_config().terminal_output_lines,
+                    )
+                }),
             track_insertion: true,
             reply,
         };
@@ -555,6 +651,22 @@ impl ZzClawTermApp {
             let (tx, rx) = mpsc::channel(64);
             let mut job = TerminalJob::from_request(&execution);
             job.backend = TerminalBackend::SshExec;
+            if let Some(plan) = request.terminal_plan {
+                let step = self
+                    .mcp
+                    .capabilities
+                    .terminal_executions
+                    .next_steps
+                    .entry(request.connection_id.clone())
+                    .or_default();
+                let step_index = *step;
+                *step = step.saturating_add(1);
+                job.presentation = Some(BackgroundJobPresentation {
+                    max_lines: plan.policy.max_lines,
+                    step_index,
+                    started: false,
+                });
+            }
             let interrupt = job.interrupt.clone();
             job.controller = Some(runtime.spawn(
                 CancellationToken::new(),
@@ -957,6 +1069,11 @@ impl ZzClawTermApp {
         for owner in owners {
             state.enforce_output_limits(&owner);
         }
+        let presentation_events = state
+            .jobs
+            .iter_mut()
+            .flat_map(|(id, job)| job.take_presentation_events(id))
+            .collect::<Vec<_>>();
         state.jobs.retain(|_, job| {
             !job.finished
                 .is_some_and(|at| now.duration_since(at) >= Duration::from_secs(600))
@@ -965,6 +1082,15 @@ impl ZzClawTermApp {
             self.request_settings_panel_refresh(cx);
         }
         self.mcp.capabilities.ledger.cleanup();
+        for event in presentation_events {
+            let session_id = match &event {
+                TerminalExecutionEvent::Started { session_id, .. }
+                | TerminalExecutionEvent::Finished { session_id, .. } => session_id,
+            };
+            if self.session.has_session(session_id) {
+                self.present_terminal_execution(event);
+            }
+        }
         let mut actions = Vec::new();
         for (id, (session, stop, process)) in previous {
             if let Some(job) = self
@@ -1055,12 +1181,38 @@ fn decode_utf8(tail: &mut Vec<u8>, bytes: &[u8], flush: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        TerminalExecutionPolicy, TerminalExecutionRequest, TerminalExecutionState, TerminalJob,
-        decode_utf8,
+        BackgroundJobPresentation, TerminalExecutionPolicy, TerminalExecutionRequest,
+        TerminalExecutionState, TerminalJob, decode_utf8,
     };
+    use crate::features::terminal::ai_execution::TerminalExecutionEvent;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
     use zzclawterm_mcp_protocol::{TerminalJobStatus, TerminalProcessState};
+
+    #[test]
+    fn background_terminal_summary_is_emitted_once_and_silent_keeps_poll_output() {
+        for max_lines in [0, 3] {
+            let mut job = job("owner");
+            job.presentation = Some(BackgroundJobPresentation {
+                max_lines,
+                step_index: 0,
+                started: false,
+            });
+            job.process_state = TerminalProcessState::Active;
+            let events = job.take_presentation_events("job");
+            assert!(
+                matches!(events.as_slice(), [TerminalExecutionEvent::Started { max_lines: actual, .. }] if *actual == max_lines)
+            );
+            job.append("fixture output\n");
+            job.exited(Some(0), false);
+            let events = job.take_presentation_events("job");
+            assert!(
+                matches!(events.as_slice(), [TerminalExecutionEvent::Finished { output, max_lines: actual, .. }] if *actual == max_lines && output == if max_lines == 0 { "" } else { "fixture output\n" })
+            );
+            assert_eq!(job.output.read(0, 1024).unwrap().data, "fixture output\n");
+            assert!(job.take_presentation_events("job").is_empty());
+        }
+    }
     fn job(owner: &str) -> TerminalJob {
         let (reply, _) = tokio::sync::oneshot::channel();
         TerminalJob::from_request(&TerminalExecutionRequest {

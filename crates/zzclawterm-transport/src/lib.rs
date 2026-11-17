@@ -69,7 +69,7 @@ pub mod ssh_services;
 #[cfg(test)]
 use russh::{cipher, kex, mac};
 
-mod directory_command;
+pub mod directory_command;
 mod environment;
 mod http_proxy;
 pub mod local_shell;
@@ -130,10 +130,11 @@ pub use environment::{
 };
 pub use local_shell_integration::wsl_distro_from_launcher;
 pub use session_config::{
-    LocalSessionConfig, SerialSessionConfig, SftpCwdFollowMode, SftpSettings, SshAgentEndpoint,
-    SshAgentForwardingConfig, SshAgentForwardingPolicy, SshAgentForwardingSources, SshAgentPrompt,
-    SshAgentPromptAction, SshAgentPromptPhase, SshAgentPromptProvider, SshAgentPromptRequest,
-    SshAgentStoredKey, SshAgentStoredKeyProvider, SshAgentStoredKeySnapshot, SshAlgorithmMode,
+    LocalSessionConfig, SerialPortInfo, SerialPortTransport, SerialSessionConfig,
+    SftpCwdFollowMode, SftpSettings, SshAgentEndpoint, SshAgentForwardingConfig,
+    SshAgentForwardingPolicy, SshAgentForwardingSources, SshAgentPrompt, SshAgentPromptAction,
+    SshAgentPromptPhase, SshAgentPromptProvider, SshAgentPromptRequest, SshAgentStoredKey,
+    SshAgentStoredKeyProvider, SshAgentStoredKeySnapshot, SshAlgorithmMode,
     SshAlgorithmPreferences, SshCredentialPrompt, SshCredentialPromptKind,
     SshCredentialPromptReason, SshCredentialProvider, SshHostKey, SshHostKeyDecision,
     SshHostKeyVerifier, SshKeyAuthConfig, SshKeyboardInteractivePrompt,

@@ -3,14 +3,13 @@
 //! These adapters are called by background loaders. Window state and PDF page
 //! caches stay in desktop; parsing and rasterization live in zzclawterm-preview.
 use crate::image_presentation::render_image_from_bgra;
-use crate::models::{
-    PreviewContent, PreviewDelimited, PreviewImage, PreviewPdfDocument, PreviewPdfPage,
-};
+use crate::models::{PreviewContent, PreviewImage, PreviewPdfDocument, PreviewPdfPage};
 use gpui::RenderImage;
 use std::sync::Arc;
 use zzclawterm_core::PreviewCategory;
 use zzclawterm_preview::content::{DecodedContent, RasterImage};
 use zzclawterm_preview::decode;
+use zzclawterm_preview::delimited::PreviewDelimited;
 
 pub(in crate::features) fn decode_binary_content(
     category: PreviewCategory,

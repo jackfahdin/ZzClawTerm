@@ -61,8 +61,8 @@ The desktop feeds session output into terminal state, then provides snapshots an
 
 Application locale files are stored at:
 
-- `crates/zzclawterm-desktop/src/i18n/locales/zh-CN.json`
-- `crates/zzclawterm-desktop/src/i18n/locales/en.json`
+- `crates/zzclawterm-i18n/locales/zh-CN.json`
+- `crates/zzclawterm-i18n/locales/en.json`
 
 Update both languages for new or changed user-facing text and follow the existing translation-key conventions.
 

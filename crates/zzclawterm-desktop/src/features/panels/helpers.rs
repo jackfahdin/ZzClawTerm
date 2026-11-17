@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use zzclawterm_ui::icons::quick_command_icon;
 
 use gpui::{Context, IntoElement, SharedString, div, prelude::*, px, rgb, svg};
 use rust_i18n::t;
@@ -6,8 +7,7 @@ use zzclawterm_core::{QuickCommand, QuickCommandCategory, quick_command_category
 use zzclawterm_ui::ZzClawSwitch;
 
 use crate::features::{
-    ZzClawTermApp, commands::quick_command_category_label, icons::quick_command_icon,
-    text_inputs::TextInputSetup,
+    ZzClawTermApp, commands::quick_command_category_label, text_inputs::TextInputSetup,
 };
 use crate::models::{QuickCommandEditorField, QuickCommandSortMode};
 

@@ -1,0 +1,24 @@
+[package]
+name = "zzclawterm-terminal-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+zzclawterm-core.workspace = true
+zzclawterm-terminal.workspace = true
+zzclawterm-transport.workspace = true
+zzclawterm-recording.workspace = true
+futures.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+zzclawterm-core = { workspace = true, features = ["test-support"] }
+zzclawterm-recording = { workspace = true, features = ["test-support"] }
+time.workspace = true

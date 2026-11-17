@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+zzclawterm-completion-runtime.workspace = true
+zzclawterm-i18n.workspace = true
 tempfile.workspace = true
 anyhow.workspace = true
 base64.workspace = true
@@ -32,6 +34,7 @@ zzclawterm-store.workspace = true
 zzclawterm-sync.workspace = true
 zzclawterm-terminal.workspace = true
 zzclawterm-terminal-gpui.workspace = true
+zzclawterm-terminal-runtime.workspace = true
 zzclawterm-transport.workspace = true
 zzclawterm-recording.workspace = true
 zzclawterm-remote-ops.workspace = true
@@ -57,6 +60,7 @@ zip.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+zzclawterm-terminal-runtime = { workspace = true, features = ["test-support"] }
 russh.workspace = true
 zzclawterm-recording = { workspace = true, features = ["test-support"] }
 zzclawterm-cloud-storage = { workspace = true, features = ["test-support"] }
@@ -89,3 +93,6 @@ windows-sys = { version = "0.61", features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
 x11rb = { version = "0.13.2", features = ["allow-unsafe-code"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

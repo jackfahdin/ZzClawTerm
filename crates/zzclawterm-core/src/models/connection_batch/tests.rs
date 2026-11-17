@@ -31,6 +31,7 @@ fn ssh_connection() -> SavedConnection {
         group_id: Some("group-a".to_string()),
         description: Some("original".to_string()),
         tags: vec!["prod".to_string()],
+        tree_order: None,
         sort_order: 7,
         icon: Some("server".to_string()),
         icon_auto_detect: Some(true),
@@ -149,6 +150,7 @@ fn serial_connection() -> SavedConnection {
             parity: crate::models::default_parity(),
             flow_control: SerialFlowControl::default(),
             stop_bits: crate::models::default_stop_bits(),
+            connect_prompt: Default::default(),
             ai_execution_profile: AiExecutionProfile::default(),
             backspace_mode: crate::models::default_backspace_mode_serial(),
             encoding: String::new(),
@@ -1155,4 +1157,165 @@ fn skip_reasons_distinguish_protocol_from_global_recording_dependencies() {
         2
     );
     assert!(connection.recording.is_none());
+}
+
+#[test]
+fn rdp_basis_counts_skipped_members_after_values_become_mixed() {
+    use super::ConnectionBatchKind;
+    use super::basis::{BatchValueBasis, rdp_field_basis};
+    let mut first = rdp_connection();
+    first.id = "first".into();
+    let mut second = first.clone();
+    second.id = "second".into();
+    let mut external = first.clone();
+    external.id = "external".into();
+    if let ConnectionType::Rdp { backend, .. } = &mut external.config {
+        *backend = "mstsc".into();
+    }
+    let connections = [first, second, external];
+    let targets =
+        ["first", "second", "external", "removed"].map(|id| (id.into(), ConnectionBatchKind::Rdp));
+    let (basis, counts) = rdp_field_basis(
+        &connections,
+        &targets,
+        RdpBatchFieldGroup::SecurityAndDisplay,
+        &ConnectionBatchEdit::default(),
+        |entry| entry.id.clone(),
+    );
+    assert_eq!(basis, BatchValueBasis::Mixed);
+    assert_eq!(counts.total, 4);
+    assert_eq!(counts.applicable, 2);
+    assert_eq!(
+        counts
+            .skipped_reasons
+            .count(ConnectionBatchSkipReason::UnsupportedProtocol),
+        1
+    );
+    let edit = ConnectionBatchEdit {
+        rdp_backend: BatchField::Set("builtin".into()),
+        ..Default::default()
+    };
+    let (_, counts) = rdp_field_basis(
+        &connections,
+        &targets,
+        RdpBatchFieldGroup::SecurityAndDisplay,
+        &edit,
+        |entry| entry.id.clone(),
+    );
+    assert_eq!(counts.applicable, 3);
+}
+
+#[test]
+fn batch_kind_counts_keep_supported_order_and_ignore_missing_or_android_targets() {
+    use super::ConnectionBatchKind;
+    use super::basis::connection_kind_counts;
+    let mut ssh = ssh_connection();
+    ssh.id = "ssh".into();
+    let mut rdp = rdp_connection();
+    rdp.id = "rdp".into();
+    let android: SavedConnection = serde_json::from_value(serde_json::json!({
+        "id": "android", "name": "fixture", "type": "adb",
+        "device": { "kind": "usb", "serial": "fixture" }
+    }))
+    .unwrap();
+    let ids = ["rdp", "android", "missing", "ssh", "ssh"].map(str::to_string);
+    assert_eq!(
+        connection_kind_counts(&[rdp, android, ssh], &ids),
+        vec![(ConnectionBatchKind::Ssh, 2), (ConnectionBatchKind::Rdp, 1)]
+    );
+}
+
+#[test]
+fn serial_batch_values_disable_only_the_corresponding_connect_prompt() {
+    for (edit, expected_port, expected_baud) in [
+        (
+            ConnectionBatchEdit {
+                serial_port_name: BatchField::Set("COM9".into()),
+                ..Default::default()
+            },
+            false,
+            true,
+        ),
+        (
+            ConnectionBatchEdit {
+                serial_baud_rate: BatchField::Set(57_600),
+                ..Default::default()
+            },
+            true,
+            false,
+        ),
+        (
+            ConnectionBatchEdit {
+                serial_baud_rate: BatchField::Clear,
+                ..Default::default()
+            },
+            true,
+            false,
+        ),
+        (
+            ConnectionBatchEdit {
+                serial_port_name: BatchField::Set("COM9".into()),
+                serial_baud_rate: BatchField::Set(57_600),
+                ..Default::default()
+            },
+            false,
+            false,
+        ),
+        (
+            ConnectionBatchEdit {
+                serial_data_bits: BatchField::Set(7),
+                ..Default::default()
+            },
+            true,
+            true,
+        ),
+    ] {
+        let mut connection = serial_connection();
+        let ConnectionType::Serial { connect_prompt, .. } = &mut connection.config else {
+            panic!("expected serial");
+        };
+        connect_prompt.port = true;
+        connect_prompt.baud_rate = true;
+        apply_connection_batch_edit(&mut connection, &edit);
+        let ConnectionType::Serial { connect_prompt, .. } = &connection.config else {
+            panic!("expected serial");
+        };
+        assert_eq!(connect_prompt.port, expected_port);
+        assert_eq!(connect_prompt.baud_rate, expected_baud);
+        let restored: SavedConnection =
+            serde_json::from_value(serde_json::to_value(&connection).unwrap()).unwrap();
+        let ConnectionType::Serial {
+            connect_prompt: restored_prompt,
+            ..
+        } = restored.config
+        else {
+            panic!("expected serial");
+        };
+        assert_eq!(restored_prompt, *connect_prompt);
+    }
+}
+
+#[test]
+fn clearing_the_serial_device_enables_prompt_without_changing_baud_prompt() {
+    for device in [BatchField::Clear, BatchField::Set(String::new())] {
+        let mut connection = serial_connection();
+        apply_connection_batch_edit(
+            &mut connection,
+            &ConnectionBatchEdit {
+                serial_port_name: device,
+                ..Default::default()
+            },
+        );
+        let ConnectionType::Serial {
+            port_name,
+            connect_prompt,
+            ..
+        } = connection.config
+        else {
+            panic!("expected serial");
+        };
+        assert!(port_name.is_empty());
+        assert!(connect_prompt.port);
+        assert!(!connect_prompt.baud_rate);
+    }
 }

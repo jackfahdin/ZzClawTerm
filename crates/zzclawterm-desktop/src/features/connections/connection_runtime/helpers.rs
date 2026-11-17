@@ -1,6 +1,7 @@
 use gpui::Context;
-use rust_i18n::t;
-use std::borrow::Cow;
+use zzclawterm_core::models::connection::validation::{
+    self, AccountSelection, ConnectionValidationError,
+};
 use zzclawterm_core::{
     AiExecutionProfile, ConnectionAuth, ConnectionNetwork, ConnectionPostLogin, ConnectionType,
     RdpClipboardSettings, RdpDisplaySettings, RdpReconnectSettings, RdpSecuritySettings,
@@ -52,6 +53,36 @@ pub(super) enum ConnectionEditorValidationError {
     SshAlgorithms(zzclawterm_transport::SshAlgorithmValidationError),
 }
 
+impl From<ConnectionValidationError> for ConnectionEditorValidationError {
+    fn from(error: ConnectionValidationError) -> Self {
+        match error {
+            ConnectionValidationError::PortInvalid => Self::PortInvalid,
+            ConnectionValidationError::MissingAccount => Self::MissingAccount,
+            ConnectionValidationError::UsernameRequired => Self::UsernameRequired,
+            ConnectionValidationError::BaudRateInvalid => Self::BaudRateInvalid,
+            ConnectionValidationError::RdpDisplayWidthInvalid => Self::RdpDisplayWidthInvalid,
+            ConnectionValidationError::RdpDisplayHeightInvalid => Self::RdpDisplayHeightInvalid,
+            ConnectionValidationError::RdpReconnectAttemptsInvalid => {
+                Self::RdpReconnectAttemptsInvalid
+            }
+            ConnectionValidationError::RdpRelayUnsupported => Self::RdpRelayUnsupported,
+            ConnectionValidationError::RdpWindowsAuthenticationRequired => {
+                Self::RdpWindowsAuthenticationRequired
+            }
+            ConnectionValidationError::VncUsernameTooLong => Self::VncUsernameTooLong,
+            ConnectionValidationError::VncReconnectAttemptsInvalid => {
+                Self::VncReconnectAttemptsInvalid
+            }
+            ConnectionValidationError::VncPasswordTooLong => Self::VncPasswordTooLong,
+            ConnectionValidationError::PostLoginCommandRequired => Self::PostLoginCommandRequired,
+            ConnectionValidationError::PostLoginDelayInvalid => Self::PostLoginDelayInvalid,
+            ConnectionValidationError::SftpShellDetectionTimeoutInvalid => {
+                Self::SftpShellDetectionTimeoutInvalid
+            }
+        }
+    }
+}
+
 pub(super) fn validate_editor_account(
     editor: &ConnectionEditorState,
     accounts: &[zzclawterm_core::SavedPassword],
@@ -72,27 +103,19 @@ pub(super) fn validate_editor_account(
     } else {
         None
     };
-    let account = id.and_then(|id| accounts.iter().find(|entry| entry.id == id));
-    if (id.is_some()
-        || password_active && editor.password_source == ConnectionEditorPasswordSource::Saved)
-        && account.is_none()
-    {
-        return Err(ConnectionEditorValidationError::MissingAccount);
-    }
-    let account_username = account
-        .map(|entry| entry.username.trim())
-        .filter(|username| !username.is_empty());
-    let effective_username = if identity
-        && editor.username_source == zzclawterm_core::ConnectionUsernameSource::Account
-    {
-        account_username.unwrap_or(editor.username.trim())
-    } else {
-        editor.username.trim()
-    };
-    if editor.kind == ConnectionKindTab::Ssh && effective_username.is_empty() {
-        return Err(ConnectionEditorValidationError::UsernameRequired);
-    }
-    Ok(())
+    validation::validate_account_selection(
+        AccountSelection {
+            reference: id,
+            require_saved_password: password_active
+                && editor.password_source == ConnectionEditorPasswordSource::Saved,
+            username: &editor.username,
+            username_source: editor.username_source,
+            uses_account_identity: identity,
+            ssh: editor.kind == ConnectionKindTab::Ssh,
+        },
+        accounts,
+    )
+    .map_err(Into::into)
 }
 
 pub(super) fn connection_editor_from_saved(
@@ -140,6 +163,7 @@ pub(super) fn connection_editor_from_saved(
     };
     let icon_auto_detect = connection.icon_auto_detect_enabled();
     let mut editor = ConnectionEditorState {
+        defaults_mode: false,
         android_usb: false,
         android_screen: Default::default(),
         id: Some(connection.id),
@@ -246,6 +270,8 @@ pub(super) fn connection_editor_from_saved(
         working_dir: String::new(),
         serial_port: String::new(),
         baud_rate: "115200".to_string(),
+        serial_prompt_port: false,
+        serial_prompt_baud_rate: false,
         data_bits: "8".to_string(),
         parity: "none".to_string(),
         flow_control: Default::default(),
@@ -390,12 +416,15 @@ pub(super) fn connection_editor_from_saved(
             parity,
             flow_control,
             stop_bits,
+            connect_prompt,
             backspace_mode,
             encoding,
             ..
         } => {
             editor.serial_port = port_name;
             editor.baud_rate = baud_rate.to_string();
+            editor.serial_prompt_port = connect_prompt.port;
+            editor.serial_prompt_baud_rate = connect_prompt.baud_rate;
             editor.data_bits = data_bits.to_string();
             editor.parity = parity;
             editor.flow_control = flow_control;
@@ -606,7 +635,9 @@ pub(super) fn build_saved_connection_from_editor(
         }
         ConnectionKindTab::Serial => {
             let port_name = editor.serial_port.trim().to_string();
-            if port_name.is_empty() {
+            // A deferred port is chosen at connect time; only a connection that
+            // never asks needs the device up front.
+            if port_name.is_empty() && !editor.serial_prompt_port {
                 return Err(ConnectionEditorValidationError::SerialPortRequired);
             }
             let baud_rate = editor
@@ -614,9 +645,7 @@ pub(super) fn build_saved_connection_from_editor(
                 .trim()
                 .parse::<u32>()
                 .map_err(|_| ConnectionEditorValidationError::BaudRateInvalid)?;
-            if !(1..=4_000_000).contains(&baud_rate) {
-                return Err(ConnectionEditorValidationError::BaudRateInvalid);
-            }
+            validation::validate_baud_rate(baud_rate)?;
             let data_bits = editor
                 .data_bits
                 .trim()
@@ -630,6 +659,10 @@ pub(super) fn build_saved_connection_from_editor(
                 parity: non_empty_or(editor.parity.clone(), "none"),
                 flow_control: editor.flow_control,
                 stop_bits: non_empty_or(editor.stop_bits.clone(), "1"),
+                connect_prompt: zzclawterm_core::models::connection::SerialConnectPrompt {
+                    port: editor.serial_prompt_port,
+                    baud_rate: editor.serial_prompt_baud_rate,
+                },
                 ai_execution_profile: AiExecutionProfile::Auto,
                 backspace_mode: zzclawterm_core::terminal::connection_input::BackspaceMode::parse(
                     &editor.backspace_mode,
@@ -648,14 +681,9 @@ pub(super) fn build_saved_connection_from_editor(
             if !editor.uses_mstsc_rdp() && editor.username.trim().is_empty() {
                 return Err(ConnectionEditorValidationError::UsernameRequired);
             }
-            if !editor.uses_mstsc_rdp() && !(640..=7680).contains(&editor.rdp_display.width) {
-                return Err(ConnectionEditorValidationError::RdpDisplayWidthInvalid);
-            }
-            if !editor.uses_mstsc_rdp() && !(480..=4320).contains(&editor.rdp_display.height) {
-                return Err(ConnectionEditorValidationError::RdpDisplayHeightInvalid);
-            }
-            if !editor.uses_mstsc_rdp() && editor.rdp_reconnect.max_attempts > 20 {
-                return Err(ConnectionEditorValidationError::RdpReconnectAttemptsInvalid);
+            if !editor.uses_mstsc_rdp() {
+                validation::validate_rdp_display(&editor.rdp_display)?;
+                validation::validate_rdp_reconnect(editor.rdp_reconnect.max_attempts)?;
             }
             if editor.uses_mstsc_rdp() {
                 if editor.proxy_id.is_some() || editor.proxy_jump_id.is_some() {
@@ -665,12 +693,10 @@ pub(super) fn build_saved_connection_from_editor(
                     .map_err(|_| ConnectionEditorValidationError::RdpMstscHostInvalid)?;
             }
             if matches!(editor.rdp_backend.as_str(), "windows" | "active-x") {
-                if editor.proxy_id.is_some() || editor.proxy_jump_id.is_some() {
-                    return Err(ConnectionEditorValidationError::RdpRelayUnsupported);
-                }
-                if editor.rdp_security.windows_authentication.as_deref() != Some("system") {
-                    return Err(ConnectionEditorValidationError::RdpWindowsAuthenticationRequired);
-                }
+                validation::validate_native_rdp(
+                    editor.proxy_id.is_some() || editor.proxy_jump_id.is_some(),
+                    editor.rdp_security.windows_authentication.as_deref(),
+                )?;
             }
             ConnectionType::Rdp {
                 host,
@@ -732,24 +758,17 @@ pub(super) fn build_saved_connection_from_editor(
                 return Err(ConnectionEditorValidationError::HostRequired);
             }
             let port = parse_port(&editor.port)?;
-            if editor.username.trim().len() > 255 {
-                return Err(ConnectionEditorValidationError::VncUsernameTooLong);
-            }
-            if editor.vnc_reconnect.max_attempts > 20 {
-                return Err(ConnectionEditorValidationError::VncReconnectAttemptsInvalid);
-            }
+            validation::validate_vnc_username(&editor.username)?;
+            validation::validate_vnc_reconnect(editor.vnc_reconnect.max_attempts)?;
             if editor.auth_mode == "password"
                 && editor.vnc_security.mode != "none"
                 && editor.password_source == ConnectionEditorPasswordSource::Direct
                 && editor.password_edit == crate::models::ConnectionPasswordEdit::Replace
-                && editor.password.len()
-                    > if editor.vnc_security.mode == "vnc_auth" {
-                        8
-                    } else {
-                        255
-                    }
             {
-                return Err(ConnectionEditorValidationError::VncPasswordTooLong);
+                validation::validate_vnc_password_length(
+                    &editor.vnc_security.mode,
+                    editor.password.len(),
+                )?;
             }
             ConnectionType::Vnc {
                 username: editor.username.trim().to_owned(),
@@ -794,25 +813,22 @@ pub(super) fn build_saved_connection_from_editor(
                 endpoint_index,
             }
         })?;
-        if editor.post_login_enabled && editor.post_login_command.trim().is_empty() {
-            return Err(ConnectionEditorValidationError::PostLoginCommandRequired);
-        }
+        validation::validate_post_login_command(
+            editor.post_login_enabled,
+            &editor.post_login_command,
+        )?;
         let delay = editor
             .post_login_delay_ms
             .trim()
             .parse::<u64>()
             .map_err(|_| ConnectionEditorValidationError::PostLoginDelayInvalid)?;
-        if delay > 60_000 {
-            return Err(ConnectionEditorValidationError::PostLoginDelayInvalid);
-        }
+        validation::validate_post_login_delay(delay)?;
         let sftp_timeout = editor
             .sftp_shell_detection_timeout_ms
             .trim()
             .parse::<u64>()
             .map_err(|_| ConnectionEditorValidationError::SftpShellDetectionTimeoutInvalid)?;
-        if !(100..=60_000).contains(&sftp_timeout) {
-            return Err(ConnectionEditorValidationError::SftpShellDetectionTimeoutInvalid);
-        }
+        validation::validate_sftp_detection_timeout(sftp_timeout)?;
     }
 
     let name = if editor.name.trim().is_empty() {
@@ -823,10 +839,17 @@ pub(super) fn build_saved_connection_from_editor(
             | ConnectionType::Vnc { host, port, .. } => {
                 format!("{host}:{port}")
             }
-            ConnectionType::LocalTerminal { shell_path, .. } => {
-                local_terminal_default_name(shell_path).into_owned()
-            }
-            ConnectionType::Serial { port_name, .. } => port_name.clone(),
+            ConnectionType::LocalTerminal { .. } => "Local Terminal".to_string(),
+            // The device and rate name the connection, the same way a quick
+            // serial link is titled. A connection that asks for the device when
+            // connecting has none yet, and an empty title would leave the list
+            // showing a blank row.
+            ConnectionType::Serial {
+                port_name,
+                baud_rate,
+                ..
+            } => crate::models::serial_connection_name(port_name, &baud_rate.to_string())
+                .unwrap_or_else(|| crate::models::SERIAL_FALLBACK_NAME.to_string()),
             ConnectionType::Adb { device, .. } => device.serial(),
         }
     } else {
@@ -1047,6 +1070,7 @@ pub(super) fn build_saved_connection_from_editor(
             .clone()
             .filter(|value| !value.trim().is_empty()),
         description: non_empty_optional(&editor.description),
+        tree_order: None,
         sort_order: 0,
         icon: editor.icon.clone().filter(|value| !value.trim().is_empty()),
         // Only SSH sessions report a remote system, so nothing else can be
@@ -1082,15 +1106,135 @@ pub(super) fn build_saved_connection_from_editor(
     })
 }
 
-pub(super) fn parse_port(value: &str) -> Result<u16, ConnectionEditorValidationError> {
-    let port = value
-        .trim()
-        .parse::<u16>()
-        .map_err(|_| ConnectionEditorValidationError::PortInvalid)?;
-    if port == 0 {
-        return Err(ConnectionEditorValidationError::PortInvalid);
+/// Stable storage key for a connection kind's default session settings.
+pub(super) fn default_session_settings_kind_id(kind: ConnectionKindTab) -> &'static str {
+    match kind {
+        ConnectionKindTab::Ssh => "ssh",
+        ConnectionKindTab::Local => "local",
+        ConnectionKindTab::Telnet => "telnet",
+        ConnectionKindTab::Serial => "serial",
+        ConnectionKindTab::Rdp => "rdp",
+        ConnectionKindTab::Vnc => "vnc",
+        ConnectionKindTab::Adb => "adb",
     }
-    Ok(port)
+}
+
+/// Build the persisted payload of a "default session settings" draft.
+///
+/// The shared builder validates identity fields the defaults editor never
+/// shows, so placeholder identity values satisfy it and are stripped from the
+/// result. Everything the user configured on the non-basic tabs survives.
+pub(super) fn build_default_session_settings(
+    editor: &ConnectionEditorState,
+) -> Result<SavedConnection, ConnectionEditorValidationError> {
+    let mut draft = editor.clone();
+    if draft.host.trim().is_empty() {
+        draft.host = "127.0.0.1".to_string();
+    }
+    if draft.kind == ConnectionKindTab::Local && draft.shell_path.trim().is_empty() {
+        draft.shell_path = "default".to_string();
+    }
+    if draft.kind == ConnectionKindTab::Serial && draft.serial_port.trim().is_empty() {
+        draft.serial_port = "default".to_string();
+    }
+    let mut built = build_saved_connection_from_editor(&draft)?;
+    built.id = editor.id.clone().unwrap_or_else(uuid);
+    built.name = String::new();
+    built.group_id = None;
+    built.description = None;
+    built.tags = Vec::new();
+    built.icon = None;
+    built.icon_auto_detect = None;
+    built.asset = None;
+    built.last_used_at_ms = None;
+    Ok(built)
+}
+
+/// Copy saved default session settings onto a fresh new-connection draft.
+///
+/// Basic info never carries over: identity, addressing, and credentials live
+/// on the basic tab, which defaults mode hides on purpose, so every new
+/// connection still starts with empty identity fields.
+pub(super) fn apply_session_defaults(
+    defaults: &ConnectionEditorState,
+    editor: &mut ConnectionEditorState,
+) {
+    if defaults.kind != editor.kind {
+        return;
+    }
+    editor.proxy_id = defaults.proxy_id.clone();
+    editor.proxy_jump_id = defaults.proxy_jump_id.clone();
+    editor.agent_endpoint = defaults.agent_endpoint.clone();
+    editor.agent_forwarding_config = defaults.agent_forwarding_config.clone();
+    // A persisted policy never substitutes for consent in this draft.
+    editor.agent_allow_all_confirmed = false;
+    editor.agent_forwarding_endpoint_index = 0;
+    editor.backspace_mode = defaults.backspace_mode.clone();
+    editor.encoding = defaults.encoding.clone();
+    editor.x11_forwarding = defaults.x11_forwarding;
+    editor.dynamic_tab_title = defaults.dynamic_tab_title;
+    editor.terminal_type = defaults.terminal_type;
+    editor.ssh_compatibility_mode = defaults.ssh_compatibility_mode;
+    editor.ssh_profile = defaults.ssh_profile;
+    editor.sftp_enabled = defaults.sftp_enabled;
+    editor.sftp_compatibility_mode = defaults.sftp_compatibility_mode;
+    editor.sftp_cwd_follow_mode = defaults.sftp_cwd_follow_mode.clone();
+    editor.sftp_shell_detection_timeout_ms = defaults.sftp_shell_detection_timeout_ms.clone();
+    editor.sftp_pipeline_depth = defaults.sftp_pipeline_depth;
+    editor.sftp_extra = defaults.sftp_extra.clone();
+    editor.sftp_filename_encoding = defaults.sftp_filename_encoding.clone();
+    editor.ssh_algorithm_mode = defaults.ssh_algorithm_mode.clone();
+    editor.ssh_algorithm_kex = defaults.ssh_algorithm_kex.clone();
+    editor.ssh_algorithm_ciphers = defaults.ssh_algorithm_ciphers.clone();
+    editor.ssh_algorithm_macs = defaults.ssh_algorithm_macs.clone();
+    editor.ssh_algorithm_host_keys = defaults.ssh_algorithm_host_keys.clone();
+    editor.post_login_enabled = defaults.post_login_enabled;
+    editor.post_login_command = defaults.post_login_command.clone();
+    editor.post_login_delay_ms = defaults.post_login_delay_ms.clone();
+    editor.raw_tcp_cli = defaults.raw_tcp_cli;
+    editor.telnet_enter_mode = defaults.telnet_enter_mode.clone();
+    editor.local_echo = defaults.local_echo;
+    editor.local_line_edit = defaults.local_line_edit;
+    editor.force_character_at_a_time = defaults.force_character_at_a_time;
+    editor.send_naws = defaults.send_naws;
+    editor.send_sga = defaults.send_sga;
+    editor.telnet_keep_alive_interval_secs = defaults.telnet_keep_alive_interval_secs.clone();
+    editor.telnet_auto_login_enabled = defaults.telnet_auto_login_enabled;
+    editor.telnet_auto_login_send_wake_enter = defaults.telnet_auto_login_send_wake_enter;
+    editor.telnet_auto_login_timeout_ms = defaults.telnet_auto_login_timeout_ms.clone();
+    editor.telnet_auto_login_username_prompt_regex =
+        defaults.telnet_auto_login_username_prompt_regex.clone();
+    editor.telnet_auto_login_password_prompt_regex =
+        defaults.telnet_auto_login_password_prompt_regex.clone();
+    editor.telnet_auto_login_success_prompt_regex =
+        defaults.telnet_auto_login_success_prompt_regex.clone();
+    editor.telnet_auto_login_failure_prompt_regex =
+        defaults.telnet_auto_login_failure_prompt_regex.clone();
+    editor.telnet_auto_login_max_retries = defaults.telnet_auto_login_max_retries.clone();
+    if editor.defaults_mode {
+        editor.port = defaults.port.clone();
+    }
+    editor.baud_rate = defaults.baud_rate.clone();
+    editor.data_bits = defaults.data_bits.clone();
+    editor.parity = defaults.parity.clone();
+    editor.flow_control = defaults.flow_control;
+    editor.stop_bits = defaults.stop_bits.clone();
+    editor.rdp_security = defaults.rdp_security.clone();
+    editor.rdp_display = defaults.rdp_display.clone();
+    editor.rdp_clipboard = defaults.rdp_clipboard.clone();
+    editor.rdp_reconnect = defaults.rdp_reconnect.clone();
+    editor.vnc_security = defaults.vnc_security.clone();
+    editor.vnc_display = defaults.vnc_display.clone();
+    editor.vnc_clipboard = defaults.vnc_clipboard.clone();
+    editor.vnc_reconnect = defaults.vnc_reconnect.clone();
+    editor.vnc_shared = defaults.vnc_shared;
+    editor.vnc_view_only = defaults.vnc_view_only;
+    editor.android_screen = defaults.android_screen;
+    editor.recording = defaults.recording.clone();
+}
+
+pub(super) fn parse_port(value: &str) -> Result<u16, ConnectionEditorValidationError> {
+    validation::parse_port(value).map_err(Into::into)
 }
 
 pub(super) fn non_empty_or(value: String, fallback: &str) -> String {
@@ -1102,48 +1246,8 @@ pub(super) fn non_empty_or(value: String, fallback: &str) -> String {
     }
 }
 
-/// Localized label of a known local-shell preset value. Shared by the
-/// editor's shell label and the default connection name so the two cannot
-/// drift.
-pub(in crate::features) fn shell_preset_label(shell_path: &str) -> Option<Cow<'static, str>> {
-    match shell_path {
-        "powershell.exe" => Some(t!("dialog.shellPowerShell")),
-        "cmd.exe" => Some(t!("dialog.shellCmd")),
-        "bash" => Some(t!("dialog.shellBash")),
-        "wsl.exe" => Some(t!("dialog.shellWsl")),
-        "wt.exe" => Some(t!("dialog.shellWindowsTerminal")),
-        _ => None,
-    }
-}
-
-/// Default name for a newly saved local terminal connection, derived from the
-/// selected shell: the preset label for a known preset, the file name without
-/// a trailing `.exe` for a custom path or bare command, and the generic
-/// local-terminal label when nothing can be derived.
-pub(in crate::features) fn local_terminal_default_name(shell_path: &str) -> Cow<'static, str> {
-    let shell_path = shell_path.trim();
-    if let Some(label) = shell_preset_label(shell_path) {
-        return label;
-    }
-    // Split on both separators by hand: `Path::file_stem` only honors the
-    // platform's own separator, but this code compiles for every platform.
-    let file_name = shell_path.rsplit(['\\', '/']).next().unwrap_or(shell_path);
-    let stem = file_name
-        .to_ascii_lowercase()
-        .strip_suffix(".exe")
-        .map(|_| &file_name[..file_name.len() - ".exe".len()])
-        .unwrap_or(file_name)
-        .trim();
-    if stem.is_empty() {
-        t!("dialog.localTerminal")
-    } else {
-        Cow::Owned(stem.to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use rust_i18n::t;
     use zzclawterm_core::{
         AiExecutionProfile, ConnectionAuth, ConnectionRecordingSettings, ConnectionType,
         RdpClipboardSettings, RdpDisplaySettings, RdpReconnectSettings, RdpSecuritySettings,
@@ -1155,62 +1259,90 @@ mod tests {
     use crate::models::{ConnectionEditorPasswordSource, ConnectionKindTab};
 
     use super::{
-        ConnectionEditorValidationError, build_saved_connection_from_editor,
-        connection_editor_from_saved, local_terminal_default_name, shell_preset_label,
-        validate_editor_account,
+        ConnectionEditorValidationError, apply_session_defaults, build_default_session_settings,
+        build_saved_connection_from_editor, connection_editor_from_saved, validate_editor_account,
     };
 
     #[test]
-    fn local_terminal_default_name_uses_preset_labels() {
-        for (value, key) in [
-            ("powershell.exe", "dialog.shellPowerShell"),
-            ("cmd.exe", "dialog.shellCmd"),
-            ("bash", "dialog.shellBash"),
-            ("wsl.exe", "dialog.shellWsl"),
-            ("wt.exe", "dialog.shellWindowsTerminal"),
-        ] {
-            assert_eq!(shell_preset_label(value), Some(t!(key)));
-            assert_eq!(local_terminal_default_name(value), t!(key));
-            assert_eq!(
-                local_terminal_default_name(&format!("  {value}  ")),
-                t!(key)
-            );
-        }
+    fn default_session_settings_builder_strips_identity_and_survives_a_round_trip() {
+        let editor = connection_editor_from_saved(
+            serde_json::from_value::<SavedConnection>(serde_json::json!({
+                "id":"defaults", "name":"", "type":"ssh",
+                "host":"", "port":22, "username":"root",
+                "encoding":"UTF-8",
+                "sftp":{"enabled":false,"compatibility_mode":true}
+            }))
+            .unwrap(),
+            false,
+        );
+        let built = build_default_session_settings(&editor).unwrap();
+        assert_eq!(built.name, "");
+        // The stored payload must deserialize back into a connection so a
+        // later version can seed new drafts from it.
+        let value = serde_json::to_value(&built).unwrap();
+        let reopened: SavedConnection = serde_json::from_value(value).unwrap();
+        assert!(!reopened.sftp.enabled);
+        assert!(reopened.sftp.compatibility_mode);
     }
 
     #[test]
-    fn local_terminal_default_name_derives_from_custom_paths() {
-        // Windows and Unix separators both resolve, on any build platform.
-        assert_eq!(
-            local_terminal_default_name("C:\\Program Files\\PowerShell\\7\\pwsh.exe"),
-            "pwsh"
+    fn session_defaults_apply_everything_except_basic_info() {
+        let defaults = connection_editor_from_saved(
+            serde_json::from_value::<SavedConnection>(serde_json::json!({
+                "id":"defaults", "name":"prod", "type":"ssh",
+                "host":"10.0.0.9", "port":2022, "username":"deploy",
+                "encoding":"UTF-8",
+                "network":{"proxy_id":"proxy-1"},
+                "sftp":{"enabled":false,"compatibility_mode":true}
+            }))
+            .unwrap(),
+            false,
         );
-        assert_eq!(
-            local_terminal_default_name("C:/tools/git-bash.exe"),
-            "git-bash"
+        // A fresh new-connection draft: empty identity, stock parameters.
+        let mut draft = connection_editor_from_saved(
+            serde_json::from_value::<SavedConnection>(serde_json::json!({
+                "id":"fresh", "name":"", "type":"ssh",
+                "host":"", "port":22, "username":"root"
+            }))
+            .unwrap(),
+            false,
         );
-        assert_eq!(local_terminal_default_name("/bin/zsh"), "zsh");
-        assert_eq!(local_terminal_default_name("pwsh"), "pwsh");
-        assert_eq!(local_terminal_default_name("SHELL.EXE"), "SHELL");
+        draft.id = None;
+        draft.name = String::new();
+        apply_session_defaults(&defaults, &mut draft);
+        assert_eq!(draft.encoding, "UTF-8");
+        assert!(!draft.sftp_enabled);
+        assert!(draft.sftp_compatibility_mode);
+        assert_eq!(draft.proxy_id.as_deref(), Some("proxy-1"));
+        // Basic info stays untouched.
+        assert_eq!(draft.host, "");
+        assert_eq!(draft.port, "22");
+        assert_eq!(draft.username, "root");
+        assert_eq!(draft.name, "");
+        assert!(draft.id.is_none());
     }
 
     #[test]
-    fn local_terminal_default_name_falls_back_when_underivable() {
-        assert_eq!(local_terminal_default_name(""), t!("dialog.localTerminal"));
-        assert_eq!(
-            local_terminal_default_name("   "),
-            t!("dialog.localTerminal")
+    fn session_defaults_skip_a_draft_of_another_kind() {
+        let defaults = connection_editor_from_saved(
+            serde_json::from_value::<SavedConnection>(serde_json::json!({
+                "id":"defaults", "name":"", "type":"ssh",
+                "host":"", "port":22, "username":"root",
+                "encoding":"UTF-8"
+            }))
+            .unwrap(),
+            false,
         );
-        assert_eq!(
-            local_terminal_default_name("C:\\tools\\.exe"),
-            t!("dialog.localTerminal")
+        let mut draft = connection_editor_from_saved(
+            serde_json::from_value::<SavedConnection>(serde_json::json!({
+                "id":"fresh", "name":"", "type":"telnet",
+                "host":"", "port":23, "username":""
+            }))
+            .unwrap(),
+            false,
         );
-    }
-
-    #[test]
-    fn shell_preset_label_rejects_custom_paths() {
-        assert_eq!(shell_preset_label("pwsh"), None);
-        assert_eq!(shell_preset_label(""), None);
+        apply_session_defaults(&defaults, &mut draft);
+        assert_ne!(draft.encoding, "UTF-8");
     }
 
     #[test]
@@ -1251,6 +1383,7 @@ mod tests {
             },
             group_id: None,
             description: None,
+            tree_order: None,
             sort_order: 0,
             icon: Some("linux".to_string()),
             icon_auto_detect: None,
@@ -1297,6 +1430,7 @@ mod tests {
             },
             group_id: None,
             description: None,
+            tree_order: None,
             sort_order: 0,
             icon: None,
             icon_auto_detect: None,
@@ -1503,6 +1637,7 @@ mod tests {
             },
             group_id: None,
             description: None,
+            tree_order: None,
             sort_order: 0,
             icon: None,
             icon_auto_detect: None,
@@ -1561,6 +1696,7 @@ mod tests {
             },
             group_id: None,
             description: None,
+            tree_order: None,
             sort_order: 0,
             icon: None,
             icon_auto_detect: None,
@@ -1617,6 +1753,7 @@ mod tests {
             },
             group_id: None,
             description: None,
+            tree_order: None,
             sort_order: 0,
             icon: None,
             icon_auto_detect: None,
@@ -1725,6 +1862,7 @@ mod tests {
             },
             group_id: None,
             description: None,
+            tree_order: None,
             sort_order: 0,
             icon: None,
             icon_auto_detect: None,
@@ -1881,6 +2019,7 @@ mod tests {
             },
             group_id: None,
             description: None,
+            tree_order: None,
             sort_order: 0,
             icon: None,
             icon_auto_detect: None,
@@ -1993,6 +2132,7 @@ mod tests {
             },
             group_id: None,
             description: None,
+            tree_order: None,
             sort_order: 0,
             icon: None,
             icon_auto_detect: None,
@@ -2111,6 +2251,7 @@ mod tests {
             },
             group_id: None,
             description: None,
+            tree_order: None,
             sort_order: 0,
             icon: None,
             icon_auto_detect: None,
@@ -2211,33 +2352,57 @@ impl ZzClawTermApp {
     }
 
     pub(in crate::features) fn refresh_connection_serial_ports(&mut self) {
-        self.connection_state.replace_serial_ports(
-            self.session
-                .manager()
-                .list_serial_ports()
-                .unwrap_or_default(),
-        );
+        let ports = self
+            .session
+            .manager()
+            .list_serial_ports()
+            .unwrap_or_default();
+        self.connection_state.replace_serial_ports(ports);
+    }
+
+    pub(in crate::features) fn serial_ports_in_use(&self) -> std::collections::HashSet<String> {
+        self.session.serial_ports_in_use(None, None)
+    }
+
+    pub(in crate::features) fn serial_port_in_use(&self, port_name: &str) -> bool {
+        self.serial_ports_in_use().contains(port_name.trim())
     }
 
     pub(in crate::features) fn request_connection_serial_ports_refresh(
         &mut self,
         cx: &mut Context<Self>,
     ) {
-        if !self.connection_state.begin_serial_ports_refresh() {
-            return;
-        }
         let manager = self.session.manager_handle();
-        let scheduler = self.blocking_jobs.clone();
-        cx.spawn(async move |this, cx| {
-            let task = scheduler.submit_task("connection-serial-ports", move |_| {
+        self.request_connection_serial_ports_refresh_with_loader(
+            move || {
                 manager
                     .list_serial_ports()
                     .map_err(|error| error.to_string())
-            });
+            },
+            cx,
+        );
+    }
+
+    pub(in crate::features) fn request_connection_serial_ports_refresh_with_loader(
+        &mut self,
+        loader: impl FnOnce() -> Result<Vec<zzclawterm_transport::SerialPortInfo>, String>
+        + Send
+        + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.connection_state.begin_serial_ports_refresh() {
+            return;
+        }
+        let scheduler = self.blocking_jobs.clone();
+        cx.spawn(async move |this, cx| {
+            let task = scheduler.submit_task("connection-serial-ports", move |_| loader());
             let result = await_blocking_job(task).await.and_then(|result| result);
             let _ = this.update(cx, |this, cx| {
                 match result {
-                    Ok(ports) => this.connection_state.replace_serial_ports(ports),
+                    Ok(ports) => {
+                        this.connection_state.replace_serial_ports(ports);
+                        this.seed_serial_connect_prompt_device(cx);
+                    }
                     Err(error) => this.connection_state.fail_serial_ports_refresh(error),
                 }
                 cx.notify();
@@ -2289,14 +2454,14 @@ pub(in crate::features) enum ConnectionEditorToggle {
 
 #[cfg(test)]
 mod account_edit_tests {
-
+    use super::{
+        ConnectionEditorValidationError, build_saved_connection_from_editor,
+        connection_editor_from_saved,
+    };
+    use crate::models::ConnectionEditorPasswordSource;
+    use zzclawterm_core::SavedConnection;
     #[test]
     fn account_validation_uses_effective_username_and_preserves_missing_references() {
-        use super::ConnectionEditorValidationError;
-        use super::build_saved_connection_from_editor;
-        use super::connection_editor_from_saved;
-        use crate::models::ConnectionEditorPasswordSource;
-        use zzclawterm_core::SavedConnection;
         let connection: SavedConnection = serde_json::from_value(serde_json::json!({
             "id":"account-test", "name":"Account", "type":"ssh", "host":"example.test", "username":"",
             "auth":{"mode":"password", "account_id":"ops", "password_source":"account"}
@@ -2347,10 +2512,6 @@ mod account_edit_tests {
 
     #[test]
     fn vnc_without_authentication_ignores_inactive_password_errors_and_keeps_the_draft() {
-        use super::ConnectionEditorValidationError;
-        use super::build_saved_connection_from_editor;
-        use super::connection_editor_from_saved;
-        use zzclawterm_core::SavedConnection;
         let connection: SavedConnection = serde_json::from_value(serde_json::json!({
             "id":"vnc-draft", "name":"VNC", "type":"vnc", "host":"example.test", "port":5900,
             "auth":{"mode":"password", "password_id":"deleted-account"}
@@ -2375,10 +2536,6 @@ mod account_edit_tests {
 
     #[test]
     fn ssh_authentication_tabs_retain_credentials_and_honor_explicit_password_edits() {
-        use super::build_saved_connection_from_editor;
-        use super::connection_editor_from_saved;
-        use crate::models::ConnectionEditorPasswordSource;
-        use zzclawterm_core::SavedConnection;
         let connection: SavedConnection = serde_json::from_value(serde_json::json!({
             "id":"active-auth-test", "name":"Active auth", "type":"ssh", "host":"example.test", "username":"user",
             "auth":{"mode":"password", "password_source":"connection", "password":"existing"}
@@ -2446,10 +2603,6 @@ mod account_edit_tests {
     }
     #[test]
     fn mstsc_saves_without_unused_credentials_display_or_reconnect_validation() {
-        use super::ConnectionEditorValidationError;
-        use super::build_saved_connection_from_editor;
-        use super::connection_editor_from_saved;
-        use zzclawterm_core::SavedConnection;
         let original: SavedConnection = serde_json::from_value(serde_json::json!({
             "id":"mstsc", "name":"System RDP", "type":"rdp", "backend":"mstsc",
             "host":"example.test", "username":"", "domain":"EXAMPLE",
@@ -2472,10 +2625,6 @@ mod account_edit_tests {
 
     #[test]
     fn mstsc_requires_a_valid_direct_target_without_discarding_network_settings() {
-        use super::ConnectionEditorValidationError;
-        use super::build_saved_connection_from_editor;
-        use super::connection_editor_from_saved;
-        use zzclawterm_core::SavedConnection;
         let original: SavedConnection = serde_json::from_value(serde_json::json!({
             "id":"mstsc", "name":"System RDP", "type":"rdp", "backend":"mstsc", "host":"example.test"
         })).unwrap();
@@ -2508,9 +2657,6 @@ mod account_edit_tests {
 
     #[test]
     fn editing_an_unrelated_field_preserves_an_unknown_rdp_backend() {
-        use super::build_saved_connection_from_editor;
-        use super::connection_editor_from_saved;
-        use zzclawterm_core::SavedConnection;
         let connection: SavedConnection = serde_json::from_value(serde_json::json!({
             "id":"future-rdp", "name":"Remote desktop", "type":"rdp",
             "host":"example.invalid", "port":3389, "username":"user", "backend":"future-engine"
@@ -2576,5 +2722,125 @@ mod account_edit_tests {
             assert_eq!(auth.saved_account_id(), Some("account"));
             assert!(auth.password.is_none());
         }
+    }
+
+    /// A serial connection may defer its device to connect time, and only then
+    /// may the saved port be empty.
+    #[test]
+    fn serial_editor_accepts_an_empty_port_only_while_the_device_is_asked_at_connect() {
+        let original: SavedConnection = serde_json::from_value(serde_json::json!({
+            "id":"serial", "name":"Board", "type":"serial",
+            "port_name":"COM7", "baud_rate":115200
+        }))
+        .unwrap();
+        let mut editor = connection_editor_from_saved(original, false);
+        editor.serial_port.clear();
+        assert!(matches!(
+            build_saved_connection_from_editor(&editor),
+            Err(ConnectionEditorValidationError::SerialPortRequired)
+        ));
+
+        editor.serial_prompt_port = true;
+        let saved = build_saved_connection_from_editor(&editor).unwrap();
+        let zzclawterm_core::ConnectionType::Serial {
+            port_name,
+            baud_rate,
+            connect_prompt,
+            ..
+        } = &saved.config
+        else {
+            panic!("serial connection expected");
+        };
+        assert_eq!(port_name, "");
+        assert_eq!(*baud_rate, 115200);
+        assert_eq!(
+            *connect_prompt,
+            zzclawterm_core::models::connection::SerialConnectPrompt {
+                port: true,
+                baud_rate: false,
+            }
+        );
+
+        // The intent has to survive being reopened, otherwise the connection
+        // silently loses its prompt on the next save.
+        let reopened = connection_editor_from_saved(saved, false);
+        assert!(reopened.serial_prompt_port);
+        assert!(!reopened.serial_prompt_baud_rate);
+        assert!(reopened.serial_port.is_empty());
+
+        // Asking only for the baud rate keeps the device mandatory.
+        let mut baud_only = connection_editor_from_saved(
+            serde_json::from_value(serde_json::json!({
+                "id":"serial", "name":"Board", "type":"serial",
+                "port_name":"", "baud_rate":9600, "connect_prompt":{"baud_rate":true}
+            }))
+            .unwrap(),
+            false,
+        );
+        assert!(baud_only.serial_prompt_baud_rate);
+        assert!(matches!(
+            build_saved_connection_from_editor(&baud_only),
+            Err(ConnectionEditorValidationError::SerialPortRequired)
+        ));
+        baud_only.serial_port = "COM3".into();
+        let saved = build_saved_connection_from_editor(&baud_only).unwrap();
+        let zzclawterm_core::ConnectionType::Serial { connect_prompt, .. } = &saved.config else {
+            panic!("serial connection expected");
+        };
+        assert_eq!(
+            *connect_prompt,
+            zzclawterm_core::models::connection::SerialConnectPrompt {
+                port: false,
+                baud_rate: true,
+            }
+        );
+
+        // Turning the prompts back off restores the device requirement, so the
+        // editor cannot save a connection that nothing can open.
+        baud_only.serial_port.clear();
+        baud_only.serial_prompt_baud_rate = false;
+        assert!(matches!(
+            build_saved_connection_from_editor(&baud_only),
+            Err(ConnectionEditorValidationError::SerialPortRequired)
+        ));
+    }
+
+    /// An unnamed serial connection is titled the way a quick serial link is —
+    /// device and rate. A connection that picks the device later still gets a
+    /// title the list can show instead of a blank row.
+    #[test]
+    fn an_unnamed_serial_connection_is_titled_after_its_device() {
+        for (port_name, expected) in [
+            ("COM7", "COM7 @ 115200"),
+            (r"\\.\COM10", "COM10 @ 115200"),
+            ("/dev/ttyUSB0", "ttyUSB0 @ 115200"),
+        ] {
+            let editor = connection_editor_from_saved(
+                serde_json::from_value(serde_json::json!({
+                    "id":"serial", "name":"", "type":"serial",
+                    "port_name": port_name, "baud_rate":115200
+                }))
+                .unwrap(),
+                false,
+            );
+            assert_eq!(
+                build_saved_connection_from_editor(&editor).unwrap().name,
+                expected,
+                "{port_name}"
+            );
+        }
+
+        let deferred = connection_editor_from_saved(
+            serde_json::from_value(serde_json::json!({
+                "id":"serial", "name":"", "type":"serial",
+                "port_name":"", "baud_rate":115200, "connect_prompt":{"port":true}
+            }))
+            .unwrap(),
+            false,
+        );
+        assert_eq!(
+            build_saved_connection_from_editor(&deferred).unwrap().name,
+            "Serial"
+        );
     }
 }

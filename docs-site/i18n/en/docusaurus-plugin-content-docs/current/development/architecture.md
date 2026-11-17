@@ -9,8 +9,11 @@ zzclawterm-app
   └─ starts GPUI, registers assets, creates the root window
        └─ zzclawterm-desktop
             ├─ AppShell / ZzClawTermApp / feature state / views
+            ├─ zzclawterm-i18n              shared catalogs and locale normalization
+            ├─ zzclawterm-completion-runtime completion worker and spec loader
             ├─ zzclawterm-ui                shared GPUI controls and theme
             ├─ zzclawterm-terminal-gpui     terminal layout, input, and painting
+            ├─ zzclawterm-terminal-runtime  frame worker, search, and ingress routing
             ├─ zzclawterm-terminal          terminal state machine and snapshots
             ├─ zzclawterm-transport         PTY, SSH, SFTP, and other protocols
             ├─ zzclawterm-recording         recording, history search, and writer pipeline
@@ -30,8 +33,11 @@ The main responsibilities are:
 |------|----------------|
 | `zzclawterm-app` | Executable entry point, logging, embedded assets, and root-window creation |
 | `zzclawterm-desktop` | GPUI composition, state, views, platform adapters, and background coordination |
-| `zzclawterm-ui` | Shared controls, theme tokens, and the `gpui-kit` integration boundary |
+| `zzclawterm-i18n` | Shared catalogs, locale normalization and preload; no workspace dependencies |
+| `zzclawterm-completion-runtime` | Completion worker, queue and spec loader; desktop injects the history repository and event sink |
+| `zzclawterm-ui` | Shared controls, theme tokens, child-window shells/placement, panel headers and the `gpui-kit` integration boundary |
 | `zzclawterm-terminal` | UI-independent terminal state, control sequences, encodings, and graphics protocols |
+| `zzclawterm-terminal-runtime` | UI-independent frame worker, coalesced events, searches, ordered recording and transport event routing; desktop retains visibility, UI application and shutdown scheduling |
 | `zzclawterm-terminal-gpui` | GPUI terminal input, layout, selection, highlighting, images, and painting |
 | `zzclawterm-transport` | PTY, SSH, Telnet, Serial, SFTP, tunnels, remote operations, and transfer protocols |
 | `zzclawterm-recording` | UI-independent recording, transcripts, rotation, and history search; `pipeline` owns the writer thread, bounded queues, and coalesced events |
@@ -85,10 +91,10 @@ PTY / SSH / Telnet / Serial
 zzclawterm-transport typed events
         │
         ▼
-zzclawterm-desktop event drain and session state
-        │
+zzclawterm-terminal-runtime ingress bridge and ordered frame worker
+        │ uses zzclawterm-terminal for parsing and snapshots
         ▼
-zzclawterm-terminal state machine and snapshots
+zzclawterm-desktop event application and presentation state
         │
         ▼
 zzclawterm-terminal-gpui layout, input, and painting
@@ -115,8 +121,50 @@ What that boundary means:
 
 Both helper crates carry a `tests/lifecycle.rs` covering the handshake, an ordinary disconnect, and crash/hang reaping. Keep both in step when the IPC contract changes.
 
+The runtime transfers `TerminalFrameSession` as an opaque ownership value. Desktop
+pauses ingress, drains ordered work and pending events, and coordinates insertion
+into the destination pipeline. Runtime shutdown closures execute on a blocking
+worker. Queue and search tests live with the runtime; GPUI state-application tests
+stay in desktop, using its default-off `test-support` feature.
+
+Static icon catalogs and rendering belong to `zzclawterm-ui::icons`. Completion
+queries, credential metadata matching and connection validation belong to core.
+`zzclawterm-files::external_edit` owns private editor workspaces and blocking file
+watching; desktop injects platform permissions and owns editor/upload jobs.
+`StoreBlockingClient::export_verified_v4_safety_backup` exports in the database
+actor and verifies the durable file on the caller's blocking worker, using the
+existing backup format and reader.
+
+## Desktop extraction boundaries
+
+Pure process sorting, Docker matching and accelerator queries live in
+`zzclawterm-remote-ops::query`; query state and caches stay in desktop. AI reasoning
+text parsing lives in `zzclawterm-core::ai::reasoning_text`. Transfer paths and the
+50 ms progress gate live in `zzclawterm-files`; task identity and event delivery stay
+in desktop. Tray decoding returns full-size RGBA from `zzclawterm-preview::icons`.
+
+Child-window shells, placement and header elements live in `zzclawterm-ui`.
+Desktop injects application identity, window decorations, Windows zoom handling
+and business close callbacks. Large feature panels remain in desktop.
+
+`zzclawterm-i18n` builds the catalogs once. Desktop uses rust-i18n's public `backend`
+option with an empty bridge catalog, retaining language persistence and component
+label updates. Locale aliases, keys and serialized settings are unchanged.
+
+`zzclawterm-completion-runtime` uses core queries and injected blocking repository
+operations. Snapshot rows and generation are read in one store request. The
+bounded worker queue preserves mutation ordering while coalescing searches;
+external generation changes refresh history. Store integration tests remain in
+desktop; worker, spec loader and queue tests live with the runtime.
+
+Updater download and preparation errors carry package problem types and optional
+details from their source. Desktop chooses localized text and retry actions from
+those types; installation helper protocols and package formats are unchanged.
+
 ## Dependency rules
 
+- `zzclawterm-i18n` has no workspace dependencies. `zzclawterm-completion-runtime` may depend only on core among workspace crates, including tests; core cannot depend back on it.
+- `zzclawterm-terminal-runtime` may depend only on core, terminal, transport and recording among workspace crates, including tests. None of these lower-level crates may depend back on the runtime.
 - `zzclawterm-core`, `zzclawterm-terminal`, `zzclawterm-transport`, and `zzclawterm-remote-desktop` stay independent of GPUI.
 - `zzclawterm-updater` may depend only on `zzclawterm-core` within the project; ordinary, development, build, and platform dependencies must not introduce GPUI, desktop, store, or other business crates. `zzclawterm-recording` also remains independent of GPUI, desktop, transport, and other business crates.
 - Protocol decoders that parse server-controlled bytes live only in the helper crates, never in a crate the application links.
@@ -125,3 +173,21 @@ Both helper crates carry a `tests/lifecycle.rs` covering the handshake, an ordin
 - New features prefer an existing focused feature state; add an authoritative Entity only when an independent lifecycle requires one.
 
 See [GPUI Desktop Development](./frontend) for presentation rules and [Runtime, Transport, and Storage Development](./backend) for runtime and persistence guidance.
+
+### Terminal command completion boundaries
+
+`TerminalAssistState.commands` is the sole mutable completion owner.
+`CommandSuggestionFeatureState` holds the popup, selection, scroll, mode,
+suppression, pending history entry, path runtime, search generation and refresh
+task. Input and echo remain in `TerminalEditingState`; history and the runtime
+client remain in `CommandFeatureState`.
+
+Desktop separates `input`, `search`, `interaction`, `fill`/`paste`, `view` and
+`diagnostics`. Hide, dismiss and session-switch transitions retain distinct
+cleanup semantics. Core's `completion::merge` owns candidate merging and path
+quotas. Runtime's `progressive::publish_progressively` awaits caller-owned
+futures, publishing ordinary results first and nonempty paths once afterward.
+It starts no tasks. Desktop owns path caches and I/O, GPUI scheduling, stale
+result checks, terminal write authorization and echo confirmation. Incremental
+results preserve selection by command only when session, mode, input version and
+draft match. Data formats and completion timing are unchanged.

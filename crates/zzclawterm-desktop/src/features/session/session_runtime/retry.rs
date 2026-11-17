@@ -108,6 +108,10 @@ impl ZzClawTermApp {
             reconnect_session_id: None,
             workspace_split: pending.workspace_split.clone(),
             tab_placement: pending.tab_placement,
+            // A retry reuses the configuration that already resolved, so a
+            // deferred serial port must not ask again.
+            serial_selection: None,
+            suppress_serial_prompt: true,
             request_id: Some(new_id.clone()),
         };
         pending.attempt = Default::default();
@@ -116,6 +120,11 @@ impl ZzClawTermApp {
         self.session.start.begin_preparation(new_id, pending);
         self.shell.clear_last_connect_failure();
         self.clear_session_tab_drag(cx);
+        // The saved source was validated above, but its device values are hints.
+        // Retry the resolved serial launch, including all framing and encoding,
+        // instead of rebuilding it from a possibly empty or outdated saved port.
+        let connection =
+            connection.filter(|_| !matches!(&launch_config, Some(SessionLaunchConfig::Serial(_))));
         if let Some(connection) = connection {
             self.start_saved_connection_with_options(connection, options, window, cx);
         } else if let Some(config) = launch_config {

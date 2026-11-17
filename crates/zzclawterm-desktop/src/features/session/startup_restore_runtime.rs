@@ -230,8 +230,8 @@ impl ZzClawTermApp {
             tab_color,
         );
         tab.ssh_runtime_mode = metadata
-            .and_then(|meta| meta.ssh_config.as_ref())
-            .map(|config| config.effective_runtime_mode().as_str().to_string());
+            .and_then(|meta| meta.ssh_runtime_mode())
+            .map(|mode| mode.as_str().to_string());
         if let Some(RestorablePaneNode::Leaf {
             ssh_runtime_mode, ..
         }) = tab.root.as_mut()
@@ -644,6 +644,8 @@ impl ZzClawTermApp {
                 self.register_session(
                     &session_id,
                     crate::models::SessionRuntimeMetadata {
+                        confirmed_ssh_runtime_mode: None,
+                        pending_ssh_startup_command: None,
                         ssh_config: None,
                         ssh_multiplex_key: None,
                         source_connection_id: Some(connection.id.clone()),
@@ -709,6 +711,8 @@ impl ZzClawTermApp {
                 self.register_session(
                     &session_id,
                     crate::models::SessionRuntimeMetadata {
+                        confirmed_ssh_runtime_mode: None,
+                        pending_ssh_startup_command: None,
                         ssh_config: None,
                         ssh_multiplex_key: None,
                         source_connection_id: Some(connection.id.clone()),
@@ -734,7 +738,7 @@ impl ZzClawTermApp {
                 self.settle_remote_desktop_restore(cx);
                 return true;
             }
-            self.continue_saved_connection_start(
+            return self.continue_saved_connection_start(
                 connection,
                 SavedConnectionStartOptions {
                     ssh_runtime_mode: tab
@@ -748,11 +752,13 @@ impl ZzClawTermApp {
                         zzclawterm_core::models::android::AndroidViewKind::from_restore_type(
                             &session_type,
                         ),
+                    // Restoring must not stop on a modal or treat saved serial
+                    // hints as authorization to open a deferred device.
+                    suppress_serial_prompt: true,
                     ..Default::default()
                 },
                 cx,
             );
-            return true;
         }
 
         if session_type == "local" || session_type.is_empty() {
@@ -858,6 +864,8 @@ mod tests {
         app.register_session(
             id,
             SessionRuntimeMetadata {
+                confirmed_ssh_runtime_mode: None,
+                pending_ssh_startup_command: None,
                 ssh_config: Some(config.clone()),
                 ssh_multiplex_key: None,
                 source_connection_id: Some(connection_id.to_string()),
@@ -866,6 +874,81 @@ mod tests {
                 disconnected: true,
             },
         );
+    }
+
+    #[test]
+    fn confirmed_ssh_mode_drives_view_and_restore_despite_auxiliary_errors() {
+        use zzclawterm_core::models::ssh_runtime::SshRuntimeMode;
+        use zzclawterm_transport::SessionEvent;
+        for mode in [
+            SshRuntimeMode::Standard,
+            SshRuntimeMode::Terminal,
+            SshRuntimeMode::Sftp,
+        ] {
+            let root = TestConfigDir::new("zzclawterm-confirmed-ssh-mode");
+            let mut cx = TestAppContext::single();
+            let _cleanup = TestAppCleanup::new(&cx);
+            let app = app_with_visible_ssh_session(&mut cx, root.path(), "ssh-mode");
+            app.update(&mut cx, |app, cx| {
+                let metadata = app.session.metadata_mut("ssh-mode").unwrap();
+                metadata.disconnected = false;
+                metadata.ai_execution_profile = AiExecutionProfile::Posix;
+                metadata.pending_ssh_startup_command = Some(crate::models::StartupCommandRequest {
+                    command: "echo test".into(),
+                    delay_ms: 60_000,
+                });
+                app.session.extend_pending_events([
+                    SessionEvent::SshRuntimeModeConfirmed {
+                        session_id: "ssh-mode".into(),
+                        mode,
+                    },
+                    SessionEvent::Error {
+                        session_id: "ssh-mode".into(),
+                        message: "exec request rejected".into(),
+                    },
+                    SessionEvent::Error {
+                        session_id: "ssh-mode".into(),
+                        message: "resource probe timed out".into(),
+                    },
+                    // A stale/duplicate confirmation cannot flip an established mode.
+                    SessionEvent::SshRuntimeModeConfirmed {
+                        session_id: "ssh-mode".into(),
+                        mode: SshRuntimeMode::Sftp,
+                    },
+                ]);
+                app.drain_session_events(cx);
+                assert_eq!(
+                    app.session_is_sftp_only("ssh-mode"),
+                    mode == SshRuntimeMode::Sftp
+                );
+                let metadata = app.session.metadata("ssh-mode").unwrap();
+                assert_eq!(metadata.confirmed_ssh_runtime_mode, Some(mode));
+                assert!(metadata.pending_ssh_startup_command.is_none());
+                assert_eq!(
+                    metadata.ai_execution_profile,
+                    if mode == SshRuntimeMode::Sftp {
+                        AiExecutionProfile::Disabled
+                    } else {
+                        AiExecutionProfile::Posix
+                    }
+                );
+                let SessionLaunchConfig::Ssh(restart) = metadata.launch_config_for_restart() else {
+                    panic!("SSH launch expected")
+                };
+                assert_eq!(restart.runtime_mode, mode);
+                let info = app.session.session_info("ssh-mode").unwrap();
+                let tab = app.serialize_open_tab_for_session(&info);
+                assert_eq!(
+                    tab.ssh_runtime_mode
+                        .as_deref()
+                        .and_then(SshRuntimeMode::parse),
+                    Some(mode)
+                );
+                let encoded = serde_json::to_string(&tab).unwrap();
+                let decoded: RestorableOpenTab = serde_json::from_str(&encoded).unwrap();
+                assert_eq!(decoded.ssh_runtime_mode, tab.ssh_runtime_mode);
+            });
+        }
     }
 
     #[test]
@@ -993,6 +1076,56 @@ mod tests {
             let _ = window.draw(cx);
             window.simulate_next_frame(cx);
             assert!(restored.read(cx).terminal.input_focus().is_focused(window));
+        });
+    }
+
+    #[test]
+    fn startup_restore_skips_deferred_serial_devices_and_finishes_the_queue() {
+        let root = TestConfigDir::new("zzclawterm-serial-skip-restore");
+        let mut cx = TestAppContext::single();
+        let _cleanup = TestAppCleanup::new(&cx);
+        let app = app_with_visible_local_session(&mut cx, root.path(), "existing");
+        let connections = [
+            serde_json::json!({"port": true}),
+            serde_json::json!({"baud_rate": true}),
+            serde_json::json!({"port": true, "baud_rate": true}),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, prompt)| {
+            serde_json::from_value::<SavedConnection>(serde_json::json!({
+                "id": format!("board-{index}"), "name": "Board", "type": "serial",
+                "port_name": "COM7", "baud_rate": 115200, "connect_prompt": prompt
+            }))
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+        let tabs = connections
+            .iter()
+            .map(|connection| {
+                serde_json::from_value::<RestorableOpenTab>(serde_json::json!({
+                    "connection_id": connection.id, "session_type": "Serial"
+                }))
+                .unwrap()
+            })
+            .collect();
+        let cx = session_focus_test_window(&mut cx, &app);
+        cx.update(|window, cx| {
+            app.update(cx, |app, cx| {
+                app.connection_state.replace_loaded(connections, Vec::new());
+                app.stores
+                    .startup_restore
+                    .update(cx, |store, _| store.set_queue(tabs));
+                assert!(!app.session.restore_is_complete());
+                let submitted = app.blocking_jobs.metrics().submitted;
+                app.pump_startup_restore_queue(window, cx);
+                assert!(app.stores.startup_restore.read(cx).queue_empty());
+                assert!(app.session.restore_is_complete());
+                assert_eq!(app.blocking_jobs.metrics().submitted, submitted);
+                assert_eq!(app.session.session_order(), &["existing"]);
+                assert!(!app.session.start_has_pending());
+                assert!(app.session.dialogs.serial_connect_prompt().is_none());
+            });
         });
     }
 

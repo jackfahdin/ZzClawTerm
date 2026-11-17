@@ -16,8 +16,11 @@ use zzclawterm_transport::{SerialSessionConfig, SessionManager, TelnetSessionCon
 use super::fill::SuggestionSubmitResult;
 use super::tests::show_surface_for_session;
 use crate::features::ZzClawTermApp;
+use crate::features::terminal::command_suggestions::state::{
+    CommandSuggestionItem, CommandSuggestionState,
+};
 use crate::features::test_support::app_with_visible_local_session;
-use crate::models::{CommandSuggestionItem, CommandSuggestionState, SessionLaunchConfig};
+use crate::models::SessionLaunchConfig;
 use crate::test_support::{TestAppCleanup, TestConfigDir};
 
 struct Fixture {
@@ -37,10 +40,7 @@ fn typing_keeps_popup_painted_while_each_result_moves_it_with_the_cursor() {
     let mut f = Fixture::new();
     f.suggest_in_shell("git", "git status");
     f.update(|app, _, _| {
-        let (row, col) = app.active_terminal_cursor_cell();
-        let popup = app.terminal.assist.command_suggestions.as_mut().unwrap();
-        popup.cursor_row = row;
-        popup.cursor_col = col;
+        let popup = app.terminal.assist.commands.popup.as_mut().unwrap();
         popup.selected_index = None;
     });
     let app = f.app.clone();
@@ -52,7 +52,7 @@ fn typing_keeps_popup_painted_while_each_result_moves_it_with_the_cursor() {
         app.update(cx, |app, cx| {
             let stale = app
                 .prepare_command_suggestion_search(
-                    app.terminal.assist.command_suggestion_search_gen,
+                    app.terminal.assist.commands.search_generation,
                     CompletionMode::Token,
                     cx,
                 )
@@ -60,10 +60,10 @@ fn typing_keeps_popup_painted_while_each_result_moves_it_with_the_cursor() {
             app.note_shell_editing_input(input.as_bytes(), cx);
             app.note_command_suggestion_input(input.as_bytes(), cx);
             // This visual test publishes exact results instead of running catalog searches.
-            app.terminal.assist.command_suggestion_refresh_task = None;
+            app.terminal.assist.commands.refresh_task = None;
             assert!(
                 app.prepare_command_suggestion_search(
-                    app.terminal.assist.command_suggestion_search_gen,
+                    app.terminal.assist.commands.search_generation,
                     CompletionMode::Token,
                     cx,
                 )
@@ -79,7 +79,7 @@ fn typing_keeps_popup_painted_while_each_result_moves_it_with_the_cursor() {
                 Duration::ZERO,
                 cx,
             );
-            let popup = app.terminal.assist.command_suggestions.as_ref().unwrap();
+            let popup = app.terminal.assist.commands.popup.as_ref().unwrap();
             assert!(popup.refreshing);
             assert!(popup.selected_index.is_none());
             assert_eq!(
@@ -103,18 +103,20 @@ fn typing_keeps_popup_painted_while_each_result_moves_it_with_the_cursor() {
             assert!(
                 app.terminal
                     .assist
-                    .command_suggestions
+                    .commands
+                    .popup
                     .as_ref()
                     .unwrap()
                     .selected_index
                     .is_none()
             );
             echo(app, cx, &id, line);
-            app.terminal.assist.command_suggestion_refresh_task = None;
+            app.terminal.assist.commands.refresh_task = None;
             assert!(
                 app.terminal
                     .assist
-                    .command_suggestions
+                    .commands
+                    .popup
                     .as_ref()
                     .unwrap()
                     .refreshing
@@ -125,7 +127,7 @@ fn typing_keeps_popup_painted_while_each_result_moves_it_with_the_cursor() {
         app.update(cx, |app, cx| {
             let request = app
                 .prepare_command_suggestion_search(
-                    app.terminal.assist.command_suggestion_search_gen,
+                    app.terminal.assist.commands.search_generation,
                     CompletionMode::Token,
                     cx,
                 )
@@ -140,12 +142,12 @@ fn typing_keeps_popup_painted_while_each_result_moves_it_with_the_cursor() {
                 Duration::ZERO,
                 cx,
             );
-            let popup = app.terminal.assist.command_suggestions.as_ref().unwrap();
+            let popup = app.terminal.assist.commands.popup.as_ref().unwrap();
             assert!(!popup.refreshing);
             assert_eq!(popup.draft, line);
             assert_eq!(
-                (popup.cursor_row, popup.cursor_col),
-                app.active_terminal_cursor_cell()
+                app.suggestion_cursor_cell_for_session(&id, cx),
+                Some(app.active_terminal_cursor_cell())
             );
         });
         draw_popup(&app, cx);
@@ -160,10 +162,10 @@ fn typing_keeps_popup_painted_while_each_result_moves_it_with_the_cursor() {
     app.update(cx, |app, cx| {
         app.note_shell_editing_input(b"z", cx);
         echo(app, cx, &id, "git loz");
-        app.terminal.assist.command_suggestion_refresh_task = None;
+        app.terminal.assist.commands.refresh_task = None;
         let request = app
             .prepare_command_suggestion_search(
-                app.terminal.assist.command_suggestion_search_gen,
+                app.terminal.assist.commands.search_generation,
                 CompletionMode::Token,
                 cx,
             )
@@ -175,7 +177,7 @@ fn typing_keeps_popup_painted_while_each_result_moves_it_with_the_cursor() {
         );
         result.candidates.clear();
         app.publish_command_suggestion_search(request, result, Duration::ZERO, cx);
-        assert!(app.terminal.assist.command_suggestions.is_none());
+        assert!(app.terminal.assist.commands.popup.is_none());
     });
     draw_popup(&app, cx);
     assert!(cx.debug_bounds("command-suggestions-overlay").is_none());
@@ -192,7 +194,8 @@ fn refreshing_candidates_do_not_capture_shell_keys_or_survive_lost_confirmation(
             assert!(
                 app.terminal
                     .assist
-                    .command_suggestions
+                    .commands
+                    .popup
                     .as_ref()
                     .unwrap()
                     .refreshing
@@ -201,7 +204,7 @@ fn refreshing_candidates_do_not_capture_shell_keys_or_survive_lost_confirmation(
                 app.handle_command_suggestion_key(&key(name), cx),
                 name == "escape"
             );
-            assert!(app.terminal.assist.command_suggestions.is_none());
+            assert!(app.terminal.assist.commands.popup.is_none());
         });
         f.assert_quiet();
     }
@@ -218,7 +221,7 @@ fn refreshing_candidates_do_not_capture_shell_keys_or_survive_lost_confirmation(
         f.update(|app, cx, _| {
             app.note_shell_editing_input(b"x", cx);
             app.note_shell_editing_input(input, cx);
-            assert!(app.terminal.assist.command_suggestions.is_none());
+            assert!(app.terminal.assist.commands.popup.is_none());
         });
     }
     let mut f = Fixture::new();
@@ -231,7 +234,7 @@ fn refreshing_candidates_do_not_capture_shell_keys_or_survive_lost_confirmation(
             .model
             .expire(Instant::now() + EDIT_CONFIRMATION_TIMEOUT);
         app.reconcile_command_suggestion_availability(cx);
-        assert!(app.terminal.assist.command_suggestions.is_none());
+        assert!(app.terminal.assist.commands.popup.is_none());
     });
 }
 
@@ -243,7 +246,7 @@ fn selected_tab_navigation_matches_arrows_without_writing_or_leaking_repeats() {
                 let mut f = Fixture::new();
                 f.suggest("dock", "docker");
                 f.update(|app, cx, id| {
-                    let popup = app.terminal.assist.command_suggestions.as_mut().unwrap();
+                    let popup = app.terminal.assist.commands.popup.as_mut().unwrap();
                     popup.mode = mode;
                     popup.items = vec![popup.items[0].clone(); count];
                     popup.selected_index = Some(if shift { count - 1 } else { 0 });
@@ -270,7 +273,8 @@ fn selected_tab_navigation_matches_arrows_without_writing_or_leaking_repeats() {
                         assert_eq!(
                             app.terminal
                                 .assist
-                                .command_suggestions
+                                .commands
+                                .popup
                                 .as_ref()
                                 .unwrap()
                                 .selected_index,
@@ -283,7 +287,7 @@ fn selected_tab_navigation_matches_arrows_without_writing_or_leaking_repeats() {
                     assert_eq!(app.terminal.editing.predicted_input().value, "dock");
                     assert!(!app.terminal.view.views[id].pressed_keys.contains("tab"));
                     assert!(!app.handle_command_suggestion_key(&press, cx));
-                    assert!(app.terminal.assist.command_suggestions.is_none());
+                    assert!(app.terminal.assist.commands.popup.is_none());
                     assert!(!app.send_terminal_key_event(&press, true, cx));
                     let release = KeyUpEvent {
                         keystroke: press.keystroke.clone(),
@@ -334,7 +338,8 @@ fn modified_enter_and_tab_do_not_change_suggestion_selection() {
                 assert_eq!(
                     app.terminal
                         .assist
-                        .command_suggestions
+                        .commands
+                        .popup
                         .as_ref()
                         .unwrap()
                         .selected_index,
@@ -367,16 +372,11 @@ fn history_navigation_echo_does_not_reopen_suggestions() {
                 .seed_session_view(id.into(), "$ \x1b]133;B\x07git status".into(), "UTF-8");
             app.reconcile_shell_editing(id, cx);
             assert!(app.command_suggestion_input_is_confirmed());
-            assert!(app.terminal.assist.command_suggestions.is_none());
-            assert!(
-                app.terminal
-                    .assist
-                    .command_suggestion_refresh_task
-                    .is_none()
-            );
+            assert!(app.terminal.assist.commands.popup.is_none());
+            assert!(app.terminal.assist.commands.refresh_task.is_none());
             assert!(
                 app.prepare_command_suggestion_search(
-                    app.terminal.assist.command_suggestion_search_gen,
+                    app.terminal.assist.commands.search_generation,
                     CompletionMode::Token,
                     cx,
                 )
@@ -390,12 +390,7 @@ fn history_navigation_echo_does_not_reopen_suggestions() {
             .seed_session_view(id.into(), "$ \x1b]133;B\x07git statusx".into(), "UTF-8");
         app.reconcile_shell_editing(id, cx);
         assert!(app.command_suggestions_allowed_for_session(id));
-        assert!(
-            app.terminal
-                .assist
-                .command_suggestion_refresh_task
-                .is_some()
-        );
+        assert!(app.terminal.assist.commands.refresh_task.is_some());
         app.note_shell_editing_input(b"\x1b[A", cx);
         app.terminal
             .seed_session_view(id.into(), "$ \x1b]133;B\x07git status".into(), "UTF-8");
@@ -403,12 +398,7 @@ fn history_navigation_echo_does_not_reopen_suggestions() {
         assert!(!app.command_suggestions_allowed_for_session(id));
         app.show_manual_command_suggestions(cx);
         assert!(app.command_suggestions_allowed_for_session(id));
-        assert!(
-            app.terminal
-                .assist
-                .command_suggestion_refresh_task
-                .is_some()
-        );
+        assert!(app.terminal.assist.commands.refresh_task.is_some());
     });
 }
 
@@ -584,7 +574,7 @@ fn expanded_prompts_offer_replacement_in_shell_sessions_and_append_in_telnet_and
                 assert_eq!(app.command_suggestion_fill_policy(id), expected, "{prompt}");
                 let request = app
                     .prepare_command_suggestion_search(
-                        app.terminal.assist.command_suggestion_search_gen,
+                        app.terminal.assist.commands.search_generation,
                         CompletionMode::Token,
                         cx,
                     )
@@ -600,7 +590,7 @@ fn expanded_prompts_offer_replacement_in_shell_sessions_and_append_in_telnet_and
                         .candidates,
                 );
                 app.publish_command_suggestion_search(request, results, Duration::ZERO, cx);
-                let popup = app.terminal.assist.command_suggestions.as_ref().unwrap();
+                let popup = app.terminal.assist.commands.popup.as_ref().unwrap();
                 assert_eq!(popup.items.len(), if kind < 2 { 3 } else { 2 });
                 assert!(popup.items.iter().all(|item| item.fillable));
                 assert_eq!(
@@ -650,18 +640,19 @@ fn delayed_echo_retains_disabled_candidates_then_schedules_a_refresh_when_input_
     f.suggest_in_shell("mv", "mv source destination");
     f.update(|app, cx, id| {
         app.note_shell_editing_input(b"x", cx);
-        app.terminal.assist.command_suggestion_refresh_task = None;
+        app.terminal.assist.commands.refresh_task = None;
         assert!(
             app.terminal
                 .assist
-                .command_suggestions
+                .commands
+                .popup
                 .as_ref()
                 .unwrap()
                 .refreshing
         );
         assert!(
             app.prepare_command_suggestion_search(
-                app.terminal.assist.command_suggestion_search_gen,
+                app.terminal.assist.commands.search_generation,
                 CompletionMode::Token,
                 cx
             )
@@ -669,12 +660,7 @@ fn delayed_echo_retains_disabled_candidates_then_schedules_a_refresh_when_input_
         );
         echo(app, cx, id, "mvx");
         assert!(app.command_suggestion_input_is_confirmed());
-        assert!(
-            app.terminal
-                .assist
-                .command_suggestion_refresh_task
-                .is_some()
-        );
+        assert!(app.terminal.assist.commands.refresh_task.is_some());
     });
     f.assert_quiet();
 }
@@ -697,10 +683,10 @@ fn unconfirmed_or_nonterminal_line_input_never_enters_candidate_search() {
                 _ => state.model.input.desynced = true,
             }
             app.reconcile_command_suggestion_availability(cx);
-            assert!(app.terminal.assist.command_suggestions.is_none());
+            assert!(app.terminal.assist.commands.popup.is_none());
             assert!(
                 app.prepare_command_suggestion_search(
-                    app.terminal.assist.command_suggestion_search_gen,
+                    app.terminal.assist.commands.search_generation,
                     CompletionMode::Token,
                     cx
                 )
@@ -720,7 +706,7 @@ fn restricted_terminal_states_never_publish_or_select_candidates() {
         f.update(|app, cx, id| {
             let request = app
                 .prepare_command_suggestion_search(
-                    app.terminal.assist.command_suggestion_search_gen,
+                    app.terminal.assist.commands.search_generation,
                     CompletionMode::Token,
                     cx,
                 )
@@ -761,7 +747,7 @@ fn restricted_terminal_states_never_publish_or_select_candidates() {
                 }
             }
             app.reconcile_command_suggestion_availability(cx);
-            assert!(app.terminal.assist.command_suggestions.is_none());
+            assert!(app.terminal.assist.commands.popup.is_none());
             app.publish_command_suggestion_search(
                 request,
                 super::tests::history_search_fixture(
@@ -772,10 +758,10 @@ fn restricted_terminal_states_never_publish_or_select_candidates() {
                 Duration::ZERO,
                 cx,
             );
-            assert!(app.terminal.assist.command_suggestions.is_none());
+            assert!(app.terminal.assist.commands.popup.is_none());
             assert!(
                 app.prepare_command_suggestion_search(
-                    app.terminal.assist.command_suggestion_search_gen,
+                    app.terminal.assist.commands.search_generation,
                     CompletionMode::Token,
                     cx
                 )
@@ -804,7 +790,7 @@ fn policy_changes_filter_existing_candidates_and_discard_pending_results() {
     f.update(|app, cx, id| {
         let request = app
             .prepare_command_suggestion_search(
-                app.terminal.assist.command_suggestion_search_gen,
+                app.terminal.assist.commands.search_generation,
                 CompletionMode::Token,
                 cx,
             )
@@ -812,7 +798,7 @@ fn policy_changes_filter_existing_candidates_and_discard_pending_results() {
         app.session.metadata_mut(id).unwrap().launch_config =
             SessionLaunchConfig::Serial(SerialSessionConfig::default());
         app.reconcile_command_suggestion_availability(cx);
-        assert!(app.terminal.assist.command_suggestions.is_none());
+        assert!(app.terminal.assist.commands.popup.is_none());
         app.publish_command_suggestion_search(
             request,
             super::tests::history_search_fixture(
@@ -823,13 +809,8 @@ fn policy_changes_filter_existing_candidates_and_discard_pending_results() {
             Duration::ZERO,
             cx,
         );
-        assert!(app.terminal.assist.command_suggestions.is_none());
-        assert!(
-            app.terminal
-                .assist
-                .command_suggestion_refresh_task
-                .is_some()
-        );
+        assert!(app.terminal.assist.commands.popup.is_none());
+        assert!(app.terminal.assist.commands.refresh_task.is_some());
     });
     f.assert_quiet();
 }
@@ -839,7 +820,7 @@ fn tightening_policy_preserves_selection_of_a_remaining_append_candidate() {
     let mut f = Fixture::new();
     f.suggest_in_shell("mv", "cat file");
     f.update(|app, cx, id| {
-        let popup = app.terminal.assist.command_suggestions.as_mut().unwrap();
+        let popup = app.terminal.assist.commands.popup.as_mut().unwrap();
         let mut append = popup.items[0].clone();
         append.command = "mv source destination".into();
         append.display = append.command.clone();
@@ -848,7 +829,7 @@ fn tightening_policy_preserves_selection_of_a_remaining_append_candidate() {
         app.session.metadata_mut(id).unwrap().launch_config =
             SessionLaunchConfig::Telnet(TelnetSessionConfig::default());
         app.reconcile_command_suggestion_availability(cx);
-        let popup = app.terminal.assist.command_suggestions.as_ref().unwrap();
+        let popup = app.terminal.assist.commands.popup.as_ref().unwrap();
         assert_eq!(popup.items.len(), 1);
         assert_eq!(popup.items[0].command, "mv source destination");
         assert_eq!(popup.selected_index, Some(0));
@@ -892,19 +873,27 @@ fn echo(app: &mut ZzClawTermApp, cx: &mut Context<ZzClawTermApp>, id: &str, valu
         format!("<device>{value}")
     };
     app.terminal.seed_session_view(id.into(), output, "UTF-8");
+    publish_fixture_frame(app, id);
     app.reconcile_shell_editing(id, cx);
 }
 
+fn publish_fixture_frame(app: &mut ZzClawTermApp, id: &str) {
+    let view = app.terminal.view.views.get_mut(id).unwrap();
+    view.frame_snapshot = Some(Arc::new(view.screen.viewport_snapshot(0)));
+}
+
 fn popup(app: &mut ZzClawTermApp, id: &str, target: &str) {
+    publish_fixture_frame(app, id);
     // These tests install exact rows; snapshot-triggered searches must not replace them.
-    app.terminal.assist.command_suggestion_refresh_task = None;
-    app.terminal.assist.command_suggestion_search_gen = app
+    app.terminal.assist.commands.refresh_task = None;
+    app.terminal.assist.commands.search_generation = app
         .terminal
         .assist
-        .command_suggestion_search_gen
+        .commands
+        .search_generation
         .saturating_add(1);
     let state = app.terminal.editing.state().unwrap();
-    app.terminal.assist.command_suggestions = Some(CommandSuggestionState {
+    app.terminal.assist.commands.popup = Some(CommandSuggestionState {
         refreshing: false,
         mode: zzclawterm_core::completion::types::CompletionMode::History,
         completion_revision: 0,
@@ -923,8 +912,6 @@ fn popup(app: &mut ZzClawTermApp, id: &str, target: &str) {
             indices: Vec::new(),
         }],
         selected_index: Some(0),
-        cursor_row: 0,
-        cursor_col: 0,
     });
 }
 
@@ -938,13 +925,7 @@ fn set_popup_space(app: &mut ZzClawTermApp, id: &str, width: f32, space_below: f
         .session_surface_bounds
         .insert(id.into(), bounds);
     let insets = app.terminal_content_insets_for_bounds(Some(id), bounds);
-    let row = app
-        .terminal
-        .assist
-        .command_suggestions
-        .as_ref()
-        .unwrap()
-        .cursor_row;
+    let row = app.active_terminal_cursor_cell().0;
     let cursor_bottom = insets.top + (row + 1) as f32 * app.terminal_cell_size().1;
     app.shell
         .set_viewport_size_for_test((width, cursor_bottom + 4. + space_below + 8.));
@@ -966,10 +947,13 @@ fn shortened_popup_keeps_keyboard_selection_visible_after_resize() {
     let mut f = Fixture::new();
     f.suggest("mv", "mv source destination");
     f.update(|app, _, id| {
-        let popup = app.terminal.assist.command_suggestions.as_mut().unwrap();
+        let popup = app.terminal.assist.commands.popup.as_mut().unwrap();
         popup.items = vec![popup.items[0].clone(); 12];
         popup.selected_index = None;
-        popup.cursor_row = 20;
+        let view = app.terminal.view.views.get_mut(id).unwrap();
+        Arc::make_mut(view.frame_snapshot.as_mut().unwrap())
+            .cursor
+            .row = 20;
         set_popup_space(app, id, 800., 250.);
     });
     let app = f.app.clone();
@@ -994,9 +978,7 @@ fn shortened_popup_keeps_keyboard_selection_visible_after_resize() {
     for space_below in [250., 106.] {
         cx.update(|_, cx| app.update(cx, |app, _| set_popup_space(app, &id, 800., space_below)));
         draw_popup(&app, cx);
-        let scroll = app.read_with(cx, |app, _| {
-            app.terminal.assist.command_suggestion_scroll.clone()
-        });
+        let scroll = app.read_with(cx, |app, _| app.terminal.assist.commands.scroll.clone());
         let selected = scroll.bounds_for_item(11).unwrap();
         let offset = scroll.offset();
         assert!(offset.y < gpui::px(0.));
@@ -1014,9 +996,7 @@ fn shortened_popup_keeps_keyboard_selection_visible_after_resize() {
             gpui::px(space_below)
         );
     }
-    let scroll = app.read_with(cx, |app, _| {
-        app.terminal.assist.command_suggestion_scroll.clone()
-    });
+    let scroll = app.read_with(cx, |app, _| app.terminal.assist.commands.scroll.clone());
     scroll.set_offset(gpui::point(gpui::px(0.), gpui::px(0.)));
     draw_popup(&app, cx);
     assert_eq!(
@@ -1032,9 +1012,7 @@ fn shortened_popup_keeps_keyboard_selection_visible_after_resize() {
         })
     });
     draw_popup(&app, cx);
-    let scroll = app.read_with(cx, |app, _| {
-        app.terminal.assist.command_suggestion_scroll.clone()
-    });
+    let scroll = app.read_with(cx, |app, _| app.terminal.assist.commands.scroll.clone());
     assert_eq!(scroll.offset().y, gpui::px(0.));
 }
 
@@ -1043,12 +1021,10 @@ fn long_command_preview_stays_beyond_popup_and_inside_narrow_window() {
     let mut f = Fixture::new();
     f.suggest("mv", &"mv source destination ".repeat(80));
     f.update(|app, _, id| {
-        app.terminal
-            .assist
-            .command_suggestions
-            .as_mut()
-            .unwrap()
-            .cursor_row = 20;
+        let view = app.terminal.view.views.get_mut(id).unwrap();
+        Arc::make_mut(view.frame_snapshot.as_mut().unwrap())
+            .cursor
+            .row = 20;
         set_popup_space(app, id, 300., 300.);
     });
     let app = f.app.clone();
@@ -1087,7 +1063,7 @@ fn insufficient_space_hides_popup_without_discarding_candidates() {
     draw_popup(&app, cx);
     assert!(cx.debug_bounds("command-suggestions-overlay").is_none());
     assert!(app.read_with(cx, |app, _| {
-        app.terminal.assist.command_suggestions.is_some()
+        app.terminal.assist.commands.popup.is_some()
     }));
     cx.update(|_, cx| app.update(cx, |app, _| set_popup_space(app, &id, 800., 300.)));
     draw_popup(&app, cx);
@@ -1100,12 +1076,7 @@ fn enter_only_sends_the_missing_suffix_and_confirms_once() {
         let mut f = Fixture::new();
         f.suggest("display ver", "display version");
         f.update(|app, cx, id| {
-            app.terminal
-                .assist
-                .command_suggestions
-                .as_mut()
-                .unwrap()
-                .mode = mode;
+            app.terminal.assist.commands.popup.as_mut().unwrap().mode = mode;
             let version = app.terminal.editing.state().unwrap().model.version;
             assert!(app.handle_command_suggestion_key(&key("enter"), cx));
             let state = app.terminal.editing.state().unwrap();
@@ -1114,7 +1085,7 @@ fn enter_only_sends_the_missing_suffix_and_confirms_once() {
             assert_eq!(state.model.phase, EditPhase::Pending);
             assert!(!state.suggestion_fill.as_ref().unwrap().execute_requested);
             assert!(app.session.command_history_for(id).is_none());
-            assert!(app.terminal.assist.pending_command_history_entry.is_none());
+            assert!(app.terminal.assist.commands.pending_history_entry.is_none());
             echo(app, cx, id, "display versi");
             assert_eq!(
                 app.terminal.editing.state().unwrap().model.phase,
@@ -1175,7 +1146,7 @@ fn an_independent_manual_enter_uses_session_encoding_and_records_once() {
                 app.session.command_history_for(id).unwrap(),
                 ["display version"]
             );
-            assert!(app.terminal.assist.pending_command_history_entry.is_none());
+            assert!(app.terminal.assist.commands.pending_history_entry.is_none());
             expected
         });
         f.receive(b"sion");
@@ -1225,12 +1196,7 @@ fn fuzzy_history_and_quick_labels_replace_once_and_wait_for_echo_without_executi
             let mut f = Fixture::new();
             f.suggest_in_shell(current, target);
             f.update(|app, cx, id| {
-                app.terminal
-                    .assist
-                    .command_suggestions
-                    .as_mut()
-                    .unwrap()
-                    .mode = mode;
+                app.terminal.assist.commands.popup.as_mut().unwrap().mode = mode;
                 let version = app.terminal.editing.state().unwrap().model.version;
                 assert_eq!(
                     app.submit_selected_command_suggestion(true, cx),
@@ -1248,7 +1214,7 @@ fn fuzzy_history_and_quick_labels_replace_once_and_wait_for_echo_without_executi
                 assert_eq!(state.model.phase, EditPhase::Ready);
                 assert!(state.suggestion_fill.is_none());
                 assert!(app.session.command_history_for(id).is_none());
-                assert!(app.terminal.assist.pending_command_history_entry.is_none());
+                assert!(app.terminal.assist.commands.pending_history_entry.is_none());
             });
             let mut expected = vec![0x7f; current.chars().count()];
             expected.extend_from_slice(target.as_bytes());
@@ -1261,7 +1227,7 @@ fn fuzzy_history_and_quick_labels_replace_once_and_wait_for_echo_without_executi
                     .unwrap();
                 assert!(app.send_terminal_key_event(&press, true, cx));
                 assert_eq!(app.session.command_history_for(id).unwrap(), [target]);
-                assert!(app.terminal.assist.pending_command_history_entry.is_none());
+                assert!(app.terminal.assist.commands.pending_history_entry.is_none());
                 wire
             });
             f.receive(&expected_enter);
@@ -1455,8 +1421,8 @@ fn stale_versions_and_unsafe_terminal_states_reject_append_and_replacement() {
                     app.handle_command_suggestion_key(&key("enter"), cx),
                     "scenario {scenario}"
                 );
-                assert!(app.terminal.assist.command_suggestions.is_none());
-                assert!(app.terminal.assist.pending_command_history_entry.is_none());
+                assert!(app.terminal.assist.commands.popup.is_none());
+                assert!(app.terminal.assist.commands.pending_history_entry.is_none());
                 if app.sync_input.broadcast_to_all() {
                     app.sync_input.toggle_broadcast_to_all();
                 }
@@ -1591,7 +1557,7 @@ fn encoding_and_bracketed_paste_never_add_control_sequences_to_the_suffix() {
                 .suggestion_fill
                 .is_none()
         );
-        assert!(app.terminal.assist.pending_command_history_entry.is_none());
+        assert!(app.terminal.assist.commands.pending_history_entry.is_none());
     });
     f.assert_quiet();
 }
@@ -1624,8 +1590,8 @@ fn search_results_cannot_reuse_a_pattern_after_its_input_version_changes() {
     let mut f = Fixture::new();
     f.suggest("display ver", "display version");
     f.update(|app, cx, _| {
-        app.terminal.assist.command_suggestions = None;
-        let generation = app.terminal.assist.command_suggestion_search_gen;
+        app.terminal.assist.commands.popup = None;
+        let generation = app.terminal.assist.commands.search_generation;
         let request = app
             .prepare_command_suggestion_search(
                 generation,
@@ -1646,7 +1612,7 @@ fn search_results_cannot_reuse_a_pattern_after_its_input_version_changes() {
             Duration::ZERO,
             cx,
         );
-        assert!(app.terminal.assist.command_suggestions.is_none());
+        assert!(app.terminal.assist.commands.popup.is_none());
     });
     f.assert_quiet();
 }
@@ -1660,7 +1626,7 @@ fn no_selection_preserves_normal_enter_and_tab_handling() {
         let mut f = Fixture::new();
         f.suggest("display ver", "display version");
         f.update(|app, cx, id| {
-            let popup = app.terminal.assist.command_suggestions.as_mut().unwrap();
+            let popup = app.terminal.assist.commands.popup.as_mut().unwrap();
             popup.mode = mode;
             popup.selected_index = None;
             let version = app.terminal.editing.state().unwrap().model.version;
@@ -1712,7 +1678,7 @@ fn unselected_token_keys_reach_the_session_with_its_native_encoding() {
             let mut f = Fixture::new();
             f.suggest("dock", "docker");
             let expected = f.update(|app, cx, id| {
-                let popup = app.terminal.assist.command_suggestions.as_mut().unwrap();
+                let popup = app.terminal.assist.commands.popup.as_mut().unwrap();
                 popup.mode = zzclawterm_core::completion::types::CompletionMode::Token;
                 popup.selected_index = None;
                 app.terminal
@@ -1724,16 +1690,11 @@ fn unselected_token_keys_reach_the_session_with_its_native_encoding() {
                     .kitty_keyboard_report_all_keys_as_esc = kitty;
                 let mut press = key(name);
                 press.keystroke.modifiers.shift = shift;
-                let generation = app.terminal.assist.command_suggestion_search_gen;
+                let generation = app.terminal.assist.commands.search_generation;
                 assert!(!app.handle_command_suggestion_key(&press, cx));
-                assert!(app.terminal.assist.command_suggestions.is_none());
-                assert!(
-                    app.terminal
-                        .assist
-                        .command_suggestion_refresh_task
-                        .is_none()
-                );
-                assert!(app.terminal.assist.command_suggestion_search_gen > generation);
+                assert!(app.terminal.assist.commands.popup.is_none());
+                assert!(app.terminal.assist.commands.refresh_task.is_none());
+                assert!(app.terminal.assist.commands.search_generation > generation);
                 let expected = app
                     .terminal_key_bytes_for_event_for_session(Some(id), &press)
                     .unwrap();
@@ -1774,28 +1735,20 @@ fn typing_and_backspace_disable_stale_candidates_before_the_debounced_refresh() 
         let mut f = Fixture::new();
         f.suggest("dock", "docker");
         f.update(|app, cx, _| {
-            app.terminal
-                .assist
-                .command_suggestions
-                .as_mut()
-                .unwrap()
-                .mode = zzclawterm_core::completion::types::CompletionMode::Token;
+            app.terminal.assist.commands.popup.as_mut().unwrap().mode =
+                zzclawterm_core::completion::types::CompletionMode::Token;
             app.note_shell_editing_input(input, cx);
             app.note_command_suggestion_input(input, cx);
             assert_eq!(
                 app.terminal.editing.state().unwrap().model.input.value,
                 expected
             );
+            assert!(app.terminal.assist.commands.refresh_task.is_some());
             assert!(
                 app.terminal
                     .assist
-                    .command_suggestion_refresh_task
-                    .is_some()
-            );
-            assert!(
-                app.terminal
-                    .assist
-                    .command_suggestions
+                    .commands
+                    .popup
                     .as_ref()
                     .unwrap()
                     .refreshing
@@ -1887,15 +1840,12 @@ fn token_enter_fills_without_requesting_execution() {
     let mut fixture = Fixture::new();
     fixture.suggest("dock", "docker");
     fixture.update(|app, cx, id| {
+        app.terminal.assist.commands.popup.as_mut().unwrap().mode =
+            zzclawterm_core::completion::types::CompletionMode::Token;
         app.terminal
             .assist
-            .command_suggestions
-            .as_mut()
-            .unwrap()
-            .mode = zzclawterm_core::completion::types::CompletionMode::Token;
-        app.terminal
-            .assist
-            .command_suggestions
+            .commands
+            .popup
             .as_mut()
             .unwrap()
             .selected_index = Some(0);
@@ -1922,13 +1872,14 @@ fn clicking_a_token_description_accepts_that_candidate_without_execution() {
     let mut f = Fixture::new();
     f.suggest("dock", "docker");
     let position = f.update(|app, _, id| {
-        let popup = app.terminal.assist.command_suggestions.as_mut().unwrap();
+        let popup = app.terminal.assist.commands.popup.as_mut().unwrap();
         popup.mode = zzclawterm_core::completion::types::CompletionMode::Token;
         popup.selected_index = None;
         popup.items[0].display = "docker".into();
         popup.items[0].description = "A self-sufficient runtime for containers".into();
+        let (row, col) = app.active_terminal_cursor_cell();
         let placement = app
-            .suggestion_overlay_position_for_session(Some(id), 0, 0, 380., 76.)
+            .suggestion_overlay_position_for_session(Some(id), row, col, 380., 76.)
             .unwrap();
         gpui::point(
             gpui::px(placement.x + 350.),
@@ -1939,7 +1890,7 @@ fn clicking_a_token_description_accepts_that_candidate_without_execution() {
     let (_, cx) = f.cx.add_window_view(|_, _| PopupView(app));
     cx.simulate_click(position, gpui::Modifiers::default());
     f.update(|app, _, _| {
-        assert!(app.terminal.assist.command_suggestions.is_none());
+        assert!(app.terminal.assist.commands.popup.is_none());
         let state = app.terminal.editing.state().unwrap();
         assert_eq!(state.model.input.value, "docker");
         assert!(!state.suggestion_fill.as_ref().unwrap().execute_requested);
@@ -1953,13 +1904,7 @@ fn disabled_fuzzy_candidate_never_writes_editing_keys() {
     let mut fixture = Fixture::new();
     fixture.suggest("dkr", "docker");
     fixture.update(|app, cx, _| {
-        app.terminal
-            .assist
-            .command_suggestions
-            .as_mut()
-            .unwrap()
-            .items[0]
-            .fillable = false;
+        app.terminal.assist.commands.popup.as_mut().unwrap().items[0].fillable = false;
         assert!(app.handle_command_suggestion_key(&key("enter"), cx));
         assert!(
             app.terminal
@@ -1986,15 +1931,10 @@ fn multiline_candidates_open_review_without_writing_and_cancellation_preserves_i
             let mut settings = app.settings.summary().clone();
             settings.terminal_show_multi_line_paste_dialog = false;
             app.settings.replace_summary(settings);
-            app.terminal
-                .assist
-                .command_suggestions
-                .as_mut()
-                .unwrap()
-                .mode = mode;
+            app.terminal.assist.commands.popup.as_mut().unwrap().mode = mode;
             let version = app.terminal.editing.state().unwrap().model.version;
             assert!(app.handle_command_suggestion_key(&key("enter"), cx));
-            assert!(app.terminal.assist.command_suggestions.is_none());
+            assert!(app.terminal.assist.commands.popup.is_none());
             version
         });
         f.with_window(|app, window, cx, id| {
@@ -2051,7 +1991,7 @@ fn reviewed_multiline_paste_replaces_the_query_once_and_preserves_the_edited_scr
             assert_eq!(state.model.version, version + 1);
             assert!(state.suggestion_fill.is_none());
             assert!(app.session.command_history_for(id).is_none());
-            assert!(app.terminal.assist.pending_command_history_entry.is_none());
+            assert!(app.terminal.assist.commands.pending_history_entry.is_none());
             assert!(!app.terminal.overlay_visibility().paste_review);
         });
         let mut expected = vec![0x7f; current.chars().count()];
@@ -2157,7 +2097,7 @@ fn review_confirmation_rechecks_stale_input_and_terminal_state_for_both_send_mod
                 }
                 assert!(app.terminal.paste.suggestion.is_none());
                 assert!(app.session.command_history_for(id).is_none());
-                assert!(app.terminal.assist.pending_command_history_entry.is_none());
+                assert!(app.terminal.assist.commands.pending_history_entry.is_none());
             });
             f.assert_quiet();
         }
@@ -2259,8 +2199,9 @@ fn clicking_a_multiline_candidate_opens_review_even_without_shell_editing_capabi
     let mut f = Fixture::new();
     f.suggest("脚本", "echo first\necho second");
     let position = f.update(|app, _, id| {
+        let (row, col) = app.active_terminal_cursor_cell();
         let placement = app
-            .suggestion_overlay_position_for_session(Some(id), 0, 0, 380., 76.)
+            .suggestion_overlay_position_for_session(Some(id), row, col, 380., 76.)
             .unwrap();
         gpui::point(
             gpui::px(placement.x + 150.),
@@ -2271,7 +2212,7 @@ fn clicking_a_multiline_candidate_opens_review_even_without_shell_editing_capabi
     let (_, cx) = f.cx.add_window_view(|_, _| PopupView(app));
     cx.simulate_click(position, gpui::Modifiers::default());
     f.update(|app, cx, _| {
-        assert!(app.terminal.assist.command_suggestions.is_none());
+        assert!(app.terminal.assist.commands.popup.is_none());
         assert!(app.terminal.overlay_visibility().paste_review);
         assert!(app.suggestion_paste_needs_bracketed_shell());
         assert!(app.suggestion_paste_cannot_replace_input());
@@ -2424,7 +2365,7 @@ fn nested_windows_prompt_changes_invalidate_candidates_and_select_current_delete
                 popup(app, id, "ping");
                 redraw_console_line(app, id, prompt, "pong");
                 app.reconcile_shell_editing(id, cx);
-                assert!(app.terminal.assist.command_suggestions.is_none());
+                assert!(app.terminal.assist.commands.popup.is_none());
                 assert_eq!(
                     app.terminal
                         .editing
@@ -2444,7 +2385,7 @@ fn nested_windows_prompt_changes_invalidate_candidates_and_select_current_delete
                 );
                 let request = app
                     .prepare_command_suggestion_search(
-                        app.terminal.assist.command_suggestion_search_gen,
+                        app.terminal.assist.commands.search_generation,
                         CompletionMode::Token,
                         cx,
                     )
@@ -2460,7 +2401,8 @@ fn nested_windows_prompt_changes_invalidate_candidates_and_select_current_delete
                 assert!(
                     app.terminal
                         .assist
-                        .command_suggestions
+                        .commands
+                        .popup
                         .as_ref()
                         .unwrap()
                         .items
@@ -2521,7 +2463,7 @@ fn unclassified_windows_editor_filters_replacement_and_rejects_stale_fill() {
         );
         let request = app
             .prepare_command_suggestion_search(
-                app.terminal.assist.command_suggestion_search_gen,
+                app.terminal.assist.commands.search_generation,
                 CompletionMode::Token,
                 cx,
             )
@@ -2533,7 +2475,7 @@ fn unclassified_windows_editor_filters_replacement_and_rejects_stale_fill() {
             Duration::ZERO,
             cx,
         );
-        assert!(app.terminal.assist.command_suggestions.is_none());
+        assert!(app.terminal.assist.commands.popup.is_none());
         popup(app, id, "ping");
         assert_eq!(
             app.submit_selected_command_suggestion(false, cx),
@@ -2699,4 +2641,56 @@ fn cmd_replacement_confirmation_timeout_cancels_the_fill_before_late_echo() {
         );
     });
     f.assert_quiet();
+}
+
+#[test]
+fn open_popup_tracks_new_folded_frames_without_replacing_suggestions() {
+    let mut f = Fixture::new();
+    f.suggest_in_shell("git", "git status");
+    f.update(|app, cx, id| {
+        let output =
+            "$ \x1b]133;B\x07run\r\n\x1b]133;C\x07one\r\ntwo\r\n\x1b]133;D;0\x07".repeat(3);
+        app.terminal.seed_session_view(
+            id.into(),
+            format!("{output}\x1b]133;A\x07$ \x1b]133;B\x07git"),
+            "UTF-8",
+        );
+        app.reconcile_shell_editing(id, cx);
+        popup(app, id, "git status");
+        app.shell.set_viewport_size_for_test((1000., 1000.));
+    });
+    let app = f.app.clone();
+    let id = f.id.clone();
+    let (_, cx) = f.cx.add_window_view(|_, _| PopupView(app.clone()));
+    draw_popup(&app, cx);
+    let before = cx.debug_bounds("command-suggestions-overlay").unwrap();
+    let original = app.read_with(cx, |app, _| app.terminal.assist.commands.popup.clone());
+    for collapsed in [true, false] {
+        app.update(cx, |app, cx| {
+            let view = app.terminal.view.views.get_mut(&id).unwrap();
+            let ids = if collapsed {
+                view.screen
+                    .snapshot()
+                    .command_blocks
+                    .iter()
+                    .map(|block| block.id)
+                    .collect()
+            } else {
+                Default::default()
+            };
+            view.screen.set_collapsed_commands(ids);
+            view.frame_snapshot = Some(Arc::new(view.screen.viewport_snapshot(0)));
+            app.sync_terminal_surface_paint(&id, cx);
+        });
+        draw_popup(&app, cx);
+        let after = cx.debug_bounds("command-suggestions-overlay").unwrap();
+        if collapsed {
+            assert!(after.origin.y < before.origin.y);
+        } else {
+            assert_eq!(after, before);
+        }
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.terminal.assist.commands.popup, original)
+        });
+    }
 }

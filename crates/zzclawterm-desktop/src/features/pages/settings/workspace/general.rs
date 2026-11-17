@@ -32,10 +32,11 @@ impl SettingsPanel {
         }
         let shard_options: Vec<ZzClawSelectOption> = shard_mebibytes
             .into_iter()
+            // The historical variable name denotes MiB; option values remain bytes.
             .map(|megabytes| {
                 ZzClawSelectOption::new(
                     (megabytes * mebibyte).to_string(),
-                    format!("{megabytes} MB"),
+                    format!("{megabytes} MiB"),
                 )
             })
             .collect();
@@ -170,6 +171,7 @@ impl SettingsPanel {
                         ),
                     )),
             ))
+            .child(self.data_directory_section(cx))
             .child(settings_form_section(
                 palette,
                 Some(t!("settings.diagnostics")),

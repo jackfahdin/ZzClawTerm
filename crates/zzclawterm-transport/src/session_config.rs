@@ -204,6 +204,70 @@ impl Default for TelnetAutoLoginConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SerialPortTransport {
+    Usb,
+    Pci,
+    Bluetooth,
+    #[default]
+    Unknown,
+}
+
+/// One enumerated serial device with the identity users actually recognize.
+///
+/// Device names move between USB ports and reboots (`COM7` becomes `COM9`,
+/// `/dev/ttyUSB0` becomes `/dev/ttyACM0`), so the UI shows the USB product and
+/// vendor/product id next to the name. Enumeration never opens a device: opening
+/// a port asserts DTR and can reset the attached board.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SerialPortInfo {
+    pub port_name: String,
+    /// USB product string, already trimmed; empty when the driver reports none.
+    pub product: Option<String>,
+    pub manufacturer: Option<String>,
+    pub usb_vid: Option<u16>,
+    pub usb_pid: Option<u16>,
+    /// USB serial number. Present only when the bridge exposes one.
+    pub usb_serial: Option<String>,
+    pub transport: SerialPortTransport,
+}
+
+impl SerialPortInfo {
+    /// Human-facing identity of the device, without the port name itself.
+    ///
+    /// Preferred order: product → manufacturer → vendor/product id. The USB
+    /// number is appended only when it differs from the product string, which is
+    /// how some bridges expose a model number instead of a unique serial.
+    pub fn detail(&self) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        let label = self
+            .product
+            .clone()
+            .or_else(|| self.manufacturer.clone())
+            .or_else(|| match (self.usb_vid, self.usb_pid) {
+                (Some(vid), Some(pid)) => Some(format!("USB {vid:04x}:{pid:04x}")),
+                (Some(vid), None) => Some(format!("USB {vid:04x}")),
+                _ => None,
+            });
+        if let Some(label) = label {
+            parts.push(label);
+        }
+        if let (Some(vid), Some(pid)) = (self.usb_vid, self.usb_pid)
+            && !parts.iter().any(|part| part.contains("USB "))
+        {
+            parts.push(format!("USB {vid:04x}:{pid:04x}"));
+        }
+        if !parts.is_empty() {
+            return Some(parts.join(" · "));
+        }
+        match self.transport {
+            SerialPortTransport::Pci => Some("PCI".to_string()),
+            SerialPortTransport::Bluetooth => Some("Bluetooth".to_string()),
+            SerialPortTransport::Usb | SerialPortTransport::Unknown => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SerialSessionConfig {
     pub name: String,
@@ -350,16 +414,9 @@ impl SshSessionConfig {
         }
     }
 
+    /// Requested policy only. Established sessions report their mode through SessionEvent.
     pub fn effective_runtime_mode(&self) -> zzclawterm_core::models::ssh_runtime::SshRuntimeMode {
-        use zzclawterm_core::models::ssh_runtime::SshRuntimeMode;
-        if self.runtime_mode == SshRuntimeMode::Standard
-            && self.attempt.shell_availability()
-                == crate::connection_attempt::ShellAvailability::Unavailable
-        {
-            SshRuntimeMode::Sftp
-        } else {
-            self.runtime_mode
-        }
+        self.runtime_mode
     }
 
     pub(crate) fn ensure_shell_available(
@@ -922,14 +979,13 @@ mod tests {
     }
 
     #[test]
-    fn standard_shell_denial_changes_effective_capabilities_without_changing_saved_mode() {
+    fn shell_denial_does_not_confirm_sftp_mode() {
         let config = SshSessionConfig::default();
         config.attempt.record_shell_reply(false);
-        assert_eq!(config.effective_runtime_mode(), SshRuntimeMode::Sftp);
+        assert_eq!(config.effective_runtime_mode(), SshRuntimeMode::Standard);
         assert_eq!(config.runtime_mode, SshRuntimeMode::Standard);
         assert!(config.remote_file_browser_enabled());
-        assert!(!config.remote_stats_enabled());
-        assert_eq!(config.effective_cwd_follow_mode(), SftpCwdFollowMode::Off);
+        assert!(config.remote_stats_enabled());
     }
 
     #[test]

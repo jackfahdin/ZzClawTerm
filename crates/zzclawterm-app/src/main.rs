@@ -31,7 +31,24 @@ fn main() -> anyhow::Result<()> {
     if zzclawterm_desktop::run_update_helper_if_requested() {
         return Ok(());
     }
-    let runtime = AppRuntime::resolve().context("resolve zzclawterm runtime")?;
+    // A successor process is spawned before the old one exits. Wait for the old
+    // instance lock here, before `AppRuntime::resolve` applies the pending data
+    // directory switch: the migration copies the database, which must be closed.
+    // The variable holds a marker inside the old instance directory; removing it
+    // makes a stale inherited value harmless.
+    if let Some(marker) = std::env::var_os(zzclawterm_core::RELAUNCH_HANDOFF_ENV) {
+        let marker = std::path::PathBuf::from(marker);
+        if marker.exists() {
+            let instance_dir = marker.parent().unwrap_or_else(|| std::path::Path::new("."));
+            let waited = single_instance::wait_for_previous_instance(
+                instance_dir,
+                single_instance::RESTART_HANDOFF_DEADLINE,
+            );
+            let _ = std::fs::remove_file(&marker);
+            waited.context("wait for the previous ZzClawTerm instance to exit")?;
+        }
+    }
+    let mut runtime = AppRuntime::resolve().context("resolve zzclawterm runtime")?;
     runtime
         .ensure_directories()
         .context("prepare runtime directories")?;
@@ -40,9 +57,67 @@ fn main() -> anyhow::Result<()> {
         *uuid::Uuid::new_v4().as_bytes(),
         std::env::args_os().skip(1),
     );
-    let mut instance_owner = match acquire(runtime.config_dir(), initial_activation.clone())? {
+    let mut instance_owner = match acquire(&runtime.instance_dir(), initial_activation.clone())? {
         SingleInstanceOutcome::Owner(owner) => owner,
         SingleInstanceOutcome::Forwarded => return Ok(()),
+    };
+    // The fixed bootstrap owner was acquired before consulting location.json.
+    let mut data_root_lease = None;
+    let mut data_owner = None;
+    let startup = if runtime.mode() == zzclawterm_core::RuntimeMode::Installed {
+        match zzclawterm_store::data_directory::open_startup(
+            runtime.local_dir(),
+            runtime.local_dir(),
+            AppFlavor::current(),
+        ) {
+            Ok(opened) => {
+                runtime = runtime
+                    .with_data_directory(opened.selection.data_dir, opened.selection.notice)
+                    .with_pending_data_directory(opened.selection.pending);
+                let sync_client =
+                    zzclawterm_store::data_directory::detect_sync_client(runtime.data_dir());
+                runtime = runtime.with_data_directory_sync_client(sync_client);
+                let instance_dir = zzclawterm_store::data_directory::instance_lock_dir(
+                    runtime.local_dir(),
+                    runtime.data_dir(),
+                );
+                data_owner = match single_instance::acquire_linked(
+                    &instance_dir,
+                    initial_activation.clone(),
+                    Some(instance_owner.activation_sender()),
+                )? {
+                    SingleInstanceOutcome::Owner(owner) => Some(owner),
+                    SingleInstanceOutcome::Forwarded => return Ok(()),
+                };
+                data_root_lease = Some(opened.lease);
+                AppShellStartup::prepare_opened(&runtime, opened.store)
+            }
+            Err(zzclawterm_core::data_directory::DataDirectoryError::InUse(path)) => {
+                let instance_dir =
+                    zzclawterm_store::data_directory::instance_lock_dir(runtime.local_dir(), &path);
+                match acquire(&instance_dir, initial_activation.clone())? {
+                    SingleInstanceOutcome::Forwarded => return Ok(()),
+                    SingleInstanceOutcome::Owner(_) => {
+                        AppShellStartup::prepare_data_directory_failed(
+                            zzclawterm_store::data_directory::startup_recovery(
+                                runtime.local_dir(),
+                                runtime.local_dir(),
+                                &zzclawterm_core::data_directory::DataDirectoryError::InUse(path),
+                            ),
+                        )
+                    }
+                }
+            }
+            Err(error) => AppShellStartup::prepare_data_directory_failed(
+                zzclawterm_store::data_directory::startup_recovery(
+                    runtime.local_dir(),
+                    runtime.local_dir(),
+                    &error,
+                ),
+            ),
+        }
+    } else {
+        AppShellStartup::prepare(&runtime)
     };
     if initial_activation.parse().has_conflicting_window_options() {
         return Err(
@@ -89,7 +164,6 @@ fn main() -> anyhow::Result<()> {
         gpui_kit::init(cx);
         cx.set_quit_mode(gpui::QuitMode::Explicit);
         zzclawterm_desktop::init(cx);
-        let startup = AppShellStartup::prepare(&runtime);
         let controller = cx.new(|cx| DesktopController::new(runtime.clone(), startup, cx));
         cx.set_global(DesktopControllerGlobal(controller.clone()));
         controller
@@ -101,6 +175,9 @@ fn main() -> anyhow::Result<()> {
         cx.activate(true);
     });
 
+    // Database workers are dropped before releasing process ownership.
+    drop(data_owner);
+    drop(data_root_lease);
     Ok(())
 }
 

@@ -193,7 +193,16 @@ impl ConnectionEditorValidationError {
             ),
             _ => ConnectionEditorFocusTarget::Field(field),
         };
-        location(field.section(), target)
+        let section = if editor.defaults_mode
+            && matches!(
+                field,
+                ConnectionEditorField::SerialPort | ConnectionEditorField::BaudRate
+            ) {
+            ConnectionEditorSection::Serial
+        } else {
+            field.section()
+        };
+        location(section, target)
     }
 }
 
@@ -294,6 +303,30 @@ mod tests {
             assert_eq!(location.section, section);
             assert_eq!(location.target, ConnectionEditorFocusTarget::Field(field));
         }
+        for defaults_mode in [false, true] {
+            let mut draft = editor();
+            draft.kind = crate::models::ConnectionKindTab::Serial;
+            draft.defaults_mode = defaults_mode;
+            let section = if defaults_mode {
+                ConnectionEditorSection::Serial
+            } else {
+                ConnectionEditorSection::Basic
+            };
+            let baud = ConnectionEditorValidationError::BaudRateInvalid.location(&draft);
+            assert_eq!(baud.section, section);
+            assert_eq!(
+                baud.target,
+                ConnectionEditorFocusTarget::Field(ConnectionEditorField::BaudRate)
+            );
+            let port = ConnectionEditorValidationError::SerialPortRequired.location(&draft);
+            assert_eq!(port.section, section);
+            assert_eq!(
+                port.target,
+                ConnectionEditorFocusTarget::Select(
+                    crate::models::ConnectionEditorSelect::SerialPort
+                )
+            );
+        }
     }
 
     #[test]
@@ -392,7 +425,7 @@ mod tests {
             .unwrap();
             let mut draft = connection_editor_from_saved(saved, false);
             let before = build_saved_connection_from_editor(&draft).unwrap();
-            for section in ConnectionEditorSection::for_kind(draft.kind) {
+            for section in ConnectionEditorSection::for_kind(draft.kind, draft.defaults_mode) {
                 assert!(draft.select_section(*section));
                 let after = build_saved_connection_from_editor(&draft).unwrap();
                 assert_eq!(before, after, "{kind}/{section:?}");

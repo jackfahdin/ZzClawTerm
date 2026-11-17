@@ -1,3 +1,4 @@
+use crate::features::session::CommandHistoryLearning;
 use crate::features::session::notice_runtime::session_notice_text;
 use crate::features::session::notices::SessionNoticeKind;
 use crate::features::shell::event_pump::helpers::{
@@ -292,32 +293,49 @@ impl ZzClawTermApp {
                             &mut pending_frame_outputs,
                             &mut drain_timings,
                         );
-                        self.commands.take_completion_confirmed(&session_id);
-                        let sensitive = self.commands.take_completion_sensitive(&session_id)
-                            || self.recording_input_is_sensitive(&session_id);
-                        if !zzclawterm_core::completion::privacy::command_may_be_learned(
-                            &command, sensitive,
-                        ) {
+                        let recorded = self
+                            .session
+                            .take_recorded_command_submission(&session_id, &command);
+                        if recorded
+                            .is_some_and(|learning| learning != CommandHistoryLearning::GlobalOnly)
+                        {
                             continue;
                         }
-                        if !self
-                            .session
-                            .consume_directly_recorded_command_history(&session_id)
-                        {
-                            self.session.record_command_history(&session_id, &command);
-                            let context = self.commands.command_context(&session_id).cloned();
-                            let queued = if let Some(context) = context {
-                                self.commands.observe_completion_command(context, command)
-                            } else {
-                                self.commands.queue_command_history(vec![command])
-                            };
-                            if !queued {
-                                self.settings.update_store_status(
-                                    "command history worker is unavailable",
-                                    false,
-                                );
-                                self.request_settings_panel_refresh(cx);
+                        // Matched input has already passed the privacy gate. Its
+                        // report must not consume latches belonging to newer input.
+                        if recorded.is_none() {
+                            self.commands.take_completion_confirmed(&session_id);
+                            let sensitive = self.commands.take_completion_sensitive(&session_id)
+                                || self.recording_input_is_sensitive(&session_id);
+                            if !zzclawterm_core::completion::privacy::command_may_be_learned(
+                                &command, sensitive,
+                            ) {
+                                continue;
                             }
+                            self.session
+                                .record_accepted_command_history(&session_id, &command);
+                        }
+                        let context = self
+                            .commands
+                            .command_context(&session_id)
+                            .map(|_| self.command_suggestion_context(&session_id));
+                        let queued = if let Some(context) = context {
+                            self.commands.observe_completion_submission(
+                                context,
+                                command,
+                                recorded.is_none(),
+                            )
+                        } else if recorded.is_none() {
+                            self.commands.queue_command_history(vec![command])
+                        } else {
+                            true
+                        };
+                        if !queued {
+                            self.settings.update_store_status(
+                                "command history worker is unavailable",
+                                false,
+                            );
+                            self.request_settings_panel_refresh(cx);
                         }
                     }
                     SessionEvent::TmuxState { session_id, state } => {
@@ -327,6 +345,24 @@ impl ZzClawTermApp {
                         );
                         root_chrome_dirty |=
                             self.handle_session_tmux_state_event(session_id, *state, cx);
+                    }
+                    SessionEvent::SshRuntimeModeConfirmed { session_id, mode } => {
+                        self.flush_pending_session_frame_outputs(
+                            &mut pending_frame_outputs,
+                            &mut drain_timings,
+                        );
+                        if !self.terminal.session_id_is_retired(&session_id)
+                            && let Some(metadata) = self.session.metadata_mut(&session_id)
+                            && metadata.confirm_ssh_runtime_mode(mode)
+                        {
+                            let startup = metadata.pending_ssh_startup_command.take();
+                            if mode == zzclawterm_core::models::ssh_runtime::SshRuntimeMode::Sftp {
+                                self.ensure_sftp_session_view(&session_id, cx);
+                            } else if let Some(startup) = startup {
+                                self.schedule_startup_command(session_id, startup, cx);
+                            }
+                            root_chrome_dirty = true;
+                        }
                     }
                     SessionEvent::Exited { session_id, reason } => {
                         self.flush_pending_session_frame_outputs(
@@ -1016,152 +1052,6 @@ mod recording_tests {
 }
 
 #[cfg(test)]
-mod command_history_tests {
-    use futures::StreamExt as _;
-    use gpui::{AppContext as _, Entity, TestAppContext};
-    use zzclawterm_core::{CommandHistoryEntry, test_support::TestTempDir};
-    use zzclawterm_transport::SessionEvent;
-
-    use crate::features::ZzClawTermApp;
-    use crate::features::runtime_jobs::CommandPersistenceResult;
-    use crate::features::test_support::app_with_visible_local_session;
-
-    fn finish_history_requests(
-        cx: &mut TestAppContext,
-        app: &Entity<ZzClawTermApp>,
-        expected_requests: usize,
-    ) -> Vec<CommandHistoryEntry> {
-        let mut receiver = cx.update_entity(app, |app, _| {
-            app.commands
-                .take_persistence_event_receiver()
-                .expect("history result receiver")
-        });
-        let mut latest = Vec::new();
-        for _ in 0..expected_requests {
-            match futures::executor::block_on(receiver.next()) {
-                Some(CommandPersistenceResult::History(Ok(history))) => latest = history,
-                Some(CommandPersistenceResult::History(Err(error))) => {
-                    panic!("history persistence failed: {error}")
-                }
-                Some(CommandPersistenceResult::QuickCommandUseCount { .. }) | None => {
-                    panic!("expected a command history persistence result")
-                }
-            }
-            cx.update_entity(app, |app, _| {
-                app.commands.note_persistence_event_delivered();
-            });
-        }
-        cx.update_entity(app, |app, _| {
-            assert!(
-                app.commands.persistence_is_idle(),
-                "unexpected extra history persistence requests"
-            );
-        });
-        latest
-    }
-
-    fn accept_commands(app: &mut ZzClawTermApp, commands: &[&str]) {
-        app.session
-            .extend_pending_events(
-                commands
-                    .iter()
-                    .map(|command| SessionEvent::CommandAccepted {
-                        session_id: "history".to_string(),
-                        command: (*command).to_string(),
-                    }),
-            );
-    }
-
-    #[test]
-    fn direct_submission_and_accepted_event_record_history_once() {
-        let root = TestTempDir::new("zzclawterm-history-single-submit");
-        let mut cx = TestAppContext::single();
-        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
-        let app = app_with_visible_local_session(&mut cx, root.path(), "history");
-        cx.update_entity(&app, |app, cx| {
-            app.record_submitted_command_history(&["history"], vec!["echo once".to_string()]);
-            accept_commands(app, &["echo once"]);
-            app.drain_session_events(cx);
-            assert_eq!(
-                app.session.command_history_for("history"),
-                Some(["echo once".to_string()].as_slice())
-            );
-        });
-        let global = finish_history_requests(&mut cx, &app, 1);
-        assert_eq!(global[0].command, "echo once");
-        assert_eq!(global[0].use_count, 1);
-    }
-
-    #[test]
-    fn repeated_direct_submissions_consume_matching_accepted_events() {
-        let root = TestTempDir::new("zzclawterm-history-repeat-submit");
-        let mut cx = TestAppContext::single();
-        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
-        let app = app_with_visible_local_session(&mut cx, root.path(), "history");
-        cx.update_entity(&app, |app, cx| {
-            for _ in 0..2 {
-                app.record_submitted_command_history(&["history"], vec!["echo repeat".to_string()]);
-            }
-            accept_commands(app, &["echo repeat", "echo repeat"]);
-            app.drain_session_events(cx);
-            assert_eq!(
-                app.session.command_history_for("history"),
-                Some(["echo repeat".to_string(), "echo repeat".to_string()].as_slice())
-            );
-        });
-        let global = finish_history_requests(&mut cx, &app, 2);
-        assert_eq!(global[0].command, "echo repeat");
-        assert_eq!(global[0].use_count, 2);
-    }
-
-    #[test]
-    fn accepted_event_without_direct_submission_records_history() {
-        let root = TestTempDir::new("zzclawterm-history-accepted-only");
-        let mut cx = TestAppContext::single();
-        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
-        let app = app_with_visible_local_session(&mut cx, root.path(), "history");
-        cx.update_entity(&app, |app, cx| {
-            accept_commands(app, &["pwd"]);
-            app.drain_session_events(cx);
-            assert_eq!(
-                app.session.command_history_for("history"),
-                Some(["pwd".to_string()].as_slice())
-            );
-        });
-        let global = finish_history_requests(&mut cx, &app, 1);
-        assert_eq!(global[0].command, "pwd");
-        assert_eq!(global[0].use_count, 1);
-    }
-
-    #[test]
-    fn accepted_events_preserve_distinct_direct_submission_order() {
-        let root = TestTempDir::new("zzclawterm-history-submit-order");
-        let mut cx = TestAppContext::single();
-        let _cleanup = crate::test_support::TestAppCleanup::new(&cx);
-        let app = app_with_visible_local_session(&mut cx, root.path(), "history");
-        cx.update_entity(&app, |app, cx| {
-            for command in ["echo first", "echo second"] {
-                app.record_submitted_command_history(&["history"], vec![command.to_string()]);
-            }
-            accept_commands(app, &["echo first", "echo second"]);
-            app.drain_session_events(cx);
-            assert_eq!(
-                app.session.command_history_for("history"),
-                Some(["echo second".to_string(), "echo first".to_string()].as_slice())
-            );
-        });
-        let global = finish_history_requests(&mut cx, &app, 2);
-        assert_eq!(
-            global
-                .iter()
-                .map(|entry| entry.command.as_str())
-                .collect::<Vec<_>>(),
-            ["echo second", "echo first"]
-        );
-    }
-}
-
-#[cfg(test)]
 mod notice_tests {
     use crate::features::session::notices::SessionNoticeKind;
     use crate::features::test_support::app_with_visible_local_session;
@@ -1210,7 +1100,13 @@ mod notice_tests {
                     },
                 },
             ]);
-            app.drain_session_events(cx);
+            // Each drain has a wall-time budget and can yield even with only
+            // four notices when a CI worker is descheduled between events.
+            while !app.session.pending_events_are_empty() {
+                let pending = app.session.pending_event_count();
+                app.drain_session_events(cx);
+                assert!(app.session.pending_event_count() < pending);
+            }
             (app.terminal.recording_output_fence())().unwrap();
             app.drain_terminal_frame_events(cx);
             assert_eq!(app.terminal.session_output("active").unwrap(), output);

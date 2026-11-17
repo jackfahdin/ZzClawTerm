@@ -1,3 +1,4 @@
+use crate::features::session::CommandHistoryLearning;
 use futures::StreamExt as _;
 use gpui::Context;
 use zzclawterm_core::AiCommandCard;
@@ -226,7 +227,7 @@ impl ZzClawTermApp {
         self.record_command_history_for_sessions(&sessions, bytes);
     }
 
-    /// Resolve a submitted command once and attach it to every successful session.
+    /// Tracked input applies to successful sessions; recovered echo only to its source.
     /// Global command history is appended only once per submission.
     pub(in crate::features) fn record_command_history_for_sessions(
         &mut self,
@@ -241,7 +242,13 @@ impl ZzClawTermApp {
         }
         let submitted: Vec<String> =
             if let Some(command) = self.terminal.take_pending_command_history_entry() {
-                vec![command]
+                if let Some(source) = command.source_session {
+                    if session_ids.contains(&source.as_str()) {
+                        self.record_submitted_command_history(&[&source], vec![command.command]);
+                    }
+                    return;
+                }
+                vec![command.command]
             } else {
                 text.split(['\r', '\n'])
                     .map(str::trim)
@@ -266,7 +273,10 @@ impl ZzClawTermApp {
         let mut recorded = std::collections::HashSet::new();
         let mut fallback = std::collections::HashSet::new();
         for session_id in session_ids {
-            let context = self.commands.command_context(session_id).cloned();
+            let context = self
+                .commands
+                .command_context(session_id)
+                .map(|_| self.command_suggestion_context(session_id));
             // The marked shell owns the observation. Do not consume its secret
             // latch until CommandAccepted arrives from that same submission.
             if self.completion_has_marked_shell(session_id)
@@ -279,14 +289,12 @@ impl ZzClawTermApp {
             let sensitive = self.commands.take_completion_sensitive(session_id)
                 || self.recording_input_is_sensitive(session_id);
             let confirmed = self.commands.take_completion_confirmed(session_id);
-            self.session
-                .note_directly_recorded_command_history(session_id, submitted.len());
             for command in &submitted {
                 if !zzclawterm_core::completion::privacy::command_may_be_learned(command, sensitive)
                 {
                     continue;
                 }
-                self.session.record_command_history(session_id, command);
+                let mut learning = CommandHistoryLearning::GlobalOnly;
                 if let Some(context) = context.clone().filter(|_| confirmed) {
                     let include_global = !recorded.contains(command);
                     if self.commands.observe_completion_submission(
@@ -295,6 +303,7 @@ impl ZzClawTermApp {
                         include_global,
                     ) {
                         recorded.insert(command.clone());
+                        learning = CommandHistoryLearning::Scoped;
                     } else {
                         self.settings
                             .update_store_status("completion worker is unavailable", false);
@@ -302,6 +311,8 @@ impl ZzClawTermApp {
                 } else {
                     fallback.insert(command.clone());
                 }
+                self.session
+                    .record_submitted_command_history(session_id, command, learning);
             }
         }
         let mut fallback: Vec<_> = fallback
@@ -344,6 +355,12 @@ impl ZzClawTermApp {
             while let Some(event) = rx.next().await {
                 if this
                     .update(cx, |this, cx| {
+                        if let CommandPersistenceResult::HistoryMaintenanceWarning(message) = event
+                        {
+                            this.settings.update_store_status(message, false);
+                            cx.notify();
+                            return;
+                        }
                         this.commands.note_persistence_event_delivered();
                         if let Err(message) = this.commands.apply_persistence_result(event) {
                             this.settings.update_store_status(message, false);
@@ -371,3 +388,4 @@ impl ZzClawTermApp {
         .detach();
     }
 }
+use crate::features::runtime_jobs::CommandPersistenceResult;

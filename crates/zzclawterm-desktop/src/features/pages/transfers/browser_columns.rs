@@ -1,12 +1,12 @@
 use gpui::{Context, MouseDownEvent, MouseMoveEvent};
 
 use crate::features::ZzClawTermApp;
-use crate::models::TransferBrowserSortColumn;
+use zzclawterm_files::file_browser::listing::FileBrowserSortColumn;
 
 impl ZzClawTermApp {
     pub(in crate::features::pages::transfers) fn start_transfer_browser_column_resize(
         &mut self,
-        column: TransferBrowserSortColumn,
+        column: FileBrowserSortColumn,
         event: &MouseDownEvent,
         cx: &mut Context<Self>,
     ) {

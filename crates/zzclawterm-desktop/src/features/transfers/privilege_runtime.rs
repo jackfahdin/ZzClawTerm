@@ -91,21 +91,20 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn file_sudo_available(&self, session: &str) -> bool {
         let session = self.ssh_scoped_session_id(session);
-        self.session
-            .metadata(&session)
-            .and_then(|m| m.ssh_config.as_ref())
-            .is_some_and(|config| {
-                config.remote_file_browser_enabled()
-                    && config.effective_runtime_mode()
-                        != zzclawterm_core::models::ssh_runtime::SshRuntimeMode::Sftp
+        self.session.metadata(&session).is_some_and(|metadata| {
+            metadata.ssh_runtime_mode()
+                != Some(zzclawterm_core::models::ssh_runtime::SshRuntimeMode::Sftp)
+                && metadata
+                    .ssh_config
+                    .as_ref()
+                    .is_some_and(|config| config.remote_file_browser_enabled())
+        }) && self
+            .session
+            .ssh_connection_for_session(&session)
+            .is_some_and(|connection| {
+                connection.handle().shell_availability()
+                    != zzclawterm_transport::connection_attempt::ShellAvailability::Unavailable
             })
-            && self
-                .session
-                .ssh_connection_for_session(&session)
-                .is_some_and(|connection| {
-                    connection.handle().shell_availability()
-                        != zzclawterm_transport::connection_attempt::ShellAvailability::Unavailable
-                })
     }
 
     fn file_sudo_busy(&self, session: &str) -> bool {
