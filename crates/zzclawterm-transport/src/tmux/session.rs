@@ -463,9 +463,10 @@ impl<'a> ControlSession<'a> {
     fn response_kind(&mut self, id: BlockId, lines: &[Vec<u8>], failed: bool) -> PendingKind {
         #[cfg(test)]
         let barrier_match = match self.pending_responses.front() {
-            Some(PendingKind::UserCommand { barrier }) => {
-                lines.iter().position(|line| line == barrier.as_bytes())
-            }
+            Some(PendingKind::UserCommand { barrier }) => lines.iter().position(|line| {
+                line.windows(barrier.len())
+                    .any(|window| window == barrier.as_bytes())
+            }),
             _ => None,
         };
         #[cfg(test)]
@@ -505,7 +506,12 @@ impl<'a> ControlSession<'a> {
             return PendingKind::Ignore;
         }
         if let Some(PendingKind::UserCommand { barrier }) = self.pending_responses.front() {
-            if !failed && lines.iter().any(|line| line == barrier.as_bytes()) {
+            if !failed
+                && lines.iter().any(|line| {
+                    line.windows(barrier.len())
+                        .any(|window| window == barrier.as_bytes())
+                })
+            {
                 self.pending_responses.pop_front();
                 return PendingKind::Ignore;
             }
@@ -2652,7 +2658,10 @@ mod stability_tests {
         let PendingKind::UserCommand { barrier } = &outgoing.responses[0] else {
             panic!()
         };
-        let lines = vec![b"%window-add @1".to_vec(), barrier.as_bytes().to_vec()];
+        let lines = vec![
+            b"%window-add @1".to_vec(),
+            format!("prefix {barrier} suffix").into_bytes(),
+        ];
         session.pending_responses.extend(outgoing.responses);
         session
             .pending_responses
