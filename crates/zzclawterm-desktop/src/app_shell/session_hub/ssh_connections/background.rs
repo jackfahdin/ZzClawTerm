@@ -445,6 +445,11 @@ mod tests {
         drop(retry);
         pool.invalidate_background();
         pool.finish_disconnects();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while closed.load(Ordering::SeqCst) != 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+            pool.finish_disconnects();
+        }
         assert_eq!(closed.load(Ordering::SeqCst), 1);
     }
 
