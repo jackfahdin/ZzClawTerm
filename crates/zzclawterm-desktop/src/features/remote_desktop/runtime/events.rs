@@ -641,6 +641,7 @@ impl ZzClawTermApp {
                     job.update_progress(sample);
                 } else {
                     self.transfer.enqueue_transfer_job(TransferJobState {
+                        source_type: None,
                         id: progress.id,
                         session_id: Some(session_id.to_string()),
                         kind: TransferJobKind::RdpClipboard {

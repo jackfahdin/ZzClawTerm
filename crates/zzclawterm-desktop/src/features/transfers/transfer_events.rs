@@ -342,6 +342,13 @@ impl ZzClawTermApp {
                 &anyhow::anyhow!("transfer worker failed"),
             );
         }
+        if let TransferJobEvent::SourceType(source_type) = &event.event {
+            if let Some(job) = self.transfer.transfer_job_mut(&event.id) {
+                job.source_type = Some(*source_type);
+                return true;
+            }
+            return false;
+        }
         let event = TransferJobResult {
             id: event.id,
             event: match event.event {
@@ -429,6 +436,7 @@ impl ZzClawTermApp {
             };
             self.transfer
                 .enqueue_transfer_job(crate::models::TransferJobState {
+                    source_type: None,
                     id: event.id,
                     session_id: Some(session_id),
                     kind,
@@ -489,10 +497,24 @@ impl ZzClawTermApp {
                                 bytes, target_path, ..
                             } = output
                             {
+                                let local_target = self.transfer.file_operation(&event.id).is_some_and(|operation| {
+                                    operation.endpoints().1.kind() == zzclawterm_files::file_browser::FileBrowserBackendKind::Local
+                                });
+                                if let TransferJobKind::SendTo {
+                                    target_path: recorded,
+                                    ..
+                                } = &mut job.kind
+                                {
+                                    *recorded = target_path.clone();
+                                }
                                 job.summary = Some(
                                     zzclawterm_files::sftp_transfer_types::SftpTransferSummary {
+                                        local_path: if local_target {
+                                            std::path::PathBuf::from(&target_path)
+                                        } else {
+                                            Default::default()
+                                        },
                                         remote_path: target_path,
-                                        local_path: Default::default(),
                                         bytes,
                                         skipped: false,
                                     },
@@ -522,6 +544,13 @@ impl ZzClawTermApp {
                     }
                 }
                 _ => {}
+            }
+            if finished {
+                self.transfer.settle_cut_job(
+                    &event.id,
+                    job.status == TransferJobStatus::Completed
+                        && !job.summary.as_ref().is_some_and(|summary| summary.skipped),
+                );
             }
             self.transfer
                 .restore_transfer_job_after_event((job_index, job));
@@ -1571,7 +1600,9 @@ impl ZzClawTermApp {
                     zmodem_upload_after_probe = Some((session_id, files, overwrite));
                 }
             }
-            TransferJobEvent::FileFinished(_) | TransferJobEvent::FileRefreshFailed(_) => {
+            TransferJobEvent::SourceType(_)
+            | TransferJobEvent::FileFinished(_)
+            | TransferJobEvent::FileRefreshFailed(_) => {
                 unreachable!("file errors are localized at event entry")
             }
             TransferJobEvent::Finished(Err(error)) => {
@@ -2187,6 +2218,7 @@ mod tests {
 
     fn running_job(id: &str) -> TransferJobState {
         TransferJobState {
+            source_type: None,
             id: id.to_string(),
             session_id: None,
             kind: TransferJobKind::Download {
@@ -2280,6 +2312,7 @@ mod tests {
 
     fn sync_cwd_job(id: &str) -> TransferJobState {
         TransferJobState {
+            source_type: None,
             id: id.to_string(),
             session_id: None,
             kind: TransferJobKind::SyncCwd {

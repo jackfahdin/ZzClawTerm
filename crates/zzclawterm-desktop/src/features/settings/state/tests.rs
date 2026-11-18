@@ -62,6 +62,37 @@ fn minimum_contrast_updates_render_policy_without_recoloring_the_palette() {
 }
 
 #[test]
+fn terminal_color_query_palette_follows_terminal_theme_and_custom_colors() {
+    let mut state = settings_state();
+    state.set_appearance_theme("github-light".into());
+    assert_eq!(state.terminal_color_palette().background, 0xffffff);
+    assert_eq!(
+        SettingsFeatureState::resolve_terminal_color_palette(state.summary()),
+        state.terminal_color_palette()
+    );
+    state.set_terminal_theme(Some("dracula".into()));
+    assert_eq!(state.terminal_color_palette().background, 0x282a36);
+    state.set_appearance_theme("nya-high-contrast-white".into());
+    assert_eq!(state.terminal_color_palette().background, 0x282a36);
+    state.set_terminal_theme(Some("missing-theme".into()));
+    assert_eq!(state.terminal_color_palette().background, 0xffffff);
+
+    let mut theme =
+        zzclawterm_core::themes::resolve_theme("github-light", &state.summary.custom_themes);
+    theme.id = "custom:query-colors".into();
+    theme.colors.terminal.background = "#faf0e0".into();
+    theme.colors.terminal.foreground = "#112233".into();
+    theme.colors.terminal.foreground_intense = Some("#445566".into());
+    let id = theme.id.clone();
+    state.summary.custom_themes.upsert(theme).unwrap();
+    state.set_terminal_theme(Some(id));
+    let colors = state.terminal_color_palette();
+    assert_eq!(colors.background, 0xfaf0e0);
+    assert_eq!(colors.foreground, 0x112233);
+    assert_eq!(colors.foreground_intense, Some(0x445566));
+}
+
+#[test]
 fn settings_owner_normalizes_general_and_interaction_transitions() {
     let mut state = settings_state();
     state.summary.diagnostics_level = "info".to_string();
@@ -626,4 +657,28 @@ fn quit_prompt_retains_one_request_and_can_be_retried_after_cancel() {
     assert_eq!(state.take_quit_confirmation(), None);
     assert!(state.begin_quit_confirmation(0));
     assert_eq!(state.take_quit_confirmation(), Some(0));
+}
+
+#[test]
+fn startup_list_survives_mode_changes_and_supports_ordered_edits() {
+    use zzclawterm_core::models::startup::{StartupMode, StartupTarget};
+    let mut state = settings_state();
+    state.set_startup_target(0, StartupTarget::connection("a"));
+    state.set_startup_target(1, StartupTarget::group("g"));
+    state.set_startup_mode(StartupMode::Specified);
+    state.move_startup_target(1, 0);
+    state.set_startup_mode(StartupMode::None);
+    state.set_startup_mode(StartupMode::Specified);
+    assert_eq!(
+        state.summary().startup_targets,
+        [StartupTarget::group("g"), StartupTarget::connection("a")]
+    );
+    state.remove_startup_target(0);
+    state.set_startup_target(0, StartupTarget::connection("b"));
+    state.move_startup_target(0, 99);
+    state.remove_startup_target(99);
+    assert_eq!(
+        state.summary().startup_targets,
+        [StartupTarget::connection("b")]
+    );
 }

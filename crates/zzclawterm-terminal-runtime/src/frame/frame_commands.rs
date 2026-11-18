@@ -19,6 +19,9 @@ pub(super) struct TerminalFrameScrollTarget {
 
 #[derive(Debug)]
 pub(super) enum TerminalFrameCommand {
+    SetColorPalette {
+        palette: zzclawterm_terminal::colors::TerminalColorPalette,
+    },
     SetCollapsedCommands {
         session_id: String,
         ids: std::collections::BTreeSet<zzclawterm_terminal::command_blocks::CommandBlockId>,
@@ -524,6 +527,7 @@ pub(super) fn terminal_frame_command_is_fence(_command: &TerminalFrameCommand) -
     if matches!(
         _command,
         TerminalFrameCommand::RekeySession { .. }
+            | TerminalFrameCommand::SetColorPalette { .. }
             | TerminalFrameCommand::SetCollapsedCommands { .. }
             | TerminalFrameCommand::NavigateCommand { .. }
             | TerminalFrameCommand::CommandInput { .. }

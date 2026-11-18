@@ -19,6 +19,8 @@ pub struct AppShellStartup {
     pub(super) workspace_id: WorkspaceId,
     pub(super) workspace_restore: WorkspaceRestoreManifest,
     is_default_workspace: bool,
+    pub(super) startup_mode: zzclawterm_core::models::startup::StartupMode,
+    pub(super) run_specified_startup: bool,
     pub(super) device_windows: DeviceWindowManifest,
     pub(super) workspace_seed: Option<WorkspaceRestoreState>,
 }
@@ -70,6 +72,8 @@ impl AppShellStartup {
             is_default_workspace: true,
             device_windows: DeviceWindowManifest::empty(),
             workspace_seed: None,
+            startup_mode: Default::default(),
+            run_specified_startup: false,
         }
     }
 
@@ -116,6 +120,8 @@ impl AppShellStartup {
                     is_default_workspace: true,
                     device_windows: DeviceWindowManifest::empty(),
                     workspace_seed: None,
+                    startup_mode: Default::default(),
+                    run_specified_startup: false,
                 };
             }
         };
@@ -142,6 +148,7 @@ impl AppShellStartup {
                 );
             }
         };
+        let startup_mode = restore.startup_mode;
         let is_default_workspace = restore.is_default_workspace;
         let workspace_restore = restore.manifest;
         let workspace_id = workspace_restore
@@ -196,6 +203,8 @@ impl AppShellStartup {
                 is_default_workspace,
                 device_windows,
                 workspace_seed: None,
+                startup_mode,
+                run_specified_startup: false,
             },
             Err(error) => Self {
                 store_runtime: None,
@@ -211,6 +220,8 @@ impl AppShellStartup {
                 is_default_workspace,
                 device_windows,
                 workspace_seed: None,
+                startup_mode,
+                run_specified_startup: false,
             },
         }
     }
@@ -233,6 +244,8 @@ impl AppShellStartup {
             is_default_workspace: true,
             device_windows: DeviceWindowManifest::empty(),
             workspace_seed: None,
+            startup_mode: Default::default(),
+            run_specified_startup: false,
         }
     }
 
@@ -253,7 +266,27 @@ impl AppShellStartup {
         ids
     }
 
+    pub(super) fn allows_specified_startup(
+        &self,
+        activation: &zzclawterm_core::activation::ParsedActivationRequest,
+    ) -> bool {
+        matches!(
+            self.startup_mode,
+            zzclawterm_core::models::startup::StartupMode::Specified
+        ) && !activation
+            .actions
+            .iter()
+            .any(|action| matches!(action, Ok(zzclawterm_core::ActivationAction::Connect(_))))
+    }
+
     pub fn restored_workspace_ids(&self) -> Vec<WorkspaceId> {
+        if !self.startup_mode.restores_last_session() {
+            return vec![
+                self.device_windows
+                    .most_recent_workspace_id
+                    .unwrap_or(self.workspace_id),
+            ];
+        }
         let mut ids = self.saved_workspace_ids();
         if ids.is_empty() {
             ids.push(self.workspace_id);
@@ -288,6 +321,8 @@ impl AppShellStartup {
                 is_default_workspace: self.is_default_workspace,
                 device_windows: self.device_windows.clone(),
                 workspace_seed: None,
+                startup_mode: self.startup_mode.clone(),
+                run_specified_startup: false,
             };
         };
         Self {
@@ -300,6 +335,8 @@ impl AppShellStartup {
             is_default_workspace: self.is_default_workspace,
             device_windows: self.device_windows.clone(),
             workspace_seed: None,
+            startup_mode: self.startup_mode.clone(),
+            run_specified_startup: false,
         }
     }
 
@@ -555,6 +592,46 @@ mod tests {
     }
 
     #[test]
+    fn explicit_connection_activation_takes_precedence_over_the_startup_list() {
+        use zzclawterm_core::activation::{
+            ActivationAction, ExternalConnectionRequest, ParsedActivationRequest,
+        };
+        let mut startup = AppShellStartup::prepare_failed("test".into());
+        startup.startup_mode = zzclawterm_core::models::startup::StartupMode::Specified;
+        let mut request = ParsedActivationRequest {
+            request_id: [0; 16],
+            actions: vec![Ok(ActivationAction::Activate)],
+            open_behavior: Default::default(),
+        };
+        assert!(startup.allows_specified_startup(&request));
+        request.actions.push(Ok(ActivationAction::Connect(
+            ExternalConnectionRequest::Local { cwd: None },
+        )));
+        assert!(!startup.allows_specified_startup(&request));
+    }
+
+    #[test]
+    fn startup_modes_choose_one_recent_window_or_all_saved_workspaces() {
+        use zzclawterm_core::models::startup::StartupMode;
+        let mut startup = AppShellStartup::prepare_failed("test".into());
+        let first = startup.workspace_id;
+        let second = WorkspaceId::new();
+        startup
+            .workspace_restore
+            .workspaces
+            .push(WorkspaceRestoreState::empty(second));
+        startup.device_windows.most_recent_workspace_id = Some(second);
+        startup.is_default_workspace = false;
+        for mode in [StartupMode::None, StartupMode::Specified] {
+            startup.startup_mode = mode;
+            assert_eq!(startup.restored_workspace_ids(), [second]);
+            assert!(!startup.for_workspace(second).run_specified_startup);
+        }
+        startup.startup_mode = StartupMode::LastSession;
+        assert_eq!(startup.restored_workspace_ids(), [first, second]);
+    }
+
+    #[test]
     fn new_workspace_seed_inherits_layout_without_sessions_or_window_geometry() {
         let source_id = WorkspaceId::new();
         let target_id = WorkspaceId::new();
@@ -578,6 +655,8 @@ mod tests {
             is_default_workspace: false,
             device_windows: DeviceWindowManifest::empty(),
             workspace_seed: None,
+            startup_mode: Default::default(),
+            run_specified_startup: false,
         };
         let ui = WorkspaceUiState {
             left_panel_width: 360,
