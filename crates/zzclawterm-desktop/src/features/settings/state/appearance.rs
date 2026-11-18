@@ -5,8 +5,10 @@ use crate::features::{
     FontCatalogKind, FontCatalogLoadState, FontCatalogSnapshot, FontCatalogState,
     FontResolutionStatus,
 };
+
 use std::sync::Arc;
 use zzclawterm_core::AppSettingsSummary;
+use zzclawterm_terminal::colors::TerminalColorPalette;
 
 pub(super) struct AppearanceSettingsState {
     pub(super) palette: zzclawterm_ui::ThemePalette,
@@ -18,6 +20,16 @@ pub(super) struct AppearanceSettingsState {
 }
 
 impl SettingsFeatureState {
+    pub(in crate::features) fn resolve_terminal_color_palette(
+        summary: &AppSettingsSummary,
+    ) -> TerminalColorPalette {
+        terminal_color_palette(Self::resolve_terminal_palette(summary))
+    }
+
+    pub(in crate::features) fn terminal_color_palette(&self) -> TerminalColorPalette {
+        terminal_color_palette(self.appearance.terminal_palette)
+    }
+
     pub(super) fn resolve_terminal_palette(
         summary: &AppSettingsSummary,
     ) -> zzclawterm_ui::ThemePalette {
@@ -287,5 +299,15 @@ impl SettingsFeatureState {
     }
     pub(in crate::features) fn fail_font_options_load(&mut self, generation: u64) -> bool {
         self.appearance.font_catalog.fail(generation)
+    }
+}
+
+fn terminal_color_palette(palette: zzclawterm_ui::ThemePalette) -> TerminalColorPalette {
+    TerminalColorPalette {
+        foreground: palette.terminal_fg,
+        background: palette.terminal_bg,
+        cursor: palette.terminal_cursor,
+        ansi: palette.terminal_ansi,
+        foreground_intense: palette.terminal_fg_intense,
     }
 }
