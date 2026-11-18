@@ -6,20 +6,7 @@ use gpui::{Context, Window};
 use rust_i18n::t;
 use std::path::PathBuf;
 use zzclawterm_files::file_browser::FileBrowserBackendKind;
-#[cfg(test)]
-use zzclawterm_files::file_browser::{
-    FileBrowserService, file_browser_copy_destination_invalid, file_browser_join, file_browser_name,
-    file_browser_path_is_root,
-};
-#[cfg(test)]
-use zzclawterm_files::operations::{VerifiedCopyRequest, copy_verified};
 use zzclawterm_files::sftp::{RemoteFilePath, SftpFileEntry, SftpFileType};
-#[cfg(test)]
-use zzclawterm_files::sftp::SftpTransferControl;
-#[cfg(test)]
-use zzclawterm_files::sftp_transfer_types::{
-    SftpDuplicatePolicy, SftpDuplicateResolver, SftpPathTransferOptions,
-};
 
 #[cfg(test)]
 fn invalid_copy_destination(
@@ -259,13 +246,8 @@ impl ZzClawTermApp {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        TransferFileClipboard, invalid_copy_destination, local_clipboard_entry,
-        prefer_external_paths,
-    };
-    use std::path::PathBuf;
+    use super::invalid_copy_destination;
     use zzclawterm_files::file_browser::FileBrowserBackendKind;
-    use zzclawterm_files::sftp::SftpFileType;
 
     #[test]
     fn clipboard_copy_reports_partial_progress_before_the_finished_output() {
