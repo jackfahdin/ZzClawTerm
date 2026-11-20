@@ -1,4 +1,4 @@
-//! Navigation-only submission evidence. It never changes the editing tracker.
+//! Submission evidence for navigation and presentation. It never changes the editing tracker.
 
 use zeroize::{Zeroize, Zeroizing};
 use zzclawterm_core::terminal::input_tracker::{
@@ -9,6 +9,7 @@ use zzclawterm_core::terminal::input_tracker::{
 use crate::editing::recover_marked_input;
 use crate::{TerminalLineId, TerminalSnapshot};
 
+#[derive(Clone)]
 pub struct CommandSubmissionEvidence {
     pub anchor: TerminalLineId,
     pub command: String,

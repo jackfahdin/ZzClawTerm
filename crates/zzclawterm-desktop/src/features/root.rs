@@ -200,7 +200,7 @@ impl ZzClawTermApp {
     /// Capture the initiating window before deferring across entity leases.
     pub(in crate::features) fn notify_operation(
         &self,
-        key: &'static str,
+        key: impl Into<gpui::SharedString>,
         kind: zzclawterm_ui::notification::ZzClawNotificationKind,
         message: String,
         cx: &mut Context<Self>,
@@ -213,7 +213,7 @@ impl ZzClawTermApp {
 
     pub(in crate::features) fn notify_background_operation(
         &self,
-        key: &'static str,
+        key: impl Into<gpui::SharedString>,
         kind: zzclawterm_ui::notification::ZzClawNotificationKind,
         message: String,
         cx: &mut Context<Self>,
@@ -230,11 +230,12 @@ impl ZzClawTermApp {
     pub(in crate::features) fn notify_operation_at(
         &self,
         target: Option<gpui::AnyWindowHandle>,
-        key: &'static str,
+        key: impl Into<gpui::SharedString>,
         kind: zzclawterm_ui::notification::ZzClawNotificationKind,
         message: String,
         cx: &mut Context<Self>,
     ) {
+        let key = key.into();
         if let Some(target) = target {
             cx.defer(move |cx| {
                 let _ = target.update(cx, |_, window, cx| {
@@ -972,7 +973,7 @@ impl ZzClawTermApp {
             .when(overlay.favorites_menu_open, |this| {
                 this.child(full_window_overlay_layer(
                     "transfer-favorites-menu-input-layer",
-                    self.transfer_browser_favorites_menu_overlay(cx),
+                    self.transfer_browser_favorites_menu_overlay(window, cx),
                 ))
             })
             .when(overlay.path_menu_open, |this| {
@@ -1242,7 +1243,7 @@ impl ZzClawTermApp {
 
     /// Whether the main window should be held back for a modal child window.
     ///
-    /// The two windows below hold one shared draft slot each, so the main
+    /// These windows hold editable drafts or shared input state, so the main
     /// window must not be edited underneath them. Deliberately absent: the
     /// remote file editor, which is an independent document window, and the
     /// external-editor prompt, which is a topmost `PopUp` that must not block
@@ -1256,6 +1257,7 @@ impl ZzClawTermApp {
         self.connection_state.editor_window_is_open_or_pending()
             || self.commands.quick_editor_window_is_open_or_pending()
             || self.sync_input.window_is_open_or_pending()
+            || self.networktools.config_window_is_open_or_pending()
     }
 
     /// Dims the main window while a modal child window owns a draft.
@@ -1674,6 +1676,42 @@ mod tests {
             assert!(app.root_overlay_visibility(cx).modal_child_open);
             app.commands.cancel_quick_editor_window_request();
             assert!(!app.modal_child_window_is_open_or_pending());
+            assert!(!app.root_overlay_visibility(cx).modal_child_open);
+        });
+    }
+
+    #[gpui::test]
+    fn networktools_config_window_controls_modal_scrim_through_its_lifecycle(
+        cx: &mut TestAppContext,
+    ) {
+        use zzclawterm_transport::networktools::NetworkToolKind;
+
+        let app = modal_predicate_app(cx);
+        let kind = NetworkToolKind::Tftp;
+
+        cx.update_entity(&app, |app, cx| {
+            assert!(!app.root_overlay_visibility(cx).modal_child_open);
+
+            assert!(app.networktools.begin_window_open(kind));
+            assert!(app.root_overlay_visibility(cx).modal_child_open);
+
+            app.networktools.suspend_config_windows();
+            assert!(app.networktools.is_config_open(kind));
+            assert!(
+                !app.root_overlay_visibility(cx).modal_child_open,
+                "a draft kept for unlocking has no modal window"
+            );
+
+            assert_eq!(app.networktools.take_reopen_kinds(), vec![kind]);
+            assert!(app.networktools.begin_window_open(kind));
+            assert!(app.root_overlay_visibility(cx).modal_child_open);
+
+            app.networktools.end_config_session(kind);
+            assert!(!app.root_overlay_visibility(cx).modal_child_open);
+
+            assert!(app.networktools.begin_window_open(kind));
+            assert!(app.root_overlay_visibility(cx).modal_child_open);
+            app.networktools.fail_config_window(kind);
             assert!(!app.root_overlay_visibility(cx).modal_child_open);
         });
     }

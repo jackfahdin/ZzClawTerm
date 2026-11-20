@@ -8,12 +8,12 @@ use gpui::{
     UniformListDecoration, Window, div, prelude::*, px, rgb, svg, uniform_list,
 };
 use rust_i18n::t;
+use std::ops::Range;
 use zzclawterm_files::file_browser::{
     FileBrowserBackendKind, file_browser_parent, file_browser_path_eq,
 };
 use zzclawterm_files::sftp::{SftpFileEntry, SftpFileType};
-
-use std::ops::Range;
+use zzclawterm_ui::ZzClawHoverCard;
 use zzclawterm_ui::{
     ZzClawButton, ZzClawButtonVariant, ZzClawContextMenu, ZzClawUniformListScrollbar,
 };
@@ -323,14 +323,29 @@ pub(super) fn transfer_tree_view(
                                             )
                                         })
                                         .when(!is_renaming, |this| {
-                                            this.child(
-                                                div()
-                                                    .min_w_0()
-                                                    .flex_1()
-                                                    .overflow_hidden()
-                                                    .text_ellipsis()
-                                                    .child(row.label),
-                                            )
+                                            let label = div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .overflow_hidden()
+                                                .text_ellipsis()
+                                                .child(row.label);
+                                            // Action buttons and status markers keep their own
+                                            // tooltips instead of also opening file details.
+                                            let label = if let Some(details) = hover_details {
+                                                ZzClawHoverCard::new(
+                                                    format!("transfer-tree-entry-detail-{}", row.key),
+                                                    label,
+                                                    transfer_tree_hover_card(&details, palette),
+                                                )
+                                                .at_pointer()
+                                                .flexible_trigger()
+                                                .open_delay(std::time::Duration::from_millis(800))
+                                                .close_delay(std::time::Duration::from_millis(250))
+                                                .into_any_element()
+                                            } else {
+                                                label.into_any_element()
+                                            };
+                                            this.child(label)
                                         })
                                         .when(is_terminal_cwd, |this| {
                                             this.child(
@@ -371,15 +386,6 @@ pub(super) fn transfer_tree_view(
                                                             .build(window, cx)
                                                     }),
                                             )
-                                        })
-                                        .when_some(hover_details, |this, details| {
-                                            this.tooltip(move |window, cx| {
-                                                let details = details.clone();
-                                                zzclawterm_ui::ZzClawTooltip::element(move |_, _| {
-                                                    transfer_tree_hover_card(&details, palette)
-                                                })
-                                                .build(window, cx)
-                                            })
                                         });
                                     div()
                                         .h(px(28.))

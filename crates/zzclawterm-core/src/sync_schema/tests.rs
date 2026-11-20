@@ -95,6 +95,71 @@ fn local_shell_and_serial_port_are_not_portable() {
 }
 
 #[test]
+fn serial_connect_prompt_sync_preserves_flags_and_local_extensions() {
+    let original = json!({
+        "type":"serial", "name":"Serial", "port_name":"COM9", "baud_rate":115200,
+        "connect_prompt":{"port":true,"baud_rate":true,"future_local":{"keep":true}}
+    });
+    let mut projected = project_record("connection", &original).unwrap();
+    assert_eq!(
+        projected["serial"]["connect_prompt"],
+        json!({"port":true,"baud_rate":true})
+    );
+    let field = SyncFieldId::new(SyncResourceId::new("connection", "serial"), "serial");
+    assert!(crate::sync_schema::valid_fixed_cloud_sync_value(
+        &field,
+        &projected["serial"]
+    ));
+    projected["serial"]["connect_prompt"] = json!({"baud_rate":false});
+    let applied = apply_record("connection", &original, &projected).unwrap();
+    assert_eq!(applied["port_name"], "COM9");
+    assert_eq!(
+        applied["connect_prompt"],
+        json!({"baud_rate":false,"future_local":{"keep":true}})
+    );
+    projected["serial"]
+        .as_object_mut()
+        .unwrap()
+        .remove("connect_prompt");
+    let cleared = apply_record("connection", &original, &projected).unwrap();
+    assert_eq!(
+        cleared["connect_prompt"],
+        json!({"future_local":{"keep":true}})
+    );
+    assert_eq!(cleared["port_name"], "COM9");
+}
+
+#[test]
+fn fixed_serial_values_accept_only_known_boolean_connect_prompt_flags() {
+    let field = SyncFieldId::new(SyncResourceId::new("connection", "serial"), "serial");
+    for prompt in [
+        json!({}),
+        json!({"port":true}),
+        json!({"baud_rate":true}),
+        json!({"port":true,"baud_rate":true}),
+        json!({"port":false,"baud_rate":false}),
+    ] {
+        assert!(crate::sync_schema::valid_fixed_cloud_sync_value(
+            &field,
+            &json!({"connect_prompt":prompt})
+        ));
+    }
+    for prompt in [
+        json!({"future":true}),
+        json!({"port":"true"}),
+        json!({"baud_rate":1}),
+        json!({"port":{"nested":true}}),
+        json!(true),
+        json!(null),
+    ] {
+        assert!(!crate::sync_schema::valid_fixed_cloud_sync_value(
+            &field,
+            &json!({"connect_prompt":prompt})
+        ));
+    }
+}
+
+#[test]
 fn settings_allowlist_excludes_unknown_security_and_device_values() {
     let entities = BTreeMap::from([("settings".into(), json!({"appearance":{"theme":"dark","font_size":14,"window_material":"mica","future_secret":"secret"},"cloud_sync":{"access_token":"secret"},"security":{"master_password":"secret"}}).to_string())]);
     let scope = SyncScope {
@@ -357,6 +422,32 @@ fn android_projection_includes_portable_device_and_screen_but_no_runtime_fields(
 }
 
 #[test]
+fn serial_reconnect_enter_remains_local_when_preferences_are_synced() {
+    let base = BTreeMap::from([("settings".into(), json!({"terminal": {}}).to_string())]);
+    for enabled in [true, false] {
+        let changed = BTreeMap::from([(
+            "settings".into(),
+            json!({
+                "terminal": {"serial_reconnect_send_enter": enabled}
+            })
+            .to_string(),
+        )]);
+        for scope in [
+            SyncScope::default(),
+            SyncScope {
+                preferences: true,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                project_entities(&base, &scope).unwrap(),
+                project_entities(&changed, &scope).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
 fn default_session_settings_remain_local_in_the_existing_v4_projection() {
     let settings = json!({"ui":{"language":"en"}});
     let base = BTreeMap::from([("settings".into(), settings.to_string())]);
@@ -375,4 +466,23 @@ fn default_session_settings_remain_local_in_the_existing_v4_projection() {
             project_entities(&changed, &scope).unwrap()
         );
     }
+}
+#[test]
+fn short_rsa_opt_in_syncs_per_connection_and_can_be_cleared() {
+    let original = json!({"type":"ssh", "name":"SSH", "host":"example.test",
+        "allow_short_rsa_host_keys":true, "ssh_profile":"standard", "future_local":"retained"});
+    let mut projection = project_record("connection", &original).unwrap();
+    assert_eq!(projection["terminal"]["allow_short_rsa_host_keys"], true);
+    for enabled in [false, true] {
+        projection["terminal"]["allow_short_rsa_host_keys"] = json!(enabled);
+        let applied = apply_record("connection", &original, &projection).unwrap();
+        assert_eq!(applied["allow_short_rsa_host_keys"], enabled);
+        assert_eq!(applied["future_local"], "retained");
+    }
+    projection["terminal"]
+        .as_object_mut()
+        .unwrap()
+        .remove("allow_short_rsa_host_keys");
+    let applied = apply_record("connection", &original, &projection).unwrap();
+    assert!(applied.get("allow_short_rsa_host_keys").is_none());
 }

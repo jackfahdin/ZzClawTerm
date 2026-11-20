@@ -234,6 +234,12 @@ impl ZzClawTermApp {
             return;
         };
 
+        if id.starts_with("networktools.") && id.ends_with(".bind") {
+            self.networktools.tftp_draft_mut().bind_address = value.to_string();
+            cx.notify();
+            return;
+        }
+
         if id == "remote.process.sort" {
             use crate::models::RemoteProcessSortKey;
             if let Some(key) = [

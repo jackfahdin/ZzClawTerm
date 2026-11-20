@@ -346,7 +346,7 @@
       "unverified": "미검증",
       "blocked": "차단됨"
     },
-    "modeNyatermAgent": "ZzClawAgent",
+    "modeZzClawtermAgent": "ZzClawAgent",
     "modeCodexAgent": "Codex Agent",
     "modeClaudeCodeAgent": "Claude Code",
     "panelMetaMultiTarget": "%{target} + 세션 %{count}개",
@@ -370,7 +370,7 @@
       "codex": "Codex",
       "mcpIntegration": "ZzClawTerm MCP tool integration",
       "mcpOnly": "Terminal and remote-file access is available only through ZzClawTerm MCP.",
-      "nyaterm": "ZzClawTerm Agent",
+      "zzclawterm": "ZzClawTerm Agent",
       "zzclawterm": "ZzClawTerm Agent"
     },
     "claude": {
@@ -867,9 +867,9 @@
     "passwordLabel": "비밀번호",
     "passwordOnlyCredential": "비밀번호 전용 자격 증명",
     "passwordPlaceholder": "전송할 비밀번호",
-    "passwordRegexPlaceholder": "비밀번호 프롬프트용 정규식",
+    "passwordRegexLabel": "비밀번호 프롬프트 정규식",
     "passwordUnchanged": "현재 값을 유지하려면 비워 두세요",
-    "promptRegexLabel": "프롬프트 정규식",
+    "promptRegexLabel": "사용자 이름 프롬프트 정규식",
     "promptRegexOptionalLabel": "프롬프트 정규식(선택)",
     "reorderFailed": "자격 증명 순서를 변경하지 못했습니다",
     "reorderSuccess": "자격 증명 순서가 저장되었습니다",
@@ -1278,6 +1278,8 @@
     "workingDirectorySelected": "작업 디렉터리: %{path}",
     "workingDirectorySelectionCancelled": "작업 디렉터리 선택이 취소되었습니다.",
     "x11Forwarding": "X11 포워딩",
+    "allowShortRsaHostKeys": "짧은 RSA 호스트 키 허용",
+    "allowShortRsaHostKeysDesc": "512~1023비트 RSA 호스트 키를 허용합니다. 안전하지 않은 키이므로 구형 장치에만 사용하세요. 호스트 신원과 서명은 계속 검증합니다.",
     "sshCompatibilityMode": "호환 모드",
     "sshCompatibilityModeDesc": "이 연결의 원격 리소스 모니터링, 프로세스 관리, Docker 등의 백그라운드 탐지를 비활성화하여 추가 명령으로 인한 구형 SSH 서버의 연결 끊김을 방지합니다. 터미널, SFTP 및 SSH 터널에는 영향을 주지 않습니다.",
     "dynamicTabTitle": "동적 탭 제목",
@@ -1462,7 +1464,6 @@
   "fileExplorer": {
     "clipboardEmpty": "파일 클립보드가 비어 있거나 다른 내용으로 바뀌었습니다",
     "clipboardMoving": "잘라낸 항목을 이동 중입니다. 완료될 때까지 기다려 주세요",
-
     "transferSourceUnavailable": "원본 연결을 사용할 수 없습니다. 다시 연결한 후 시도하세요.",
     "transferBackendUnsupported": "이 연결은 파일 전송을 지원하지 않습니다.",
     "transferInvalidDestination": "전송 대상이 잘못되었거나 파일 이름을 표현할 수 없습니다.",
@@ -1579,9 +1580,15 @@
     "mtime": "수정됨",
     "name": "이름",
     "newFile": "새 파일",
-    "newFileName": "새 파일 이름:",
+    "newFileName": "파일 이름",
+    "newFileNamePlaceholder": "예: config.yaml",
+    "newFolderNamePlaceholder": "예: my-folder",
+    "permRead": "읽기 R",
+    "permWrite": "쓰기 W",
+    "permExecute": "실행 X",
+    "specialPermissions": "특수 권한",
     "newFolder": "새 폴더",
-    "newFolderName": "새 폴더 이름:",
+    "newFolderName": "디렉터리 이름",
     "newSymlink": "새 심볼릭 링크",
     "noFavorites": "즐겨찾기 없음",
     "noChildDirectories": "하위 디렉터리 없음",
@@ -1648,6 +1655,14 @@
     "uploadPrompt": "원격 파일이 변경되었습니다. 변경 사항을 업로드할까요?"
   },
   "fileManager": {
+    "leftSide": "왼쪽",
+    "rightSide": "오른쪽",
+    "copyToPane": "%{side}(으)로 복사 (%{target})",
+    "moveToPane": "%{side}(으)로 이동 (%{target})",
+    "new": "새로 만들기",
+    "copyFullPath": "전체 경로 복사",
+    "copyName": "파일 이름 복사",
+    "copyParent": "상위 디렉터리 복사",
     "connected": "연결됨",
     "skipped": "건너뜀",
     "copy": "복사",
@@ -1697,7 +1712,9 @@
     "openLeft": "왼쪽에서 열기",
     "openRight": "오른쪽에서 열기",
     "openWorkspace": "작업 영역에서 파일 관리자 열기",
-    "goHome": "홈"
+    "goHome": "홈",
+    "goBack": "뒤로",
+    "goForward": "앞으로"
   },
   "fileTransfer": {
     "scanning": "파일 검색 중…",
@@ -1941,6 +1958,81 @@
     "ungrouped": "그룹 없음",
     "ungroupedConnections": "그룹 없음"
   },
+  "networktools": {
+    "common": {
+      "panel": {
+        "listening": "%{addr}에서 수신 중",
+        "notRunning": "실행 중 아님",
+        "configure": "설정",
+        "start": "서버 시작",
+        "stop": "서버 중지"
+      },
+      "action": {
+        "reset": "초기화",
+        "browse": "찾아보기"
+      },
+      "bind": {
+        "allInterfaces": "모든 인터페이스",
+        "loopback": "루프백",
+        "savedUnavailable": "저장된 값, 이 컴퓨터에서 감지되지 않음"
+      },
+      "field": {
+        "bindAddress": "바인드 주소",
+        "port": "포트",
+        "rootDir": "서비스 디렉터리",
+        "timeout": "시간 제한(초)",
+        "concurrency": "최대 동시 전송"
+      },
+      "section": {
+        "basic": "기본 설정",
+        "limits": "전송 제한",
+        "permissions": "권한"
+      },
+      "hint": {
+        "firewall": "다른 컴퓨터에서 접속하려면 시스템 방화벽에서 이 UDP 포트를 허용하세요.",
+        "security": "선택한 디렉터리만 공유합니다. 신뢰할 수 있는 네트워크에서 사용하세요."
+      },
+      "error": {
+        "bind": "유효한 IP 주소를 입력하세요",
+        "port": "포트는 1~65535 범위여야 합니다",
+        "timeout": "시간 제한은 1~255초 범위여야 합니다",
+        "concurrency": "동시 전송 수는 1~%{max} 범위여야 합니다",
+        "rootDirRequired": "서비스 디렉터리를 선택하세요",
+        "rootDirUnreadable": "디렉터리가 없거나 읽을 수 없습니다",
+        "invalid": "잘못된 설정: %{message}"
+      },
+      "status": {
+        "saveHint": "변경 사항은 다음에 서비스를 시작할 때 적용됩니다.",
+        "saveAndRestart": "저장 후 서비스 다시 시작",
+        "restartFailed": "저장했지만 %{service} 서비스 다시 시작에 실패했습니다: %{message}",
+        "saveFailed": "네트워크 도구 설정을 저장할 수 없습니다",
+        "serviceFailed": "%{service} · %{message}"
+      },
+      "transfer": {
+        "started": "%{service} · 전송 시작: %{file}",
+        "finished": "%{service} · 전송 완료: %{file}(%{bytes}바이트)",
+        "failed": "%{service} · %{file}: %{message}",
+        "failedUnknown": "알 수 없는 오류"
+      }
+    },
+    "tftp": {
+      "title": "TFTP 서버",
+      "shortName": "TFTP",
+      "description": "이 컴퓨터에서 TFTP로 파일을 공유하고 받습니다.",
+      "field": {
+        "blockSize": "협상 블록 크기 상한",
+        "allowUpload": "업로드 허용",
+        "allowOverwrite": "파일 덮어쓰기 허용"
+      },
+      "hint": {
+        "blockSize": "클라이언트가 blksize를 요청할 때 허용되는 최대 DATA 페이로드(8–65464바이트)입니다.\n요청값과 이 상한 중 작은 값을 사용합니다.\nblksize 요청이 없으면 항상 512바이트를 사용합니다.",
+        "upload": "클라이언트가 서비스 디렉터리에 쓸 수 있습니다"
+      },
+      "error": {
+        "blockSize": "블록 크기는 8~65464 범위여야 합니다"
+      }
+    }
+  },
   "otp": {
     "cancel": "취소",
     "cancelled": "인증이 취소되었습니다",
@@ -2047,6 +2139,7 @@
     "fileTransfer": "전송",
     "gpuMonitor": "GPU",
     "network": "네트워크",
+    "networktools": "네트워크 도구",
     "npuMonitor": "Ascend NPU",
     "noActiveSessions": "활성 세션이 없습니다",
     "noCommandsYet": "아직 명령이 없습니다",
@@ -2349,9 +2442,9 @@
     "importDocs": "문서 보기",
     "importFailed": "가져오기 실패: %{error}",
     "importMergeHint": "가져오기는 ID 기준으로 병합되며 기존 명령을 유지합니다.",
-    "importNyaTermJson": "ZzClawTerm JSON",
-    "importNyaTermJsonHint": ".json",
-    "importPromptNyaTermJson": "ZzClawTerm 빠른 명령 JSON 가져오기",
+    "importZzClawTermJson": "ZzClawTerm JSON",
+    "importZzClawTermJsonHint": ".json",
+    "importPromptZzClawTermJson": "ZzClawTerm 빠른 명령 JSON 가져오기",
     "importPromptWindTerm": "WindTerm quickbar.config 가져오기",
     "importPromptXshell": "Xshell 빠른 버튼 .xts 가져오기",
     "importSelectSource": "명령 파일 형식을 선택하세요.",
@@ -2505,6 +2598,11 @@
     "usersMeaning": "시스템에 기록된 로그인 세션이며 모든 SSH 연결을 뜻하지 않습니다."
   },
   "savedConnections": {
+    "openFileManager": "파일 관리자 열기",
+    "openFileManagerSftpDisabled": "파일 관리자 열기(SFTP 비활성화)",
+    "fileManagerConnectionUnavailable": "이 저장된 연결은 더 이상 사용할 수 없습니다.",
+    "fileManagerRequiresSsh": "파일 관리자를 열려면 SSH 연결이 필요합니다.",
+    "fileManagerSftpDisabled": "이 SSH 연결에서 SFTP가 비활성화되어 있습니다.",
     "dropRoot": "최상위로 이동",
     "sessionImportTitle": "세션 가져오기",
     "restoreBackupTitle": "ZzClawTerm 백업 복원",
@@ -2586,7 +2684,7 @@
     "ungroupedConnections": "그룹 없음",
     "user": "사용자",
     "windtermMasterPasswordTitle": "WindTerm 마스터 비밀번호",
-    "windtermMasterPasswordDesc": "이 WindTerm 프로필은 마스터 비밀번호를 사용합니다. 저장된 자동 로그인 정보를 복호화하려면 입력하세요.",
+    "windtermMasterPasswordDesc": "이 WindTerm 프로필은 자동 로그인 또는 OneKey 계정을 마스터 비밀번호로 암호화합니다. 저장된 자격 증명을 복호화하려면 입력하세요.",
     "windtermMasterPasswordConfirm": "가져오기",
     "windtermMasterPasswordRequired": "WindTerm 마스터 비밀번호를 입력하세요",
     "windtermAccountsTitle": "WindTerm 계정",
@@ -2734,6 +2832,7 @@
     "submit": "계속"
   },
   "serialPrompt": {
+    "chooseDevice": "장치 선택…",
     "alreadyOpen": "열려 있는 시리얼 선택을 먼저 완료하세요.",
     "baudRateInvalid": "보드레이트는 1~4000000 사이여야 합니다.",
     "baudRatePlaceholder": "115200",
@@ -3047,6 +3146,16 @@
     "dataDirectoryRestoreTitle": "현재 데이터를 기본 디렉터리로 이동",
     "dataDirectoryRestoreDesc": "%{path}의 기존 데이터베이스, 플러그인 및 녹화 파일을 기록 백업에 보관한 후 현재 데이터를 복사하고 다시 시작합니다. 원본과 백업은 유지됩니다.",
     "dataDirectoryUseHistory": "이전 데이터 사용",
+    "dataDirectoryRecoveryOpen": "데이터 폴더 열기",
+    "dataDirectoryRecoveryRebuild": "보관 후 다시 만들기…",
+    "dataDirectoryRecoveryRebuildConfirm": "%{path}에 빈 데이터베이스를 만들고 다시 시작할까요? 연결과 설정이 빈 상태로 시작됩니다. 기존 데이터베이스는 수동 복구를 위해 이 폴더에 보관하며 다른 파일과 키 자료는 유지됩니다.",
+    "dataDirectoryRepairedDatabase": "데이터베이스를 복구하고 저장된 데이터를 불러왔습니다.",
+    "dataDirectoryCreatedDatabase": "확인 후 %{path}에 빈 데이터베이스를 만들었습니다.",
+    "dataDirectoryErrorDatabaseMissing": "데이터베이스가 없습니다. 파일을 복원하고 다시 시도하거나 기존 폴더를 선택하거나 빈 데이터베이스 만들기를 명시적으로 선택하세요.",
+    "dataDirectoryErrorDatabaseCorrupt": "데이터베이스가 손상되었습니다. 백업을 복원하거나 보관 후 빈 데이터베이스를 만드세요.",
+    "dataDirectoryErrorDatabaseDataInvalid": "저장된 데이터를 해석할 수 없습니다. 데이터베이스는 유지되며 다시 만들기는 비활성화됩니다. 호환 데이터를 복원하세요.",
+    "dataDirectoryErrorDatabaseUpgrade": "데이터베이스 업그레이드가 필요합니다. 데이터베이스는 유지되며 다시 만들기는 비활성화됩니다.",
+    "dataDirectoryErrorDatabaseInitialization": "데이터베이스 초기화에 실패했습니다. 데이터베이스는 유지되며 다시 만들기는 비활성화됩니다.",
     "dataDirectoryRecoveryTitle": "데이터 디렉터리 복구",
     "dataDirectoryRecoveryDesc": "선택한 디렉터리를 열 수 없습니다. 작업 공간과 자동 동기화는 시작되지 않았습니다. 디스크를 다시 연결하고 재시도하거나 기존 데이터 디렉터리를 선택하세요.",
     "dataDirectoryRecoveryRetry": "선택한 디렉터리 재시도",
@@ -3061,6 +3170,8 @@
     "dataDirectoryAutoHint": "상위 폴더를 선택하면 ZzClawTerm이 그 안의 %{dir} 하위 폴더를 자동으로 사용하거나 만듭니다. 위 경로가 실제 적용되는 위치입니다.",
     "dataDirectoryRestartRequired": "디렉터리 변경이 저장되었습니다. ZzClawTerm이 곧 다시 시작됩니다.",
     "dataDirectoryNotice": "시작 알림:",
+    "dataDirectoryRecreatedDatabase": "사용 가능한 데이터베이스가 없어 %{path}에 새 빈 데이터베이스를 만들었습니다. 기존 파일은 %{archive}로 보관되었습니다.",
+    "dataDirectoryCreateDatabaseFailed": "%{path}에 데이터베이스를 만들 수 없습니다: %{reason}. 폴더 권한 또는 디스크 공간을 확인하세요.",
     "dataDirectorySyncWarning": "동기화 폴더(%{client})가 감지되었습니다. ZzClawTerm 실행 중에 동기화 도구가 데이터베이스를 복사하면 손상될 수 있습니다. 동기화 전에 ZzClawTerm을 종료하거나 포터블 스냅샷을 사용하세요.",
     "dataDirectoryMigrateTitle": "새 디렉터리로 마이그레이션",
     "dataDirectoryMigrateDesc": "현재 데이터베이스와 플러그인을 %{path}(으)로 복사합니다. 원본 디렉터리는 삭제되지 않습니다. 저장하면 ZzClawTerm이 즉시 다시 시작되어 새 디렉터리에서 실행됩니다.",
@@ -3184,7 +3295,7 @@
     "groupTransfer": "전송",
     "groupWorkspace": "작업 공간",
     "zebraStripes": "터미널 행 줄무늬",
-    "zebraStripesDesc": "셸 입력 영역과 클릭한 행을 강조하며, 행마다 배경색을 번갈아 표시할 수도 있습니다.",
+    "zebraStripesDesc": "셸 입력 영역과 클릭한 행을 강조하며, 행마다 배경색을 번갈아 표시할 수도 있습니다. 꺼도 명령 접기와 탐색은 사용할 수 있습니다.",
     "zebraStripesByRow": "행별로 표시",
     "zebraStripesByRowDesc": "터미널의 표시 행마다 배경색을 번갈아 표시합니다.",
     "syncHistory": {
@@ -3283,6 +3394,8 @@
     "keepAliveInterval": "Keep-Alive 간격(초)",
     "reconnectRestoreCwd": "재연결 후 작업 디렉터리 복원",
     "reconnectRestoreCwdDesc": "SSH 세션을 마지막으로 신뢰된 작업 디렉터리로 되돌립니다.",
+    "serialReconnectEnter": "시리얼 재연결 후 Enter 전송",
+    "serialReconnectEnterDesc": "시리얼 세션이 재연결된 후 콘솔이 바로 프롬프트를 표시하도록 Enter를 한 번 보냅니다.",
     "keepAliveIntervalDesc": "X초마다 SSH keep-alive 패킷을 전송합니다. 0으로 설정해도 Keep-Alive가 비활성화됩니다.",
     "keepAliveMode": "SSH Keep-Alive 모드",
     "keepAliveModeCompatible": "호환 모드(권장)",
@@ -3744,8 +3857,8 @@
     "testSearchEngine": "테스트",
     "theme": "UI 테마",
     "themeDesc": "앱 색상 테마를 선택하세요.",
-    "timestampFormat": "타임스탬프 형식",
-    "timestampFormatDesc": "예: HH:mm:ss 또는 YYYY-MM-DD HH:mm:ss.",
+    "timestampFormat": "터미널 타임스탬프 표시 형식",
+    "timestampFormatDesc": "터미널 출력의 각 줄에 표시할 시간 형식을 설정합니다. 예: HH:mm:ss 또는 YYYY-MM-DD HH:mm:ss. 상단 메뉴의 터미널 > 표시에서 타임스탬프 표시를 켜면 적용됩니다.",
     "timestampFormatHelp": "HH:mm:ss, [HH:mm:ss.SSS] 또는 YYYY-MM-DD HH:mm:ss를 사용할 수 있습니다. 지원 토큰: YYYY, YY, MM, M, DD, D, HH, H, mm, m, ss, s, SSS, SS, S.",
     "title": "설정",
     "transfer": "전송",

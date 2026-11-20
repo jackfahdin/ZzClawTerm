@@ -50,7 +50,8 @@ pub(super) enum TerminalFrameCommand {
     },
     CommandInput {
         session_id: String,
-        fallback: Option<zzclawterm_terminal::TerminalLineId>,
+        fallback: Option<zzclawterm_terminal::command_navigation::CommandSubmissionEvidence>,
+        input_activity: bool,
     },
     EnsureSession {
         session_id: String,

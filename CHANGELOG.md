@@ -7,6 +7,13 @@
 
 0.0.2 至 0.1.1 的历史版本未整理，仅保留首个版本说明作为锚点。
 
+## [Unreleased]
+
+### Fixed
+
+- **android:** Restart a stopped ADB server when the device tracker or a shell handshake finds it gone, instead of failing with a generic I/O error until something else starts ADB.
+- **terminal:** Select the first and last visible rows without autoscrolling the view; edge scrolling now starts only outside the text grid.
+
 ## [2.0.6] - 2026-11-17
 
 ### Added
@@ -213,7 +220,7 @@
 
 ### 新增
 
-- **release:** ZzClawTerm 首个版本。项目 fork 自 [ZzClawTerm](https://github.com/nyakang/nyaterm)，在一个工作区中提供 SSH、本地终端、Telnet、串口、RDP、VNC、SFTP、隧道、OTP、AI 辅助以及加密同步与备份。
+- **release:** ZzClawTerm 首个版本。项目 fork 自 [ZzClawTerm](https://github.com/nyakang/zzclawterm)，在一个工作区中提供 SSH、本地终端、Telnet、串口、RDP、VNC、SFTP、隧道、OTP、AI 辅助以及加密同步与备份。
 
 ## [2.0.3] - 2026-11-08
 

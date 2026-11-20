@@ -730,6 +730,17 @@ impl FinishTrailer {
     }
 }
 
+fn finish_wait_active(manager: &SessionManager, session: &str, shared: &Shared) -> bool {
+    !shared.cancelled.load(Ordering::Acquire)
+        && !shared
+            .state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .closed
+        && !manager.event_queue.session_cancelled(session)
+        && !manager.event_queue.session_ended(session)
+}
+
 fn strip_finish_trailer(
     manager: &SessionManager,
     session: &str,
@@ -743,17 +754,7 @@ fn strip_finish_trailer(
         session,
         direction,
         pending,
-        || {
-            Instant::now() < deadline
-                && !shared.cancelled.load(Ordering::Acquire)
-                && !shared
-                    .state
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .closed
-                && !manager.event_queue.session_cancelled(session)
-                && !manager.event_queue.session_ended(session)
-        },
+        || Instant::now() < deadline && finish_wait_active(manager, session, shared),
         || {
             manager
                 .drain_events_blocking_for_consumer_with_output_budget(

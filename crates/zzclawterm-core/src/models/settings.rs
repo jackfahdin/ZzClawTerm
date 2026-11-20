@@ -503,6 +503,10 @@ pub struct AppSettingsSummary {
     pub terminal_paste_image_as_path: bool,
     #[serde(default)]
     pub terminal_reconnect_restore_cwd: bool,
+    /// After a serial reconnect succeeds, send one Enter so consoles that only
+    /// print a prompt on input come straight back to the command line.
+    #[serde(default = "default_serial_reconnect_send_enter")]
+    pub terminal_serial_reconnect_send_enter: bool,
     /// Retained only to round-trip legacy settings; no longer affects terminal behavior.
     #[serde(default)]
     pub terminal_low_latency_mode: bool,
@@ -810,6 +814,7 @@ impl Default for AppSettingsSummary {
             terminal_show_multi_line_paste_dialog: true,
             terminal_paste_image_as_path: true,
             terminal_reconnect_restore_cwd: false,
+            terminal_serial_reconnect_send_enter: default_serial_reconnect_send_enter(),
             terminal_low_latency_mode: false,
             terminal_zebra_stripes_enabled: default_terminal_zebra_stripes_enabled(),
             terminal_zebra_stripes_by_row: false,
@@ -1031,6 +1036,10 @@ pub fn default_internal_editor_font_size() -> u16 {
 
 fn default_terminal_timestamp_format() -> String {
     DEFAULT_TERMINAL_TIMESTAMP_FORMAT.to_string()
+}
+
+fn default_serial_reconnect_send_enter() -> bool {
+    false
 }
 
 fn default_terminal_zebra_stripes_enabled() -> bool {
@@ -1286,6 +1295,7 @@ mod tests {
         assert!(summary.ui_asset_sort_key.is_none());
         assert!(summary.ui_asset_sort_direction.is_none());
         assert!(!summary.terminal_reconnect_restore_cwd);
+        assert!(!summary.terminal_serial_reconnect_send_enter);
         assert!(!summary.ui_remote_stats_show_users);
         assert_eq!(summary.transfer_internal_editor_font_size, 13);
         // Legacy documents lack the X Server management keys; they must fall
@@ -1341,6 +1351,26 @@ mod tests {
         assert!(!decoded.x11_server_on_demand);
         assert_eq!(decoded.x11_server_path, "D:\\tools\\vcxsrv\\vcxsrv.exe");
         assert!(!decoded.x11_server_tray_icon);
+    }
+
+    #[test]
+    fn serial_reconnect_enter_is_opt_in_and_preserves_saved_values() {
+        let mut value = serde_json::to_value(AppSettingsSummary::default()).unwrap();
+        assert_eq!(value["terminal_serial_reconnect_send_enter"], false);
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("terminal_serial_reconnect_send_enter");
+        let legacy: AppSettingsSummary = serde_json::from_value(value.clone()).unwrap();
+        assert!(!legacy.terminal_serial_reconnect_send_enter);
+        for enabled in [true, false] {
+            value["terminal_serial_reconnect_send_enter"] = serde_json::json!(enabled);
+            let restored: AppSettingsSummary = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(restored.terminal_serial_reconnect_send_enter, enabled);
+            let round_trip: AppSettingsSummary =
+                serde_json::from_str(&serde_json::to_string(&restored).unwrap()).unwrap();
+            assert_eq!(round_trip.terminal_serial_reconnect_send_enter, enabled);
+        }
     }
 
     #[test]

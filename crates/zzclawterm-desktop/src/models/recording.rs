@@ -1,8 +1,8 @@
 //! Desktop facade for the UI-independent recording writer.
 
 pub(crate) use zzclawterm_recording::pipeline::{
-    ExecutionRecordingEvent, RecordingEventReceiver, RecordingHistorySearchEvent,
-    RecordingHistorySearchKey, RecordingWriteEvent, RecordingWriteHandle, RecordingWritePipeline,
+    ExecutionRecordingEvent, RecordingEventReceiver, RecordingWriteEvent, RecordingWriteHandle,
+    RecordingWritePipeline,
 };
 
 #[cfg(test)]

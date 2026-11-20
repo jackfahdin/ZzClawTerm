@@ -1,6 +1,6 @@
 use super::helpers::{available_translation_providers, search_engine_url};
 use crate::features::{ZzClawTermApp, session::SerialUploadProtocol};
-use crate::models::{AiPreparedRequest, NavItem, SettingsTab, TerminalSearchMode};
+use crate::models::{AiPreparedRequest, NavItem, SettingsTab};
 use gpui::Context;
 use rust_i18n::t;
 use zzclawterm_core::{AiAction, AiContext};
@@ -98,7 +98,6 @@ impl ZzClawTermApp {
                         cx.notify();
                     })),
             );
-            let selected_for_find = selected.clone();
             let find_session_id = session_id.clone();
             items.push(
                 ZzClawMenuItem::action(t!("terminalCtx.find"))
@@ -106,8 +105,6 @@ impl ZzClawTermApp {
                     .shortcut(find_sc)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_workspace_pane(find_session_id.clone(), cx);
-                        this.terminal.search.query = selected_for_find.clone();
-                        this.terminal.search.mode = TerminalSearchMode::Buffer;
                         this.terminal.search.active_index = 0;
                         this.open_terminal_search(window, cx);
                     })),

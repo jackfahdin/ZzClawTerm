@@ -346,7 +346,7 @@
       "unverified": "未驗證",
       "blocked": "受阻"
     },
-    "modeNyatermAgent": "ZzClawAgent",
+    "modeZzClawtermAgent": "ZzClawAgent",
     "modeCodexAgent": "Codex Agent",
     "modeClaudeCodeAgent": "Claude Code",
     "panelMetaMultiTarget": "%{target} + %{count} 個工作階段",
@@ -370,7 +370,7 @@
       "codex": "Codex",
       "mcpIntegration": "ZzClawTerm MCP tool integration",
       "mcpOnly": "Terminal and remote-file access is available only through ZzClawTerm MCP.",
-      "nyaterm": "ZzClawTerm Agent",
+      "zzclawterm": "ZzClawTerm Agent",
       "zzclawterm": "ZzClawTerm Agent"
     },
     "claude": {
@@ -867,9 +867,9 @@
     "passwordLabel": "密碼",
     "passwordOnlyCredential": "僅密碼認證資訊",
     "passwordPlaceholder": "要傳送的密碼",
-    "passwordRegexPlaceholder": "符合密碼提示的正規表示式",
+    "passwordRegexLabel": "密碼提示正則",
     "passwordUnchanged": "留空保持目前密碼不變",
-    "promptRegexLabel": "提示正規表示式",
+    "promptRegexLabel": "使用者名稱提示正則",
     "promptRegexOptionalLabel": "提示正規表示式（可選）",
     "reorderFailed": "認證資訊排序失敗",
     "reorderSuccess": "憑據順序已儲存",
@@ -1278,6 +1278,8 @@
     "workingDirectorySelected": "工作目錄：%{path}",
     "workingDirectorySelectionCancelled": "已取消選擇工作目錄。",
     "x11Forwarding": "X11 轉發",
+    "allowShortRsaHostKeys": "允許短 RSA 主機金鑰",
+    "allowShortRsaHostKeysDesc": "允許 512～1023 位 RSA 主機金鑰。這些金鑰安全性不足，僅應為舊裝置啟用；仍會驗證主機身分和簽章。",
     "sshCompatibilityMode": "相容模式",
     "sshCompatibilityModeDesc": "停用目前連線的遠端資源監控、程序管理、Docker 等背景探測，避免舊版 SSH 伺服器因額外命令而異常中斷。不影響終端、SFTP 和 SSH 通道。",
     "dynamicTabTitle": "動態分頁標題",
@@ -1462,7 +1464,6 @@
   "fileExplorer": {
     "clipboardEmpty": "檔案剪貼簿為空或已被取代",
     "clipboardMoving": "選取的剪下項目正在移動，請等待完成",
-
     "transferSourceUnavailable": "來源連線無法使用，請重新連線後重試。",
     "transferBackendUnsupported": "此連線不支援檔案傳輸。",
     "transferInvalidDestination": "傳輸目的地無效或無法表示檔案名稱。",
@@ -1579,9 +1580,15 @@
     "mtime": "修改時間",
     "name": "名稱",
     "newFile": "新增檔案",
-    "newFileName": "請輸入新檔名：",
+    "newFileName": "檔名",
+    "newFileNamePlaceholder": "例如：config.yaml",
+    "newFolderNamePlaceholder": "例如：my-folder",
+    "permRead": "讀取 R",
+    "permWrite": "寫入 W",
+    "permExecute": "執行 X",
+    "specialPermissions": "特殊權限",
     "newFolder": "新增資料夾",
-    "newFolderName": "請輸入新資料夾名：",
+    "newFolderName": "目錄名",
     "newSymlink": "建立符號連結",
     "noFavorites": "暫無收藏",
     "noChildDirectories": "沒有子目錄",
@@ -1648,6 +1655,14 @@
     "uploadPrompt": "遠端檔案已修改，是否上傳變更？"
   },
   "fileManager": {
+    "leftSide": "左側",
+    "rightSide": "右側",
+    "copyToPane": "複製到%{side}（%{target}）",
+    "moveToPane": "移動到%{side}（%{target}）",
+    "new": "新增",
+    "copyFullPath": "複製完整路徑",
+    "copyName": "複製檔案名稱",
+    "copyParent": "複製所在目錄",
     "connected": "已連線",
     "skipped": "已略過",
     "copy": "複製",
@@ -1697,7 +1712,9 @@
     "openLeft": "在左側開啟",
     "openRight": "在右側開啟",
     "openWorkspace": "在工作區開啟檔案管理器",
-    "goHome": "主目錄"
+    "goHome": "主目錄",
+    "goBack": "上一頁",
+    "goForward": "下一頁"
   },
   "fileTransfer": {
     "scanning": "正在掃描檔案…",
@@ -1941,6 +1958,81 @@
     "ungrouped": "未分類",
     "ungroupedConnections": "未分組"
   },
+  "networktools": {
+    "common": {
+      "panel": {
+        "listening": "正在監聽 %{addr}",
+        "notRunning": "未執行",
+        "configure": "設定",
+        "start": "啟動服務",
+        "stop": "停止服務"
+      },
+      "action": {
+        "reset": "重設",
+        "browse": "瀏覽"
+      },
+      "bind": {
+        "allInterfaces": "所有網卡",
+        "loopback": "本機回環",
+        "savedUnavailable": "已儲存，本機未偵測到"
+      },
+      "field": {
+        "bindAddress": "監聽位址",
+        "port": "連接埠",
+        "rootDir": "服務目錄",
+        "timeout": "逾時（秒）",
+        "concurrency": "最大並行傳輸"
+      },
+      "section": {
+        "basic": "基本設定",
+        "limits": "傳輸限制",
+        "permissions": "權限"
+      },
+      "hint": {
+        "firewall": "如需其他機器存取，請在系統防火牆放行此 UDP 連接埠。",
+        "security": "服務僅分享所選目錄，請在可信任網路中使用。"
+      },
+      "error": {
+        "bind": "請輸入有效的 IP 位址",
+        "port": "連接埠需為 1～65535",
+        "timeout": "逾時需為 1～255 秒",
+        "concurrency": "並行數需為 1～%{max}",
+        "rootDirRequired": "請選擇服務目錄",
+        "rootDirUnreadable": "目錄不存在或無法讀取",
+        "invalid": "設定無效：%{message}"
+      },
+      "status": {
+        "saveHint": "變更會在下次啟動服務時生效。",
+        "saveAndRestart": "儲存並重新啟動服務",
+        "restartFailed": "已儲存，但重新啟動 %{service} 服務失敗：%{message}",
+        "saveFailed": "無法儲存網路工具設定",
+        "serviceFailed": "%{service} · %{message}"
+      },
+      "transfer": {
+        "started": "%{service} · 開始傳輸：%{file}",
+        "finished": "%{service} · 傳輸完成：%{file}（%{bytes} 位元組）",
+        "failed": "%{service} · %{file}：%{message}",
+        "failedUnknown": "未知錯誤"
+      }
+    },
+    "tftp": {
+      "title": "TFTP 伺服器",
+      "shortName": "TFTP",
+      "description": "在本機透過 TFTP 分享與接收檔案。",
+      "field": {
+        "blockSize": "協商區塊大小上限",
+        "allowUpload": "允許上傳",
+        "allowOverwrite": "允許覆寫檔案"
+      },
+      "hint": {
+        "blockSize": "用戶端請求 blksize 時允許的最大 DATA 酬載（8–65464 位元組）。\n實際協商值取用戶端請求與此上限的較小值。\n未請求 blksize 的用戶端固定使用 512 位元組。",
+        "upload": "用戶端可以寫入服務目錄"
+      },
+      "error": {
+        "blockSize": "區塊大小需為 8～65464"
+      }
+    }
+  },
   "otp": {
     "cancel": "取消",
     "cancelled": "身分驗證已取消",
@@ -2047,6 +2139,7 @@
     "fileTransfer": "檔案傳輸",
     "gpuMonitor": "GPU",
     "network": "網路",
+    "networktools": "網路工具",
     "npuMonitor": "Ascend NPU",
     "noActiveSessions": "暫無活動工作階段",
     "noCommandsYet": "暫無命令記錄",
@@ -2349,9 +2442,9 @@
     "importDocs": "檢視文件",
     "importFailed": "匯入失敗：%{error}",
     "importMergeHint": "匯入會按 ID 合併覆蓋，不會清空現有快捷命令。",
-    "importNyaTermJson": "ZzClawTerm JSON",
-    "importNyaTermJsonHint": ".json",
-    "importPromptNyaTermJson": "匯入 ZzClawTerm 快捷命令 JSON",
+    "importZzClawTermJson": "ZzClawTerm JSON",
+    "importZzClawTermJsonHint": ".json",
+    "importPromptZzClawTermJson": "匯入 ZzClawTerm 快捷命令 JSON",
     "importPromptWindTerm": "匯入 WindTerm quickbar.config",
     "importPromptXshell": "匯入 Xshell 快捷按鈕 .xts",
     "importSelectSource": "選擇要匯入的快捷命令檔案格式。",
@@ -2505,6 +2598,11 @@
     "usersMeaning": "系統記錄的登入工作階段，不代表所有 SSH 連線。"
   },
   "savedConnections": {
+    "openFileManager": "開啟檔案管理員",
+    "openFileManagerSftpDisabled": "開啟檔案管理員（SFTP 已停用）",
+    "fileManagerConnectionUnavailable": "此已儲存的連線已無法使用。",
+    "fileManagerRequiresSsh": "開啟檔案管理員需要 SSH 連線。",
+    "fileManagerSftpDisabled": "此 SSH 連線已停用 SFTP。",
     "dropRoot": "移至根層級",
     "sessionImportTitle": "匯入工作階段",
     "restoreBackupTitle": "還原 ZzClawTerm 備份",
@@ -2586,7 +2684,7 @@
     "ungroupedConnections": "未分組",
     "user": "使用者",
     "windtermMasterPasswordTitle": "WindTerm 主密碼",
-    "windtermMasterPasswordDesc": "此 WindTerm profile 已啟用主密碼。請輸入主密碼以解密儲存的自動登入資訊。",
+    "windtermMasterPasswordDesc": "此 WindTerm profile 的自動登入或 OneKey 帳戶使用主密碼加密。請輸入主密碼以解密儲存的憑證。",
     "windtermMasterPasswordConfirm": "匯入",
     "windtermMasterPasswordRequired": "請輸入 WindTerm 主密碼",
     "windtermAccountsTitle": "WindTerm 帳戶",
@@ -2734,6 +2832,7 @@
     "submit": "繼續"
   },
   "serialPrompt": {
+    "chooseDevice": "選擇裝置…",
     "alreadyOpen": "請先完成目前的序列埠選擇。",
     "baudRateInvalid": "鮑率必須介於 1 到 4000000。",
     "baudRatePlaceholder": "115200",
@@ -3047,6 +3146,16 @@
     "dataDirectoryRestoreTitle": "將目前資料移回預設目錄",
     "dataDirectoryRestoreDesc": "會先將 %{path} 中原有的資料庫、外掛與錄製歸檔為歷史備份，再複製目前資料並重新啟動。來源目錄與歷史備份都會保留。",
     "dataDirectoryUseHistory": "改用歷史資料",
+    "dataDirectoryRecoveryOpen": "開啟資料目錄",
+    "dataDirectoryRecoveryRebuild": "封存並重建…",
+    "dataDirectoryRecoveryRebuildConfirm": "在 %{path} 建立空資料庫並重新啟動？連線和設定將從空配置開始。既有資料庫檔案會封存至此目錄，供手動復原；其他檔案和金鑰資料會保留。",
+    "dataDirectoryRepairedDatabase": "資料庫已成功修復，已載入儲存的資料。",
+    "dataDirectoryCreatedDatabase": "經你確認，已在 %{path} 建立空資料庫。",
+    "dataDirectoryErrorDatabaseMissing": "資料庫遺失。請還原檔案後重試、選擇既有資料目錄，或明確選擇建立空資料庫。",
+    "dataDirectoryErrorDatabaseCorrupt": "資料庫檔案損毀。請還原備份，或明確選擇封存並建立空資料庫。",
+    "dataDirectoryErrorDatabaseDataInvalid": "儲存的資料無法解析。資料庫已保留，禁止重建；請還原相容資料後重試。",
+    "dataDirectoryErrorDatabaseUpgrade": "資料庫需要升級。資料庫已保留，禁止重建。",
+    "dataDirectoryErrorDatabaseInitialization": "資料庫初始化失敗。資料庫已保留，禁止重建。",
     "dataDirectoryRecoveryTitle": "復原資料目錄",
     "dataDirectoryRecoveryDesc": "無法開啟所選目錄，尚未啟動工作區或自動同步。請重新連接磁碟後重試，或明確選擇已有資料目錄。",
     "dataDirectoryRecoveryRetry": "重試所選目錄",
@@ -3061,6 +3170,8 @@
     "dataDirectoryAutoHint": "選擇上層資料夾即可；ZzClawTerm 會自動使用或建立其下的 %{dir} 子資料夾。上方顯示的是實際生效的完整路徑。",
     "dataDirectoryRestartRequired": "目錄變更已儲存，ZzClawTerm 即將重新啟動。",
     "dataDirectoryNotice": "啟動提示：",
+    "dataDirectoryRecreatedDatabase": "找不到可用的資料庫，已在 %{path} 建立新的空白資料庫。原檔案已保留為 %{archive}。",
+    "dataDirectoryCreateDatabaseFailed": "無法在 %{path} 建立資料庫：%{reason}。請檢查目錄權限或磁碟空間。",
     "dataDirectorySyncWarning": "偵測到同步目錄（%{client}）。同步軟體可能在 ZzClawTerm 執行期間複製資料庫造成損毀，請結束 ZzClawTerm 後再同步，或改用可攜快照備份。",
     "dataDirectoryMigrateTitle": "遷移到新目錄",
     "dataDirectoryMigrateDesc": "將目前資料庫與外掛複製到 %{path}，來源目錄不會被刪除。儲存後 ZzClawTerm 會立即重新啟動並在新目錄執行。",
@@ -3184,7 +3295,7 @@
     "groupTransfer": "資料傳輸",
     "groupWorkspace": "工作區",
     "zebraStripes": "終端行斑馬紋",
-    "zebraStripesDesc": "高亮 Shell 輸入區域和滑鼠點選的目標行，可切換為逐行交替底色。",
+    "zebraStripesDesc": "高亮 Shell 輸入區域和滑鼠點選的目標行，可切換為逐行交替底色。關閉背景不影響命令摺疊和導覽。",
     "zebraStripesByRow": "按行顯示",
     "zebraStripesByRowDesc": "按終端顯示行交替顯示背景色。",
     "syncHistory": {
@@ -3283,6 +3394,8 @@
     "keepAliveInterval": "Keep-Alive 間隔 (秒)",
     "reconnectRestoreCwd": "重新連線後還原工作目錄",
     "reconnectRestoreCwdDesc": "將 SSH 工作階段還原到最後可信的工作目錄。",
+    "serialReconnectEnter": "串列埠重連後自動發送 Enter",
+    "serialReconnectEnterDesc": "串列埠工作階段重連成功後自動發送一次 Enter，讓主控台立即顯示命令列提示符。",
     "keepAliveIntervalDesc": "每隔 X 秒傳送 SSH keep-alive 資料包。設定為 0 也會停用 Keep-Alive。",
     "keepAliveMode": "SSH Keep-Alive 模式",
     "keepAliveModeCompatible": "相容模式（建議）",
@@ -3744,8 +3857,8 @@
     "testSearchEngine": "測試",
     "theme": "介面主題",
     "themeDesc": "選擇應用程式介面的顏色主題。",
-    "timestampFormat": "時間戳格式",
-    "timestampFormatDesc": "例如 HH:mm:ss 或 YYYY-MM-DD HH:mm:ss。",
+    "timestampFormat": "終端時間戳顯示格式",
+    "timestampFormatDesc": "設定終端每行輸出時間的顯示格式，例如 HH:mm:ss 或 YYYY-MM-DD HH:mm:ss。在頂部「終端 > 顯示」中開啟「顯示時間戳」後生效。",
     "timestampFormatHelp": "可使用 HH:mm:ss、[HH:mm:ss.SSS] 或 YYYY-MM-DD HH:mm:ss。支援標記：YYYY、YY、MM、M、DD、D、HH、H、mm、m、ss、s、SSS、SS、S。",
     "title": "設定",
     "transfer": "傳輸",

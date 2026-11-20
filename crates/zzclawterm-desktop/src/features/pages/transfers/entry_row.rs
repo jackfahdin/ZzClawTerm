@@ -10,7 +10,7 @@ use gpui::{
 };
 use std::collections::HashSet;
 use zzclawterm_files::sftp::{SftpFileEntry, SftpFileType};
-use zzclawterm_ui::{ZzClawHoverCard, ZzClawPopoverAlign, ZzClawPopoverPlacement};
+use zzclawterm_ui::ZzClawHoverCard;
 
 pub(in crate::features) fn format_browser_file_size(size: Option<u64>) -> String {
     match size {
@@ -180,6 +180,8 @@ pub(super) fn transfer_browser_entry_row(
         .map(format_permissions_octal)
         .unwrap_or_else(|| "-".to_string());
     let detail = div()
+        .id("transfer-browser-entry-details")
+        .debug_selector(|| "transfer-browser-entry-details".to_string())
         .w(px(296.))
         .max_w(px(296.))
         .flex()
@@ -427,11 +429,10 @@ pub(super) fn transfer_browser_entry_row(
                                 .child(entry.name.clone()),
                             detail,
                         )
-                        .placement(ZzClawPopoverPlacement::Top)
+                        .at_pointer()
                         .flexible_trigger()
-                        .align(ZzClawPopoverAlign::Start)
                         .open_delay(std::time::Duration::from_millis(800))
-                        .close_delay(std::time::Duration::from_millis(100)),
+                        .close_delay(std::time::Duration::from_millis(250)),
                     )
                 }),
         )

@@ -64,6 +64,7 @@ impl ZzClawTermApp {
                 .state_mut()
                 .command_navigation
                 .accept_submission(evidence)
+                .map(|_| evidence.clone())
         });
         self.terminal
             .view

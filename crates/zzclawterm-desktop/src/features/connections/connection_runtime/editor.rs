@@ -297,6 +297,7 @@ impl ZzClawTermApp {
             agent_preview_loading: false,
             backspace_mode: "del".to_string(),
             encoding: String::new(),
+            allow_short_rsa_host_keys: false,
             ssh_compatibility_mode: false,
             ssh_profile: Default::default(),
             terminal_type: None,
@@ -393,6 +394,9 @@ impl ZzClawTermApp {
 
         if editor.kind == ConnectionKindTab::Adb {
             self.prepare_android_tracker(cx);
+        }
+        if editor.kind == ConnectionKindTab::Serial {
+            self.request_connection_serial_ports_refresh(cx);
         }
         self.connection_state.begin_editor(editor);
         self.reconcile_open_editor_password_source();

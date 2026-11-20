@@ -306,6 +306,7 @@ impl ZzClawTermApp {
                 color_light: "#0969da".to_string(),
                 enabled: true,
             });
+        self.ensure_keyword_highlight_inputs(&id, cx);
         let input = self.text_input(
             keyword_highlight_text_input_id(&id, KeywordHighlightEditorField::Name),
             "New rule",

@@ -24,7 +24,6 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.refresh_connection_serial_ports();
         self.session.dialogs.open_temporary_ssh_link();
         self.forget_text_inputs("temporary-ssh.");
         self.shell.set_status("temporary link opened".to_string());
@@ -103,7 +102,7 @@ impl ZzClawTermApp {
             self.forget_text_inputs("temporary-ssh.link");
         }
         if protocol == TemporaryLinkProtocol::Serial {
-            self.refresh_connection_serial_ports();
+            self.request_connection_serial_ports_refresh(cx);
         }
         self.session.dialogs.set_temporary_link_protocol(protocol);
         cx.notify();
@@ -263,6 +262,7 @@ impl ZzClawTermApp {
             allow_none_auth: false,
             backspace_mode: "del".to_string(),
             profile: SshSessionProfile::Standard,
+            allow_short_rsa_host_keys: false,
             ssh_compatibility_mode: false,
             term: "xterm-256color".to_string(),
             x11_forwarding: false,
@@ -274,7 +274,7 @@ impl ZzClawTermApp {
             encoding: self.settings.summary().interaction_default_encoding.clone(),
             ssh_algorithms: None,
             sftp: zzclawterm_transport::SftpSettings::default(),
-            terminal_shell_integration: self.settings.summary().terminal_zebra_stripes_enabled,
+            terminal_shell_integration: true,
             deferred_pty: true,
             keep_alive_interval_secs,
             keep_alive_mode: zzclawterm_core::terminal::connection_input::KeepaliveMode::parse(

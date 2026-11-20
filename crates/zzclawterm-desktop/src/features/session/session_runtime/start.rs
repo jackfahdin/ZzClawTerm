@@ -26,7 +26,6 @@ use zzclawterm_transport::{
 use super::super::NativeHostKeyVerifier;
 use super::{PendingSessionStartRegistration, SessionStartFocusTarget};
 use crate::features::formatting::{non_empty_string, parse_telnet_enter_mode};
-use crate::features::session::state::SerialConnectContinuation;
 use crate::features::{
     ZzClawTermApp, runtime_jobs::SessionStartSuccess, runtime_jobs::submit_session_start_job,
     session::AgentPromptBroker, session::CredentialPromptBroker, session::HostKeyPromptBroker,
@@ -286,14 +285,8 @@ impl ZzClawTermApp {
                 cx.notify();
                 return false;
             }
-            return self.open_serial_connect_prompt(
-                connection,
-                SerialConnectContinuation::Start(Box::new(options)),
-                prompt,
-                port_hint,
-                baud_hint,
-                cx,
-            );
+            return self
+                .open_serial_connect_prompt(connection, options, prompt, port_hint, baud_hint, cx);
         }
 
         if matches!(connection.config, ConnectionType::Adb { .. }) {
@@ -1093,7 +1086,7 @@ impl ZzClawTermApp {
             keep_alive_mode: zzclawterm_core::terminal::connection_input::KeepaliveMode::parse(
                 &self.settings.summary().terminal_keep_alive_mode,
             ),
-            terminal_shell_integration: self.settings.summary().terminal_zebra_stripes_enabled,
+            terminal_shell_integration: true,
             host_key_prompts: self.session.prompts.host_key_broker(),
             credential_prompts: self.session.prompts.credential_broker(),
             agent_prompts: self.session.prompts.agent_broker(),
@@ -1284,6 +1277,7 @@ pub(in crate::features) fn build_ssh_session_config_with_context(
         proxy,
         allow_none_auth,
         backspace_mode,
+        allow_short_rsa_host_keys: connection.allow_short_rsa_host_keys,
         ssh_compatibility_mode: connection.ssh_compatibility_mode,
         profile: match connection.ssh_profile {
             SshProfile::Standard => SshSessionProfile::Standard,
@@ -2066,6 +2060,7 @@ mod tests {
             }),
             recording: None,
             ssh_algorithms: None,
+            allow_short_rsa_host_keys: false,
             ssh_compatibility_mode: false,
             ssh_profile: Default::default(),
             terminal_type: None,
@@ -2122,6 +2117,7 @@ mod tests {
                 mode: SshAlgorithmMode::Secure,
                 ..Default::default()
             }),
+            allow_short_rsa_host_keys: false,
             ssh_compatibility_mode: false,
             ssh_profile: SshProfile::NetworkDevice,
             terminal_type: None,

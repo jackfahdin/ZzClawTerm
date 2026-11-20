@@ -11,8 +11,7 @@ use zzclawterm_files::sftp_transfer_types::SftpTransferProgress;
 use zzclawterm_remote_desktop::{
     ClipboardOrigin, RDP_FRAMEBUFFER_LIMITS, RdpCapability, RdpClipboardTransferStatus, RdpError,
     RdpErrorKind, RdpFrameEvent, RdpRuntimeEvent, RdpSessionState, RemoteDesktopError,
-    RemoteDesktopViewState, VNC_FRAMEBUFFER_LIMITS, VncRuntimeEvent, VncServerCapabilities,
-    VncSessionState,
+    RemoteDesktopViewState, VncRuntimeEvent, VncServerCapabilities, VncSessionState,
 };
 use zzclawterm_store::StoreDomain;
 #[cfg(windows)]
@@ -108,6 +107,7 @@ impl ZzClawTermApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.sync_vnc_presentation_visibility(window);
         for texture in self.remote_desktop.pending_texture_removals.drain(..) {
             window.remove_dynamic_texture(texture);
         }
@@ -129,12 +129,17 @@ impl ZzClawTermApp {
             self.remote_desktop.drain_cursor = self.remote_desktop.drain_cursor.wrapping_add(1);
             let drain = self.remote_desktop.manager.drain_batch(&session_id);
             let vnc_drain = self.remote_desktop.vnc_manager.drain_batch(&session_id);
+            let presentation = self
+                .remote_desktop
+                .vnc_manager
+                .take_presentation(&session_id);
             if drain.control.is_empty()
                 && drain.frames.is_empty()
                 && drain.cursors.is_empty()
                 && vnc_drain.control.is_empty()
                 && vnc_drain.frames.is_empty()
                 && vnc_drain.cursors.is_empty()
+                && presentation.is_none()
             {
                 continue;
             }
@@ -144,6 +149,7 @@ impl ZzClawTermApp {
                 self.remote_desktop.metrics_control_events += vnc_drain.control.len();
                 self.remote_desktop.metrics_control_events += vnc_drain.cursors.len();
                 self.remote_desktop.metrics_frame_updates += vnc_drain.frames.len();
+                self.remote_desktop.metrics_frame_updates += usize::from(presentation.is_some());
             }
             dirty = true;
             root_dirty |= !drain.control.is_empty() || !vnc_drain.control.is_empty();
@@ -161,7 +167,9 @@ impl ZzClawTermApp {
                 self.apply_vnc_control_event(&session_id, event, window, cx);
             }
             self.apply_remote_cursor_batch(&session_id, vnc_drain.cursors, window);
-            self.apply_rdp_frame_batch(&session_id, vnc_drain.frames, window);
+            if let Some(presentation) = presentation {
+                self.apply_vnc_presentation(&session_id, presentation, window);
+            }
             root_dirty |= previous_state
                 != self
                     .remote_desktop
@@ -437,14 +445,7 @@ impl ZzClawTermApp {
                     },
                 ..
             } => {
-                self.reset_rdp_framebuffer(
-                    session_id,
-                    epoch,
-                    width,
-                    height,
-                    VNC_FRAMEBUFFER_LIMITS,
-                    window,
-                );
+                self.reset_vnc_surface(session_id, epoch, width, height, window);
             }
             VncRuntimeEvent::Frame { .. } => {}
             VncRuntimeEvent::Clipboard { text, .. } => {

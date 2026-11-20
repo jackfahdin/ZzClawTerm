@@ -1,4 +1,3 @@
-use super::FileManagerNameKind;
 use super::interaction::{
     FileManagerDragPayload, FileManagerDragPreview, accepts_drop, drag_operation,
 };
@@ -20,6 +19,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 use zzclawterm_files::file_browser::listing::FileBrowserSortColumn;
+use zzclawterm_files::file_browser::listing::FileBrowserSortDirection;
 use zzclawterm_files::sftp::SftpFileEntry;
 use zzclawterm_ui::{
     ZzClawContextMenu, ZzClawHorizontalScrollbar, ZzClawMenuItem, ZzClawTooltip,
@@ -267,12 +267,10 @@ impl FileManagerWorkspace {
             .border_color(rgb(palette.border));
         for &(column, width) in columns {
             let label_key = format!("fileManager.columns.{}", column_key(column));
-            let marker = if self.pane(pane).sort_column == column {
-                crate::models::transfer_ui::browser_sort_direction_marker(
-                    self.pane(pane).sort_direction,
-                )
-            } else {
-                ""
+            let is_active = self.pane(pane).sort_column == column;
+            let direction_icon = match self.pane(pane).sort_direction {
+                FileBrowserSortDirection::Ascending => "icons/fe/sort-ascending.svg",
+                FileBrowserSortDirection::Descending => "icons/fe/sort-descending.svg",
             };
             let mut label = div()
                 .id(SharedString::from(format!(
@@ -286,15 +284,20 @@ impl FileManagerWorkspace {
                 .relative()
                 .flex()
                 .items_center()
+                .gap_1()
                 .px_2()
                 .text_xs()
                 .cursor_pointer()
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .child(format!("{} {marker}", t!(&label_key))),
-                )
+                .child(div().min_w_0().truncate().child(t!(&label_key).to_string()))
+                .when(is_active, |label| {
+                    label.child(
+                        gpui::svg()
+                            .size(px(14.))
+                            .flex_none()
+                            .path(direction_icon)
+                            .text_color(rgb(palette.link)),
+                    )
+                })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     let state = this.pane_mut(pane);
@@ -609,101 +612,5 @@ impl FileManagerWorkspace {
                 .unwrap_or_default()
         })
         .into_any_element()
-    }
-
-    fn entry_menu(
-        &self,
-        pane: PaneId,
-        entry: SftpFileEntry,
-        cx: &mut Context<Self>,
-    ) -> Vec<ZzClawMenuItem> {
-        let mut items = Vec::new();
-        for (key, label) in [
-            ("c", t!("menu.copy")),
-            ("x", t!("menu.cut")),
-            ("v", t!("menu.paste")),
-        ] {
-            let disabled = if key == "v" {
-                !self.read_app(cx, |app| app.can_paste_transfer_file_clipboard(cx))
-            } else {
-                self.pane(pane).selected_paths.is_empty()
-            };
-            items.push(
-                ZzClawMenuItem::action(label)
-                    .disabled(disabled)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.clipboard_action(key, window, cx);
-                    })),
-            );
-        }
-        for (operation, label) in [
-            (FileTransferOperation::Copy, t!("fileManager.copyToOther")),
-            (FileTransferOperation::Move, t!("fileManager.moveToOther")),
-        ] {
-            let intent = self.transfer_intent(operation);
-            items.push(ZzClawMenuItem::action(label).on_click(cx.listener(
-                move |this, _, window, cx| {
-                    let id = this.id.clone();
-                    let intent = intent.clone();
-                    this.dispatch_app(window, cx, move |app, _, cx| {
-                        app.submit_file_transfer(id, intent, cx)
-                    });
-                },
-            )));
-        }
-        for (kind, label) in [
-            (FileManagerNameKind::Rename, t!("fileExplorer.cmRename")),
-            (FileManagerNameKind::Folder, t!("fileExplorer.newFolder")),
-            (FileManagerNameKind::File, t!("fileExplorer.newFile")),
-        ] {
-            let selection = self.selection(pane);
-            items.push(
-                ZzClawMenuItem::action(label)
-                    .disabled(
-                        matches!(kind, FileManagerNameKind::Rename) && selection.entries.len() != 1,
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        let id = this.id.clone();
-                        let selection = selection.clone();
-                        this.dispatch_app(window, cx, move |app, window, cx| {
-                            app.open_file_manager_name_target(id, selection, kind, window, cx)
-                        });
-                    })),
-            );
-        }
-        let selection = self.selection(pane);
-        items.push(
-            ZzClawMenuItem::action(t!("fileExplorer.delete"))
-                .danger()
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    let id = this.id.clone();
-                    let selection = selection.clone();
-                    this.dispatch_app(window, cx, move |app, window, cx| {
-                        app.confirm_file_manager_delete_selection(id, selection, window, cx)
-                    });
-                })),
-        );
-        for (mode, label) in [
-            (FileOpenMode::Default, t!("fileExplorer.cmOpen")),
-            (FileOpenMode::Preview, t!("fileManager.viewFile")),
-            (FileOpenMode::Edit, t!("fileManager.editFile")),
-        ] {
-            let entry = entry.clone();
-            let endpoint = self.pane(pane).endpoint.clone();
-            items.push(ZzClawMenuItem::action(label).on_click(cx.listener(
-                move |this, _, window, cx| {
-                    if entry.is_directory() {
-                        this.navigate_to(pane, entry.remote_path(), window, cx);
-                    } else {
-                        let entry = entry.clone();
-                        let endpoint = endpoint.clone();
-                        this.dispatch_app(window, cx, move |app, window, cx| {
-                            app.open_file_for_endpoint(endpoint, entry, mode, window, cx)
-                        });
-                    }
-                },
-            )));
-        }
-        items
     }
 }

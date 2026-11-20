@@ -258,7 +258,7 @@ impl ZzClawTermApp {
         self.terminal
             .view
             .frame_pipeline
-            .note_command_input(session_id.to_owned(), None);
+            .reset_command_navigation(session_id.to_owned());
         self.terminal.view.frame_pipeline.arm_event_wakes();
     }
 
@@ -772,6 +772,9 @@ impl ZzClawTermApp {
     }
 
     fn mark_terminal_user_scroll_activity(&mut self, session_id: &str, cx: &mut Context<Self>) {
+        if self.session.active_id() == Some(session_id) {
+            self.terminal.search.initial_anchor = None;
+        }
         if session_id.is_empty() {
             return;
         }

@@ -250,6 +250,7 @@ impl ZzClawTermApp {
             request_id.clone(),
             PendingSessionStart {
                 preparing: false,
+                offer_serial_reconnect_selection: false,
                 mcp_open_operation_id,
                 requested_ssh_runtime_mode,
                 attempt: Default::default(),
@@ -1185,6 +1186,9 @@ impl ZzClawTermApp {
                 let mcp_failure_id = pending
                     .as_ref()
                     .and_then(|p| p.mcp_open_operation_id.clone());
+                let offer_serial_selection = pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.offer_serial_reconnect_selection);
                 let reconnect_failure = self.session.start.record_failure(
                     request_id.clone(),
                     pending,
@@ -1192,6 +1196,12 @@ impl ZzClawTermApp {
                     was_active_pending,
                     reconnect_session_exists,
                 );
+                if offer_serial_selection
+                    && reconnect_session_exists
+                    && let Some(session_id) = reconnect_session_id
+                {
+                    self.offer_serial_reconnect_selection(session_id, cx);
+                }
                 if let Some(id) = mcp_failure_id.as_deref() {
                     self.complete_mcp_session_open_failure(id, &error);
                 }
@@ -1250,14 +1260,23 @@ impl ZzClawTermApp {
             } else {
                 "terminal history could not be transferred".to_string()
             };
+            let serial_config = self
+                .session
+                .metadata(new_id)
+                .and_then(|metadata| match &metadata.launch_config {
+                    SessionLaunchConfig::Serial(config) => Some(config.clone()),
+                    _ => None,
+                });
             let _ = self.session.manager().close(new_id);
             if self.session.has_session(new_id) {
                 self.remove_session_state(new_id, cx);
             }
             if self.session.has_session(old_id) {
-                self.session
-                    .start
-                    .set_reconnect_failure(old_id.to_string(), error.clone());
+                self.session.start.set_reconnect_failure(
+                    old_id.to_string(),
+                    error.clone(),
+                    serial_config,
+                );
             }
             if let Some(id) = completion.mcp_open_operation_id.as_deref() {
                 self.complete_mcp_session_open_failure(id, &error);
@@ -1289,6 +1308,13 @@ impl ZzClawTermApp {
             self.load_transfer_browser_for_active_session_if_needed(cx);
         }
         self.enter_connect_settle();
+        // An optional wake belongs to the accepted reconnect, never a first
+        // connect or a replacement whose history handoff failed.
+        if completion.kind == SessionKind::Serial
+            && self.settings.summary().terminal_serial_reconnect_send_enter
+        {
+            self.schedule_serial_reconnect_enter(new_id.to_string(), cx);
+        }
         self.terminal.enter_session_render_degraded(new_id);
         self.shell
             .set_status(if completion.kind == SessionKind::AdbShell {
